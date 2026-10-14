@@ -1,18 +1,20 @@
 <template>
   <div class="yt-page">
     <div class="yt-page-head">
-      <span class="yt-page-title">MCP 服务器</span>
-      <span class="yt-page-sub">stdio 子进程 · 保存写回 config.toml，重启 yuantuan 后生效</span>
-      <span class="spacer" />
-      <n-button size="tiny" secondary @click="load">刷新</n-button>
-      <n-button size="tiny" type="primary" @click="openAdd">+ 新增 server</n-button>
-      <n-button size="tiny" type="primary" :disabled="!dirtyFlag" @click="saveAll" secondary v-if="dirtyFlag">
-        保存全部 ●
-      </n-button>
+      <div class="yt-page-head-left">
+        <span class="yt-page-title">MCP 服务</span>
+        <span class="yt-page-sub mono">{{ servers.length }} 个服务</span>
+      </div>
+      <n-space align="center" :size="10">
+        <span v-if="saveNotice" :class="['save-msg', saveOk ? 'ok' : 'fail']">{{ saveNotice }}</span>
+        <n-button size="small" secondary @click="load">刷新</n-button>
+        <n-button size="small" secondary @click="openAdd">新增服务</n-button>
+        <n-button size="small" type="primary" :disabled="!dirtyFlag" @click="saveAll">保存配置</n-button>
+      </n-space>
     </div>
 
-    <n-alert v-if="dirtyFlag" type="warning" :bordered="false" style="margin-bottom: 14px">
-      配置已修改未保存。点右上「保存全部」写回 config.toml；重启 yuantuan 才 spawn / 关停。
+    <n-alert v-if="dirtyFlag" type="warning" :bordered="false">
+      MCP 配置存在未保存修改，点击右上角「保存配置」写入配置文件，重启服务后生效。
     </n-alert>
 
     <div v-if="servers.length" class="cap-grid">
@@ -26,56 +28,47 @@
       />
     </div>
     <n-card v-else size="small">
-      <empty-state title="没有 MCP server"
-                   hint="点右上「+ 新增 server」加一个；推荐 @modelcontextprotocol/server-filesystem 或 uvx mcp-server-fetch" />
+      <empty-state title="暂未配置 MCP 服务" />
     </n-card>
 
-    <!-- 新增/编辑 弹窗 -->
-    <n-modal v-model:show="showEdit" preset="card" :title="editForm.isNew ? '新增 MCP server' : `编辑 ${editForm.name}`" style="max-width: 560px">
+    <n-modal v-model:show="showEdit" preset="card" :title="editForm.isNew ? '新增 MCP 服务' : `配置 ${editForm.name}`" style="max-width: 560px">
       <div class="form">
         <div class="form-row">
-          <span class="k">name (snake_case)</span>
-          <n-input size="small" v-model:value="editForm.name" :disabled="!editForm.isNew" placeholder="fs / web / docs" />
+          <span class="k">服务标识</span>
+          <n-input size="small" v-model:value="editForm.name" :disabled="!editForm.isNew" placeholder="如 filesystem 或 fetch" />
         </div>
         <div class="form-row">
-          <span class="k">command</span>
-          <n-input size="small" v-model:value="editForm.command" placeholder="npx / uvx / 绝对路径" />
+          <span class="k">启动命令</span>
+          <n-input size="small" v-model:value="editForm.command" placeholder="如 npx 或 uvx" />
         </div>
         <div class="form-row">
-          <span class="k">args（空格分隔）</span>
-          <n-input size="small" v-model:value="editForm.argsText" placeholder="-y @modelcontextprotocol/server-filesystem /data" />
+          <span class="k">命令参数</span>
+          <n-input size="small" v-model:value="editForm.argsText" placeholder="空格分隔参数" />
         </div>
         <div class="form-row">
-          <span class="k">env（KEY=VAL 每行一条）</span>
+          <span class="k">环境变量</span>
           <n-input size="small" type="textarea" :autosize="{ minRows: 2, maxRows: 5 }"
-                   v-model:value="editForm.envText" placeholder="API_KEY=xxx" />
+                   v-model:value="editForm.envText" placeholder="每行一条 KEY=VALUE" />
         </div>
         <div class="form-row">
-          <span class="k">启用</span>
+          <span class="k">启用状态</span>
           <n-switch v-model:value="editForm.enabled" size="small" />
         </div>
       </div>
+
       <template #footer>
         <div style="display: flex; gap: 8px; justify-content: space-between; width: 100%">
-          <n-button v-if="!editForm.isNew" size="small" type="error" secondary @click="onDelete">删除</n-button>
+          <n-button v-if="!editForm.isNew" size="small" type="error" quaternary @click="onDelete">删除服务</n-button>
           <span v-else />
           <div style="display: flex; gap: 8px">
             <n-button size="small" @click="showEdit = false">取消</n-button>
             <n-button size="small" type="primary" :disabled="!formValid" @click="onSubmit">
-              {{ editForm.isNew ? '添加' : '保存修改' }}
+              {{ editForm.isNew ? '添加' : '确认修改' }}
             </n-button>
           </div>
         </div>
       </template>
     </n-modal>
-
-    <n-card size="small" style="margin-top: 16px">
-      <div class="hint">
-        常用：filesystem = <code>npx -y @modelcontextprotocol/server-filesystem /path/to/share</code>；
-        fetch = <code>uvx mcp-server-fetch</code>；更多见
-        <a href="https://github.com/modelcontextprotocol/servers" target="_blank" rel="noreferrer">官方 server 列表</a>
-      </div>
-    </n-card>
   </div>
 </template>
 
@@ -87,6 +80,8 @@ import McpServerCard from '../components/McpServerCard.vue'
 
 const servers = ref([])
 const dirtyFlag = ref(false)
+const saveNotice = ref('')
+const saveOk = ref(true)
 
 const showEdit = ref(false)
 const editForm = ref(emptyForm())
@@ -98,7 +93,10 @@ function emptyForm() {
 
 const formValid = computed(() => editForm.value.name.trim() && editForm.value.command.trim())
 
-function markDirty() { dirtyFlag.value = true }
+function markDirty() {
+  dirtyFlag.value = true
+  saveNotice.value = ''
+}
 
 async function load() {
   const { data } = await api.get('/mcp/list')
@@ -111,6 +109,7 @@ function openAdd() {
   editingIndex.value = -1
   showEdit.value = true
 }
+
 function openEdit(s) {
   const idx = servers.value.findIndex(x => x.name === s.name)
   if (idx < 0) return
@@ -151,6 +150,7 @@ function onSubmit() {
   if (f.isNew) servers.value.push(next)
   else servers.value.splice(editingIndex.value, 1, next)
   dirtyFlag.value = true
+  saveNotice.value = ''
   showEdit.value = false
 }
 
@@ -158,11 +158,13 @@ function onDelete() {
   if (editingIndex.value >= 0) {
     servers.value.splice(editingIndex.value, 1)
     dirtyFlag.value = true
+    saveNotice.value = ''
   }
   showEdit.value = false
 }
 
 async function saveAll() {
+  saveNotice.value = ''
   try {
     const body = servers.value.map(s => ({
       name: s.name,
@@ -174,11 +176,12 @@ async function saveAll() {
     const { data } = await api.post('/mcp/save', { servers: body })
     if (data.ok) {
       dirtyFlag.value = false
-      window?.alert?.('已保存；重启 yuantuan 后 MCP server 才会 spawn / 关停')
+      saveOk.value = true
+      saveNotice.value = '已保存（重启服务后生效）'
     }
   } catch (e) {
-    console.error('save 失败', e)
-    window?.alert?.('保存失败：' + (e?.response?.data?.error || e.message))
+    saveOk.value = false
+    saveNotice.value = e?.response?.data?.error || e.message || '保存失败'
   }
 }
 
@@ -189,14 +192,16 @@ onMounted(load)
 .form { display: flex; flex-direction: column; gap: 12px; }
 .form-row { display: flex; align-items: center; gap: 12px; }
 .form-row .k {
-  flex: none; width: 180px;
-  font-size: 12px; color: var(--yt-ink-3);
+  flex: none;
+  width: 90px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--yt-ink-2);
 }
-.hint { font-size: 12px; color: var(--yt-ink-3); line-height: 1.7; }
-.hint code {
-  background: var(--yt-active-bg);
-  padding: 1px 6px;
-  border-radius: 4px;
-  font-size: 11.5px;
+.save-msg {
+  font-size: 12.5px;
+  font-weight: 500;
 }
+.save-msg.ok { color: var(--yt-ok); }
+.save-msg.fail { color: var(--yt-danger); }
 </style>

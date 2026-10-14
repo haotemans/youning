@@ -20,9 +20,11 @@
       </div>
       <div class="cap-card-tags">
         <span v-if="server.running && (server.tools || []).length" class="chip tool">
-          🔧 {{ server.tools.length }} tool
+          Tools {{ server.tools.length }}
         </span>
-        <span v-if="(server.env_keys || []).length" class="chip">🔐 {{ server.env_keys.length }} env</span>
+        <span v-if="(server.env_keys || []).length" class="chip">
+          Env {{ server.env_keys.length }}
+        </span>
       </div>
     </div>
 
@@ -33,7 +35,7 @@
         @update:value="(v) => $emit('toggle', server, v)"
       />
       <span class="spacer" />
-      <span class="cap-card-open" @click="$emit('open', server)">打开</span>
+      <span class="cap-card-open" @click="$emit('open', server)">配置</span>
     </div>
   </div>
 </template>

@@ -1,124 +1,82 @@
 <template>
   <div class="yt-page">
     <div class="yt-page-head">
-      <span class="yt-page-title">模型</span>
-      <span class="yt-page-sub">OpenAI 兼容端点 · 三角色独立绑定 · 保存即热重建</span>
-      <span class="spacer" />
-      <n-button size="tiny" secondary @click="load">刷新</n-button>
-    </div>
-
-    <!-- ============ 三角色概览（最优先看到） ============ -->
-    <div class="role-summary">
-      <div v-for="r in roleNames" :key="r" class="role-summary-card" :class="{ bound: roles[r].provider }">
-        <div class="role-summary-icon">
-          <yt-icon :name="roleIcons[r]" :size="18" />
-        </div>
-        <div class="role-summary-text">
-          <div class="role-summary-name">{{ r }}</div>
-          <div class="role-summary-desc">{{ roleDescs[r] }}</div>
-          <div class="role-summary-target mono" v-if="roles[r].provider">
-            {{ roles[r].provider }}<span class="dim"> / </span>{{ roles[r].model || '—' }}
-          </div>
-          <div class="role-summary-target unbound" v-else>未绑定</div>
-        </div>
-        <div class="role-summary-test">
-          <template v-if="tests[r].state === 'loading'">
-            <n-spin size="small" />
-          </template>
-          <template v-else-if="tests[r].state === 'ok'">
-            <span class="test-pill ok mono" :title="tests[r].model">{{ tests[r].latency }}ms</span>
-          </template>
-          <template v-else-if="tests[r].state === 'fail'">
-            <span class="test-pill fail" :title="tests[r].error">fail</span>
-          </template>
-        </div>
+      <div class="yt-page-head-left">
+        <span class="yt-page-title">模型服务</span>
+        <span class="yt-page-sub mono">{{ providerList.length }} 个服务商</span>
       </div>
+      <n-space :size="10">
+        <span v-if="msg" :class="['save-msg', ok ? 'ok' : 'fail']">{{ msg }}</span>
+        <n-button size="small" secondary @click="load">刷新</n-button>
+        <n-button size="small" type="primary" :loading="saving" @click="save">保存配置</n-button>
+      </n-space>
     </div>
 
-    <!-- ============ 角色绑定（详细配置） ============ -->
-    <n-card size="small" style="margin-top: 14px">
-      <template #header>
-        <div class="sec-head">
-          <span class="sec-title">角色绑定</span>
-          <span class="sec-sub">三角色相互独立，允许绑同一家 provider</span>
-        </div>
-      </template>
-      <n-grid cols="1 m:3" :x-gap="12" :y-gap="12" responsive="screen">
+    <n-card title="角色模型路由" size="small">
+      <n-grid cols="1 m:3" :x-gap="16" :y-gap="16" responsive="screen">
         <n-gi v-for="r in roleNames" :key="r">
-          <div class="role-bind-card">
-            <div class="role-bind-head">
-              <yt-icon :name="roleIcons[r]" :size="16" />
-              <span class="role-bind-name">{{ r }}</span>
-              <n-tag size="tiny" round :type="roles[r].provider ? 'success' : 'default'">
+          <div class="role-card" :class="{ bound: roles[r].provider }">
+            <div class="role-head">
+              <div class="role-icon">
+                <yt-icon :name="roleIcons[r]" :size="16" />
+              </div>
+              <div class="role-meta">
+                <span class="role-name mono">{{ r }}</span>
+                <span class="role-label">{{ roleLabels[r] }}</span>
+              </div>
+              <n-tag size="tiny" :bordered="false" :type="roles[r].provider ? 'success' : 'default'">
                 {{ roles[r].provider ? '已绑定' : '未绑定' }}
               </n-tag>
             </div>
-            <n-space vertical :size="10" style="width: 100%">
-              <div>
-                <label class="field-label">Provider</label>
+
+            <div class="role-fields">
+              <div class="field-item">
+                <label class="field-label">服务商</label>
                 <n-select v-model:value="roles[r].provider" :options="providerOptions" size="small"
-                          placeholder="选择 provider" clearable />
+                          placeholder="选择 Provider" clearable />
               </div>
-              <div>
-                <label class="field-label">Model</label>
+              <div class="field-item">
+                <label class="field-label">模型 ID</label>
                 <n-input v-model:value="roles[r].model" size="small" placeholder="如 gpt-4o-mini / deepseek-chat" />
               </div>
-              <div class="test-row">
-                <n-button size="tiny" secondary :loading="tests[r].state === 'loading'"
-                          :disabled="!roles[r].provider" @click="testRole(r)">
-                  测试连通
-                </n-button>
-                <transition name="yt-field" mode="out-in">
-                  <span v-if="tests[r].state === 'ok'" key="ok" class="test-ok mono">
-                    ✓ {{ tests[r].latency }}ms · {{ tests[r].model }}
-                  </span>
-                  <span v-else-if="tests[r].state === 'fail'" key="fail" class="test-fail" :title="tests[r].error">
-                    ✗ {{ tests[r].error }}
-                  </span>
-                </transition>
-              </div>
-            </n-space>
+            </div>
+
+            <div class="role-foot">
+              <n-button size="tiny" secondary :loading="tests[r].state === 'loading'"
+                        :disabled="!roles[r].provider" @click="testRole(r)">
+                连通测试
+              </n-button>
+              <span v-if="tests[r].state === 'ok'" class="test-badge ok mono">
+                {{ tests[r].latency }}ms
+              </span>
+              <span v-else-if="tests[r].state === 'fail'" class="test-badge fail" :title="tests[r].error">
+                {{ tests[r].error || '连接失败' }}
+              </span>
+            </div>
           </div>
         </n-gi>
       </n-grid>
-
-      <div class="save-bar">
-        <transition name="yt-field" mode="out-in">
-          <span v-if="msg" :class="['save-msg', ok ? 'ok' : 'fail']" :key="msg">{{ msg }}</span>
-        </transition>
-        <n-button type="primary" size="medium" :loading="saving" @click="save">
-          保存模型配置并热重建
-        </n-button>
-      </div>
     </n-card>
 
-    <!-- ============ Provider 列表 ============ -->
-    <n-card size="small" style="margin-top: 14px">
-      <template #header>
-        <div class="sec-head">
-          <span class="sec-title">Providers</span>
-          <span class="sec-sub">{{ Object.keys(providers).length }} 个端点 · OpenAI 兼容</span>
-        </div>
-      </template>
+    <n-card title="服务端点 (Providers)" size="small">
       <template #header-extra>
         <div class="header-actions">
-          <n-input v-model:value="newName" size="small" placeholder="新 provider 名（必填）"
+          <n-input v-model:value="newName" size="small" placeholder="输入新服务商标识"
                    :status="newNameError ? 'error' : undefined"
-                   style="width: 200px" @keyup.enter="addProvider" />
-          <n-button size="small" type="primary" secondary @click="addProvider">
-            + 添加 Provider
-          </n-button>
+                   style="width: 190px" @keyup.enter="addProvider" />
+          <n-button size="small" type="primary" secondary @click="addProvider">新增服务商</n-button>
         </div>
       </template>
+
       <n-alert v-if="newNameError" type="warning" :bordered="false" size="small" style="margin-bottom: 12px">
         {{ newNameError }}
       </n-alert>
+
       <div v-if="providerList.length" class="provider-list">
         <provider-card v-for="item in providerList" :key="item.name" :name="item.name" :p="item.p"
                        :usage="providerUsage(item.name)" @delete="delProvider(item.name)" />
       </div>
-      <empty-state v-else title="还没有 Provider"
-                   hint="添加 OpenAI 兼容端点(base_url + 密钥);密钥可直接粘 sk- 或填环境变量名" />
+      <empty-state v-else title="尚未添加模型服务商" />
     </n-card>
   </div>
 </template>
@@ -140,10 +98,10 @@ const roles = ref({
 })
 const roleNames = ['decision', 'bot_chat', 'agent_exec']
 const roleIcons = { decision: 'trace', bot_chat: 'chat', agent_exec: 'tasks' }
-const roleDescs = {
-  decision: '决策小脑 · 便宜快速',
-  bot_chat: '人格回复 · 中高档',
-  agent_exec: '任务执行 · 强模型',
+const roleLabels = {
+  decision: '发言决策',
+  bot_chat: '人格对话',
+  agent_exec: '任务执行',
 }
 const newName = ref('')
 const saving = ref(false)
@@ -159,7 +117,6 @@ const tests = ref({
 const providerOptions = computed(() => Object.keys(providers.value).map((n) => ({ label: n, value: n })))
 const providerList = computed(() => Object.entries(providers.value).map(([name, p]) => ({ name, p })))
 
-// 每个 provider 被哪些角色使用（卡片角标显示）
 function providerUsage(name) {
   return roleNames.filter((r) => roles.value[r].provider === name)
 }
@@ -168,7 +125,6 @@ async function load() {
   try {
     const { data } = await api.get('/config')
     const ps = data.providers?.provider || {}
-    // 保留已输入但未保存的字段（避免刷新丢草稿）；刷新只补新发现的 provider
     /** @type {Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>} */
     const next = {}
     for (const [name, p] of Object.entries(ps)) {
@@ -187,7 +143,7 @@ async function load() {
     for (const r of roleNames) {
       if (rs[r]) roles.value[r] = { provider: rs[r].provider, model: rs[r].model }
     }
-  } catch { /* 401 拦截器兜底 */ }
+  } catch { /* ignore */ }
 }
 
 onMounted(load)
@@ -212,20 +168,20 @@ const newNameError = ref('')
 function addProvider() {
   const n = newName.value.trim()
   if (!n) {
-    newNameError.value = '⚠️ 先在输入框填一个名字，比如 openai / deepseek'
+    newNameError.value = '请先输入服务商标识名称（如 openai 或 deepseek）'
     return
   }
   if (providers.value[n]) {
-    newNameError.value = `⚠️ "${n}" 已存在；列表里找它点「编辑」`
+    newNameError.value = `服务商 "${n}" 已存在`
     return
   }
   newNameError.value = ''
   providers.value[n] = { base_url: '', modelsText: '', api_key_env: '', api_key_present: false, protocol: 'openai_chat' }
   newName.value = ''
 }
+
 function delProvider(n) {
   delete providers.value[n]
-  // 同步解绑使用它的角色
   for (const r of roleNames) {
     if (roles.value[r].provider === n) roles.value[r].provider = null
   }
@@ -249,7 +205,7 @@ async function save() {
     }
     const { data } = await api.post('/config', { providers: { provider, roles: rolesOut } })
     ok.value = true
-    msg.value = `已保存（${(data.applied || []).join('、') || '无变更'}）`
+    msg.value = `已保存（${(data.applied || []).join('、') || '已同步'}）`
   } catch (e) {
     ok.value = false
     msg.value = e.response?.data?.error || '保存失败'
@@ -260,153 +216,102 @@ async function save() {
 </script>
 
 <style scoped>
-/* ===== 三角色概览条 ===== */
-.role-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 12px;
+.role-card {
+  border: 1px solid var(--yt-card-border);
+  border-radius: 10px;
+  padding: 16px;
+  background: var(--yt-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  transition: border-color 0.15s ease;
 }
-.role-summary-card {
+.role-card.bound {
+  background: var(--yt-surface);
+  border-color: var(--yt-card-border-hover);
+}
+.role-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--yt-card-border);
-  background: var(--yt-header-bg);
-  backdrop-filter: blur(6px);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  gap: 10px;
 }
-.role-summary-card:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--yt-card-shadow);
-}
-.role-summary-card.bound {
-  border-color: rgba(79, 70, 229, 0.25);
-  background: linear-gradient(135deg, var(--yt-header-bg), var(--yt-soft-bg));
-}
-.role-summary-icon {
-  width: 36px;
-  height: 36px;
-  flex: none;
-  border-radius: 10px;
+.role-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--yt-primary);
   background: var(--yt-active-bg);
+  color: var(--yt-primary);
+  flex: none;
 }
-.role-summary-text { flex: 1; min-width: 0; }
-.role-summary-name {
-  font-weight: 700;
+.role-meta {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.role-name {
   font-size: 13.5px;
-  font-family: var(--yt-mono);
+  font-weight: 600;
   color: var(--yt-ink-1);
 }
-.role-summary-desc {
-  font-size: 11.5px;
-  color: var(--yt-ink-3);
-  margin-top: 1px;
-}
-.role-summary-target {
+.role-label {
   font-size: 12px;
-  margin-top: 4px;
+  color: var(--yt-ink-3);
+}
+.role-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
   color: var(--yt-ink-2);
+  margin-bottom: 4px;
+}
+.role-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--yt-card-border);
+}
+.test-badge {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 6px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.role-summary-target .dim { color: var(--yt-ink-3); }
-.role-summary-target.unbound { color: var(--yt-ink-3); font-style: italic; }
-.role-summary-test { flex: none; }
-.test-pill {
-  display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 600;
+.test-badge.ok {
+  background: var(--yt-ok-soft);
+  color: var(--yt-ok);
 }
-.test-pill.ok { background: rgba(22, 163, 74, 0.12); color: var(--yt-ok); }
-.test-pill.fail { background: rgba(220, 38, 38, 0.12); color: var(--yt-danger); }
-
-/* ===== 通用 section head ===== */
-.sec-head { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-.sec-title { font-weight: 700; font-size: 14px; color: var(--yt-ink-1); white-space: nowrap; flex: none; }
-.sec-sub { font-size: 12px; color: var(--yt-ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-@media (max-width: 1100px) {
-  .sec-sub { display: none; }
+.test-badge.fail {
+  background: var(--yt-danger-soft);
+  color: var(--yt-danger);
 }
-
-/* ===== 角色绑定卡片 ===== */
-.role-bind-card {
-  border: 1px solid var(--yt-card-border);
-  border-radius: 12px;
-  padding: 14px;
-  background: var(--yt-soft-bg);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+.save-msg {
+  font-size: 12.5px;
+  font-weight: 500;
 }
-.role-bind-card:hover {
-  border-color: rgba(79, 70, 229, 0.35);
-  box-shadow: var(--yt-card-shadow);
-}
-.role-bind-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  color: var(--yt-primary);
-}
-.role-bind-name {
-  font-weight: 700;
-  font-family: var(--yt-mono);
-  font-size: 13px;
-  color: var(--yt-ink-1);
-  flex: 1;
-}
-.field-label {
-  display: block;
-  font-size: 11.5px;
-  color: var(--yt-ink-3);
-  margin-bottom: 4px;
-}
-.test-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 26px;
-}
-.test-ok { font-size: 12px; color: var(--yt-ok); }
-.test-fail { font-size: 12px; color: var(--yt-danger); }
-
-/* ===== 保存条 ===== */
-.save-bar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 16px;
-  padding-top: 14px;
-  border-top: 1px dashed var(--yt-card-border);
-}
-.save-msg { font-size: 12.5px; }
 .save-msg.ok { color: var(--yt-ok); }
 .save-msg.fail { color: var(--yt-danger); }
-
-/* ===== Provider 列表 ===== */
 .provider-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 .header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-.inline-error {
-  color: var(--yt-danger);
-  font-size: 12px;
-  margin-top: 4px;
-  white-space: nowrap;
 }
 </style>

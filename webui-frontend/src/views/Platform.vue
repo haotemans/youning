@@ -1,143 +1,90 @@
 <template>
   <div class="yt-page">
     <div class="yt-page-head">
-      <span class="yt-page-title">平台连接</span>
-      <span class="yt-page-sub">NapCat OneBot 11 反向 WS</span>
-      <span class="spacer" />
-      <span
-        class="live-pill"
-        :class="{ on: d.adapter_connected }"
-        :title="d.adapter_connected ? 'NapCat 已拨入' : '等待 NapCat 拨入'"
-      >
-        <span class="live-dot" />{{ d.adapter_connected ? 'LIVE' : '离线' }}
-      </span>
-      <n-button size="tiny" secondary @click="reload">刷新</n-button>
+      <div class="yt-page-head-left">
+        <span class="yt-page-title">平台接入</span>
+        <span class="yt-page-sub mono">OneBot 11</span>
+      </div>
+      <n-space align="center" :size="10">
+        <n-tag size="small" :type="d.adapter_connected ? 'success' : 'default'" :bordered="false">
+          {{ d.adapter_connected ? '已连接' : '离线' }}
+        </n-tag>
+        <n-button size="small" secondary @click="reload">刷新</n-button>
+      </n-space>
     </div>
 
-    <!-- 状态卡 -->
-    <n-grid cols="1 s:2 l:4" :x-gap="14" :y-gap="14" responsive="screen">
+    <n-grid cols="1 s:2 l:4" :x-gap="16" :y-gap="16" responsive="screen">
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
             <span class="stat-chip" :style="{ background: d.adapter_connected ? 'var(--yt-ok)' : 'var(--yt-danger)' }" />
-            连接状态
+            通道状态
           </div>
           <div class="stat-foot">
-            <span class="stat-num" :style="{ color: d.adapter_connected ? 'var(--yt-ok)' : 'var(--yt-danger)' }">
-              {{ d.adapter_connected ? '已连接' : '未拨入' }}
+            <span class="stat-num" :style="{ color: d.adapter_connected ? 'var(--yt-ok)' : 'var(--yt-ink-1)' }">
+              {{ d.adapter_connected ? '在线' : '未连接' }}
             </span>
           </div>
-          <div class="stat-hint">{{ d.adapter_connected ? 'NapCat Websockets客户端 已拨入本端' : '等待 NapCat 卡片拨入或填写错 URL' }}</div>
         </n-card>
       </n-gi>
+
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
             <span class="stat-chip" style="background: var(--yt-primary)" />
-            登录身份
+            当前账号
           </div>
           <div class="stat-foot">
             <span class="stat-num mono">{{ d.self_qq || '—' }}</span>
           </div>
-          <div class="stat-hint">get_login_info 握手拿到的自身 QQ 号</div>
         </n-card>
       </n-gi>
+
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
-            <span class="stat-chip" style="background: var(--yt-primary)" />
-            监听地址
+            <span class="stat-chip" style="background: var(--yt-violet)" />
+            反向 WebSocket 端点
           </div>
           <div class="stat-foot">
-            <span class="stat-num mono" style="font-size: 18px">{{ form.listen_addr || '127.0.0.1:6199' }}</span>
+            <span class="stat-num mono" style="font-size: 16px">ws://{{ form.listen_addr || '127.0.0.1:6199' }}/ws</span>
           </div>
-          <div class="stat-hint">NapCat 需拨入 <code>ws://{{ form.listen_addr || '127.0.0.1:6199' }}/ws</code></div>
         </n-card>
       </n-gi>
+
       <n-gi>
         <n-card class="stat-card" size="small">
           <div class="stat-label">
             <span class="stat-chip" style="background: var(--yt-warning)" />
-            Token
+            鉴权 Token
           </div>
           <div class="stat-foot">
-            <span class="stat-num">{{ hasToken ? '已配置' : '未设置' }}</span>
+            <span class="stat-num">{{ hasToken ? '已设置' : '未设置' }}</span>
           </div>
-          <div class="stat-hint">鉴权 NapCat 拨入用；改动立即生效</div>
         </n-card>
       </n-gi>
     </n-grid>
 
-    <!-- 配置表单 -->
-    <n-card title="连接配置" size="small" style="margin-top: 14px">
-      <n-form label-placement="left" label-width="110" style="max-width: 620px">
-        <n-form-item label="启用">
+    <n-card title="NapCat 反向 WebSocket 配置" size="small">
+      <n-form label-placement="left" label-width="110" :show-feedback="false" class="clean-form" style="max-width: 560px">
+        <n-form-item label="启用接入">
           <n-switch v-model:value="form.enabled" />
-          <span class="form-hint">关闭后不再接受 NapCat 拨入</span>
         </n-form-item>
         <n-form-item label="监听地址">
           <n-input v-model:value="form.listen_addr" placeholder="127.0.0.1:6199" />
         </n-form-item>
-        <n-form-item label="Token">
+        <n-form-item label="连接 Token">
           <n-input v-model:value="form.token" type="password" show-password-on="click"
-                   placeholder="不回读；留空 = 保留后端原值" />
+                   placeholder="留空则保持原 Token 不变" />
         </n-form-item>
       </n-form>
-      <n-space>
-        <n-button type="primary" :loading="saving" @click="save(false)">保存连接配置</n-button>
-        <n-button type="warning" :loading="saving || restarting" @click="save(true)">保存并重启</n-button>
-        <span v-if="msg" :style="{ color: ok ? 'var(--yt-ok)' : 'var(--yt-danger)', fontSize: '12px' }">{{ msg }}</span>
-      </n-space>
-    </n-card>
 
-    <!-- NapCat 卡片填法指导 -->
-    <n-card title="NapCat 侧配置" size="small" style="margin-top: 14px">
-      <div class="guide">
-        <div class="guide-step">
-          <span class="step-no">1</span>
-          <div>
-            <div class="step-title">打开 NapCat WebUI</div>
-            <div class="step-desc">
-              浏览器前往 <code class="mono">http://127.0.0.1:6099/webui</code>，登录后左侧选「网络配置」。
-            </div>
-          </div>
-        </div>
-        <div class="guide-step">
-          <span class="step-no">2</span>
-          <div>
-            <div class="step-title">新建 → Websockets客户端</div>
-            <div class="step-desc">
-              类型选「Websockets客户端」（不是服务器！）；名称随意；启用打开。
-            </div>
-          </div>
-        </div>
-        <div class="guide-step">
-          <span class="step-no">3</span>
-          <div>
-            <div class="step-title">填 URL 与 Token</div>
-            <div class="step-desc">
-              URL 填 <code class="mono">ws://{{ form.listen_addr || '127.0.0.1:6199' }}/ws</code>（注意结尾 <code>/ws</code>）。
-              Token 与本页 Token 字段填<strong>同一个值</strong>。
-            </div>
-          </div>
-        </div>
-        <div class="guide-step">
-          <span class="step-no">4</span>
-          <div>
-            <div class="step-title">保存即可</div>
-            <div class="step-desc">
-              NapCat 卡片的 Websockets客户端是出站连接，保存即生效无需重启 QQ 主进程。
-              本页顶部 LIVE 灯变绿即握手成功。
-            </div>
-          </div>
-        </div>
+      <div class="form-actions">
+        <n-button type="primary" size="small" :loading="saving" @click="save(false)">保存配置</n-button>
+        <n-button type="warning" size="small" secondary :loading="saving || restarting" @click="save(true)">保存并重启服务</n-button>
+        <span v-if="msg" :class="['save-msg', ok ? 'ok' : 'fail']">{{ msg }}</span>
       </div>
     </n-card>
-
-    <n-alert type="info" style="margin-top: 14px">
-      Token 改动<strong>立即生效</strong>（下次 NapCat 拨入即用新值）。
-      监听地址改动需<strong>重启</strong>：点「保存并重启」面板触发后端重启（约 3 秒自动刷新），无需手动 taskkill。
-    </n-alert>
   </div>
 </template>
 
@@ -175,7 +122,6 @@ async function loadConfig() {
     token: '',
   }
   hasToken.value = !!(n.token && n.token !== '')
-  // 不删 token 字段：保留掩码 "***" 给后端 unmask 还原（用户填新值时会被替换）
 }
 
 async function reload() {
@@ -191,7 +137,6 @@ async function save(andRestart = false) {
     newNapcat.listen_addr = form.value.listen_addr
     delete newNapcat.ws_url
     if (form.value.token) newNapcat.token = form.value.token
-    // 用户留空 = 保留 newNapcat.token 原值(掩码 "***",后端 unmask 还原真值)
     const config = { ...whole.value, napcat: newNapcat }
     const { data } = await api.post('/config', { config })
     whole.value = config
@@ -199,29 +144,28 @@ async function save(andRestart = false) {
     ok.value = true
     if (andRestart) {
       restarting.value = true
-      msg.value = '已保存,重启中…(页面会自动刷新)'
+      msg.value = '已保存，正在重启服务…'
       const reloadTimer = setTimeout(() => { window.location.reload() }, 3200)
       try {
         await api.post('/config/restart')
       } catch (err) {
-        // 容器内返回 409:改提示「宿主机 docker compose restart」并取消自动刷新
         if (err.response?.status === 409) {
           clearTimeout(reloadTimer)
           restarting.value = false
           ok.value = false
-          msg.value = err.response?.data?.error || '容器内请用 docker compose restart'
+          msg.value = err.response?.data?.error || '容器环境请使用 docker compose restart'
           saving.value = false
           return
         }
-        /* 其他场景:重启后旧连接断开请求失败属预期 */
       }
       return
     }
     const restarts = (data.requires_restart || []).filter(r => r.includes('napcat'))
     const parts = []
-    if ((data.applied || []).some(a => a.includes('token'))) parts.push('token 已热应用')
-    if (restarts.length) parts.push('⚠️ listen_addr 改动需重启后端')
-    msg.value = `已保存${parts.length ? '：' + parts.join('，') : ''}`
+    if ((data.applied || []).some(a => a.includes('token'))) parts.push('Token 已生效')
+    if (restarts.length) parts.push('监听地址变更需重启服务')
+    msg.value = `已保存${parts.length ? '（' + parts.join('，') + '）' : ''}`
+    await loadConfig()
   } catch (e) {
     ok.value = false
     msg.value = e.response?.data?.error || '保存失败'
@@ -230,7 +174,6 @@ async function save(andRestart = false) {
   }
 }
 
-// WS 推送：adapter_connected 掉线/接上实时反映
 function onWsEvent(ev) {
   if (!ev || !ev.kind) return
   if (ev.kind === 'ConfigReloaded') loadConfig()
@@ -247,130 +190,23 @@ onUnmounted(() => { clearInterval(timer); off && off() })
 </script>
 
 <style scoped>
-.live-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.6px;
-  color: var(--yt-ink-3);
-  background: var(--yt-card-border);
-  transition: color 0.2s ease, background 0.2s ease;
-}
-.live-pill.on {
-  color: var(--yt-ok);
-  background: rgba(22, 163, 74, 0.12);
-}
-.live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  flex: none;
-}
-.live-pill.on .live-dot {
-  animation: yt-live-pulse 1.6s ease-in-out infinite;
-  box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.4);
-}
-@keyframes yt-live-pulse {
-  0%   { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.4); }
-  70%  { box-shadow: 0 0 0 6px rgba(22, 163, 74, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(22, 163, 74, 0); }
-}
-
-.stat-card { min-height: 108px; }
-.stat-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--yt-ink-3);
-  font-weight: 600;
-}
-.stat-chip {
-  width: 8px;
-  height: 8px;
-  border-radius: 2px;
-  flex: none;
-}
-.stat-foot {
-  margin-top: 8px;
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-.stat-num {
-  font-size: 22px;
-  font-weight: 700;
-  color: var(--yt-ink-1);
-  line-height: 1;
-}
-/* .mono, .stat-num 已由 styles.css 全局提供 */
-.stat-hint {
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: var(--yt-ink-3);
-  line-height: 1.4;
-}
-.stat-hint code {
-  background: var(--yt-code-bg);
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 11px;
-}
-.form-hint {
-  margin-left: 10px;
-  font-size: 12px;
-  color: var(--yt-ink-3);
-}
-
-.guide {
+.clean-form {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 4px 0;
-}
-.guide-step {
-  display: flex;
-  align-items: flex-start;
   gap: 12px;
 }
-.step-no {
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--yt-active-bg);
-  color: var(--yt-primary);
-  font-weight: 700;
-  font-size: 12px;
+.form-actions {
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex: none;
-  margin-top: 2px;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--yt-card-border);
 }
-.step-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--yt-ink-1);
+.save-msg {
+  font-size: 12.5px;
+  font-weight: 500;
 }
-.step-desc {
-  margin-top: 2px;
-  font-size: 12px;
-  color: var(--yt-ink-2);
-  line-height: 1.5;
-}
-.step-desc code {
-  background: var(--yt-code-bg);
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-size: 11px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .live-pill.on .live-dot { animation: none; }
-}
+.save-msg.ok { color: var(--yt-ok); }
+.save-msg.fail { color: var(--yt-danger); }
 </style>

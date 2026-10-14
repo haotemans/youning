@@ -1,9 +1,23 @@
+import fs from 'node:fs'
+import path from 'node:path'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
-// 构建产物直指 crates/webui/static（rust-embed 内嵌，产物入库以便无 node 的机器也能 cargo build；见根 README）
+// 构建前清理旧的 static/assets 哈希产物，同时保留 static/legacy-index.html 兜底页
+function cleanStaticAssets() {
+  return {
+    name: 'clean-static-assets',
+    buildStart() {
+      const assetsDir = path.resolve(process.cwd(), '../crates/webui/static/assets')
+      if (fs.existsSync(assetsDir)) {
+        fs.rmSync(assetsDir, { recursive: true, force: true })
+      }
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), cleanStaticAssets()],
   server: {
     port: 5173,
     proxy: {
@@ -14,7 +28,7 @@ export default defineConfig({
   },
   build: {
     outDir: '../crates/webui/static',
-    emptyOutDir: false, // 保留 static/legacy-index.html 兜底页
+    emptyOutDir: false,
     chunkSizeWarningLimit: 2500,
   },
 })

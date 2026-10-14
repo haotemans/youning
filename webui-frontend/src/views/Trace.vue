@@ -1,13 +1,23 @@
 <template>
-  <div>
-    <div class="yt-page-head"><span class="yt-page-title">决策追踪</span><span class="yt-page-sub">查看事件、模型建议与最终动作</span></div>
-    <div class="yt-toolbar">
-      <n-select v-model:value="kind" :options="kindOptions" clearable placeholder="选择事件类型" size="small" style="width: 200px" @update:value="reset" />
-      <n-input v-model:value="chat" placeholder="按会话 ID 筛选" size="small" style="width: 180px" @keyup.enter="reset" />
-      <n-button size="small" type="primary" secondary @click="reset">筛选事件</n-button>
-      <span class="spacer" />
-      <n-tag size="small" :type="wsConnected ? 'success' : 'error'" round>ws · {{ wsConnected ? '实时' : '断开' }}</n-tag>
+  <div class="yt-page">
+    <div class="yt-page-head">
+      <div class="yt-page-head-left">
+        <span class="yt-page-title">决策追踪</span>
+        <span class="yt-page-sub mono">{{ items.length }} 条记录</span>
+      </div>
+      <n-button size="small" secondary :loading="loading" @click="reset">刷新</n-button>
     </div>
+
+    <div class="yt-toolbar">
+      <n-select v-model:value="kind" :options="kindOptions" clearable placeholder="事件类型" size="small" style="width: 190px" @update:value="reset" />
+      <n-input v-model:value="chat" placeholder="会话 ID" size="small" style="width: 180px" @keyup.enter="reset" />
+      <n-button size="small" type="primary" secondary @click="reset">筛选</n-button>
+      <span class="spacer" />
+      <n-tag size="small" :type="wsConnected ? 'success' : 'default'" :bordered="false">
+        {{ wsConnected ? '实时流已连接' : '实时流已断开' }}
+      </n-tag>
+    </div>
+
     <div class="trace-workspace">
       <section class="trace-events">
         <div v-if="items.length" class="tl">
@@ -17,45 +27,54 @@
                  :style="e.kind === 'DecisionMade' ? { '--action-c': actionColor(e.payload?.action) } : {}">
               <div class="tl-head">
                 <span class="tl-badge" :style="badgeStyle(e.kind)">{{ e.kind }}</span>
-                <span v-if="e.kind === 'DecisionMade'" class="tl-badge"
+                <span v-if="e.kind === 'DecisionMade' && e.payload?.action" class="tl-badge"
                       :style="badgeStyleFor(e.payload?.action, actionColor(e.payload?.action))">
                   {{ e.payload?.action }}
                 </span>
                 <span class="tl-time">{{ fmtAgo(e.ts) }}</span>
               </div>
               <div class="tl-text">{{ eventSummary(e) }}</div>
-              <div v-if="e.payload?.chat_id" class="tl-chat">{{ e.payload.chat_id }}</div>
+              <div v-if="e.payload?.chat_id" class="tl-chat">Chat {{ e.payload.chat_id }}</div>
             </div>
           </div>
         </div>
-        <empty-state v-else title="没有匹配的事件" hint="试着放宽筛选条件，或在群里发一条消息触发一条事件" />
-        <n-button block size="small" secondary style="margin-top: 8px" :loading="loading" @click="loadMore">加载更早的事件</n-button>
+        <n-card v-else size="small">
+          <empty-state title="暂无匹配事件" />
+        </n-card>
+        <n-button v-if="items.length" block size="small" secondary style="margin-top: 10px" :loading="loading" @click="loadMore">
+          加载更早记录
+        </n-button>
       </section>
+
       <aside class="trace-detail">
         <template v-if="sel">
-          <n-space size="small" style="margin-bottom: 8px">
-            <n-tag size="small" round :color="badgeStyleObj(sel.kind)">{{ sel.kind }}</n-tag>
+          <div class="detail-header">
+            <n-tag size="small" :bordered="false" :color="badgeStyleObj(sel.kind)">{{ sel.kind }}</n-tag>
             <span v-if="sel.ts" class="tl-chat" style="margin-top: 0">{{ fmtTs(sel.ts) }}</span>
-          </n-space>
+          </div>
           <template v-if="sel.kind === 'DecisionMade'">
-            <n-space size="small" style="margin-bottom: 8px">
-              <n-tag size="small" round :color="actionTagColor(sel.payload.action)">action · {{ sel.payload.action }}</n-tag>
-              <n-tag size="small" round>mood · {{ sel.payload.mood }}</n-tag>
-              <n-tag v-if="sel.payload.fallback" size="small" round type="error">fallback</n-tag>
+            <n-space size="small" style="margin-bottom: 10px">
+              <n-tag size="small" :bordered="false" :color="actionTagColor(sel.payload.action)">{{ sel.payload.action }}</n-tag>
+              <n-tag v-if="sel.payload.mood" size="small" :bordered="false">{{ sel.payload.mood }}</n-tag>
+              <n-tag v-if="sel.payload.fallback" size="small" :bordered="false" type="error">Fallback</n-tag>
             </n-space>
-            <n-alert type="info" style="margin-bottom: 10px">reason · {{ sel.payload.reason }}</n-alert>
+            <n-alert v-if="sel.payload.reason" type="info" :bordered="false" style="margin-bottom: 10px">
+              {{ sel.payload.reason }}
+            </n-alert>
             <template v-if="sel.payload.policy">
-              <n-space size="small" style="margin-bottom: 8px">
-                <n-tag size="small">模型建议 · {{ sel.payload.policy.suggested_action }}</n-tag>
-                <n-tag size="small">回复方式 · {{ sel.payload.reply_mode }}</n-tag>
-                <n-tag v-if="sel.payload.policy.evidence_valid === false" size="small" type="warning">消息依据未通过</n-tag>
+              <n-space size="small" style="margin-bottom: 10px">
+                <n-tag size="small" :bordered="false">建议动作: {{ sel.payload.policy.suggested_action }}</n-tag>
+                <n-tag v-if="sel.payload.reply_mode" size="small" :bordered="false">模式: {{ sel.payload.reply_mode }}</n-tag>
+                <n-tag v-if="sel.payload.policy.evidence_valid === false" size="small" :bordered="false" type="warning">依据未通过</n-tag>
               </n-space>
-              <n-alert v-if="sel.payload.policy.notes?.length" type="warning" style="margin-bottom: 10px">{{ sel.payload.policy.notes.join('；') }}</n-alert>
+              <n-alert v-if="sel.payload.policy.notes?.length" type="warning" :bordered="false" style="margin-bottom: 10px">
+                {{ sel.payload.policy.notes.join('；') }}
+              </n-alert>
             </template>
           </template>
           <json-view :data="sel.payload" />
         </template>
-        <empty-state v-else title="未选中事件" hint="点击左侧任意一条事件，这里展示它的完整 payload 与语法高亮" />
+        <empty-state v-else title="选择左侧事件查看详情" />
       </aside>
     </div>
   </div>
@@ -82,20 +101,19 @@ const kindOptions = [
   'ConsolidationDone', 'MemoryWritten', 'MoodChanged', 'ConfigReloaded',
 ].map((k) => ({ label: k, value: k }))
 
-// kind 彩色徽标：主色 10% 底 + 主色字/边
 function badgeStyle(k) {
   return badgeStyleFor(k, kindColor(k))
 }
 function badgeStyleFor(_k, c) {
-  return { color: c, background: `color-mix(in srgb, ${c} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${c} 30%, transparent)` }
+  return { color: c, background: `color-mix(in srgb, ${c} 10%, transparent)`, border: `1px solid color-mix(in srgb, ${c} 24%, transparent)` }
 }
 function badgeStyleObj(k) {
   const c = kindColor(k)
-  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c, borderColor: `color-mix(in srgb, ${c} 30%, transparent)` }
+  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c }
 }
 function actionTagColor(a) {
   const c = actionColor(a)
-  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c, borderColor: `color-mix(in srgb, ${c} 30%, transparent)` }
+  return { color: `color-mix(in srgb, ${c} 10%, transparent)`, textColor: c }
 }
 
 async function fetchPage(beforeId) {
@@ -114,6 +132,7 @@ async function fetchPage(beforeId) {
 
 async function reset() {
   items.value = await fetchPage()
+  if (items.value.length && !sel.value) sel.value = items.value[0]
 }
 async function loadMore() {
   const oldest = items.value[items.value.length - 1]
@@ -135,10 +154,28 @@ onUnmounted(() => off && off())
 </script>
 
 <style scoped>
-.trace-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 20px; align-items: start; }
+.trace-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 440px;
+  gap: 16px;
+  align-items: start;
+}
 .trace-events { min-width: 0; }
-.trace-detail { min-width: 0; background: var(--yt-surface); border: 1px solid var(--yt-card-border); border-radius: 12px; padding: 20px; }
-.tl { max-height: calc(100vh - 255px); }
-.tl-head { flex-wrap: wrap; }
-@media (max-width: 1100px) { .trace-workspace { grid-template-columns: 1fr; } .tl { max-height: 420px; } }
+.trace-detail {
+  min-width: 0;
+  background: var(--yt-surface);
+  border: 1px solid var(--yt-card-border);
+  border-radius: 12px;
+  padding: 18px;
+  box-shadow: var(--yt-card-shadow);
+}
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+@media (max-width: 1080px) {
+  .trace-workspace { grid-template-columns: 1fr; }
+}
 </style>

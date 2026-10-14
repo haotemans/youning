@@ -16,5 +16,5 @@
     "verbatimModuleSyntax": false,
     "useDefineForClassFields": true
   },
-  "include": ["vite.config.js", "src/**/*.js", "src/**/*.vue"]
+  "include": ["src/**/*.js", "src/**/*.vue"]
 }

@@ -17,16 +17,16 @@
 
     <div class="cap-card-body">
       <div class="cap-card-desc">
-        {{ plugin.description || '无描述；点开查看 skills/tools。' }}
+        {{ plugin.description || '内置扩展插件' }}
       </div>
       <div class="cap-card-tags">
         <span v-if="(plugin.skills || []).length" class="chip skill">
-          ⚡ {{ plugin.skills.length }} skill
+          Skills {{ plugin.skills.length }}
         </span>
         <span v-if="(plugin.tools || []).length" class="chip tool">
-          🔧 {{ plugin.tools.length }} tool
+          Tools {{ plugin.tools.length }}
         </span>
-        <span v-if="plugin.data_dir" class="chip">📁 data</span>
+        <span v-if="plugin.data_dir" class="chip">Data</span>
       </div>
     </div>
 
@@ -37,13 +37,13 @@
         @update:value="(v) => $emit('toggle', plugin, v)"
       />
       <span class="spacer" />
-      <span class="cap-card-open" @click="$emit('open', plugin)">打开</span>
+      <span class="cap-card-open" @click="$emit('open', plugin)">详情</span>
     </div>
   </div>
 </template>
 
 <script setup>
-const props = defineProps({
+defineProps({
   plugin: { type: Object, required: true },
   dirty: { type: Boolean, default: false },
 })

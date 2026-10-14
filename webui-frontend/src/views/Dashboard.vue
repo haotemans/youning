@@ -1,40 +1,56 @@
 <template>
   <div class="yt-page">
     <div class="yt-page-head">
-      <span class="yt-page-title">仪表盘</span>
-      <span class="yt-page-sub">群聊活动与运行状态</span>
-      <span class="spacer" />
-      <span class="live-pill" :class="{ on: wsConnected }">{{ wsConnected ? '实时更新已连接' : '定时刷新中' }}</span>
-      <n-button size="small" secondary :loading="refreshing" @click="load">刷新数据</n-button>
+      <div class="yt-page-head-left">
+        <span class="yt-page-title">总览</span>
+        <span class="yt-page-sub mono" v-if="d.uptime_secs != null">运行 {{ fmtUptime(d.uptime_secs) }}</span>
+      </div>
+      <n-space align="center" :size="10">
+        <n-tag size="small" :type="d.adapter_connected ? 'success' : 'default'" :bordered="false">
+          {{ d.adapter_connected ? 'NapCat 已连接' : 'NapCat 未连接' }}
+        </n-tag>
+        <n-button size="small" secondary :loading="refreshing" @click="load">刷新</n-button>
+      </n-space>
     </div>
-    <n-alert v-if="loadError" type="warning" style="margin-bottom: 16px">{{ loadError }}</n-alert>
-    <div class="dashboard-status">
-      <span class="status-indicator" :class="{ connected: d.adapter_connected }" />
-      <div><strong>{{ d.adapter_connected == null ? '连接状态待确认' : d.adapter_connected ? 'QQ 适配器已连接' : 'QQ 适配器离线' }}</strong><span class="status-note">{{ d.adapter_connected ? '消息通道可用' : '请在平台连接页检查接入状态' }}</span></div>
-      <div class="status-meta">运行时长 <strong>{{ fmtUptime(d.uptime_secs) }}</strong></div>
-      <div class="status-meta">当前情绪 <strong>{{ d.mood ?? '—' }}</strong></div>
-      <router-link to="/platform">查看连接</router-link>
-    </div>
+
+    <n-alert v-if="loadError" type="warning" :bordered="false">{{ loadError }}</n-alert>
+
     <n-grid cols="1 s:2 l:4" :x-gap="16" :y-gap="16" responsive="screen">
       <n-gi v-for="s in statCards" :key="s.label">
         <n-card class="stat-card" size="small">
-          <div class="stat-label">{{ s.label }}</div>
-          <div class="stat-foot"><span class="stat-num"><CountUp v-if="s.value != null" :value="s.value" /><template v-else>—</template></span><Sparkline v-if="s.points.length > 1" :points="s.points" color="var(--yt-primary)" /></div>
-          <div class="stat-sub">{{ s.hint }}</div>
+          <div class="stat-label">
+            <span class="stat-chip" :style="{ background: s.color }" />
+            {{ s.label }}
+          </div>
+          <div class="stat-foot">
+            <span class="stat-num mono">
+              <CountUp v-if="s.value != null" :value="s.value" />
+              <template v-else>—</template>
+            </span>
+            <Sparkline v-if="s.points.length > 1" :points="s.points" :color="s.color" />
+          </div>
         </n-card>
       </n-gi>
     </n-grid>
+
     <div class="dashboard-columns">
       <div class="dashboard-main">
-        <n-card title="消息收发趋势" size="small">
-          <template #header-extra><span class="chart-legend"><span><i class="legend-in" />收到</span><span><i class="legend-out" />发送</span></span></template>
-          <p class="panel-note">按本地时间分小时统计，仅覆盖最近 500 条事件与本页收到的实时事件。</p>
-          <yt-skeleton v-if="loadingFirst" :height="210" />
+        <n-card title="24 小时消息分布" size="small">
+          <template #header-extra>
+            <span class="chart-legend">
+              <span><i class="legend-in" />收到</span>
+              <span><i class="legend-out" />发送</span>
+            </span>
+          </template>
+          <yt-skeleton v-if="loadingFirst" :height="190" />
           <HourBars v-else-if="hasHourData" :hours="hourSeries" />
-          <empty-state v-else title="暂无消息趋势" hint="收到消息后，这里会显示每小时的收发数量。" />
+          <empty-state v-else title="今日暂无消息记录" />
         </n-card>
-        <n-card title="最近事件" size="small">
-          <template #header-extra><router-link to="/trace">查看决策追踪</router-link></template>
+
+        <n-card title="实时事件流" size="small">
+          <template #header-extra>
+            <router-link to="/trace" class="card-link">全部记录</router-link>
+          </template>
           <yt-skeleton v-if="loadingFirst" :height="180" />
           <template v-else>
             <div v-if="recent.length">
@@ -45,22 +61,56 @@
                 <span class="mini-time">{{ fmtAgo(e.ts) }}</span>
               </div>
             </div>
-            <empty-state v-else title="暂无事件" hint="消息、决策与任务变化会按时间出现在这里。" />
+            <empty-state v-else title="暂无实时事件" />
           </template>
         </n-card>
       </div>
-      <n-card title="运行资源" class="resource-card" size="small">
-        <div class="resource-block"><div class="resource-label">CPU 使用率<n-tag size="small" :type="cpuType">{{ d.cpu_percent == null ? '待采集' : cpuType === 'error' ? '高负载' : cpuType === 'warning' ? '需关注' : '正常' }}</n-tag></div><div class="resource-value">{{ d.cpu_percent == null ? '—' : fmtCpu(d.cpu_percent) }}</div><div class="resource-meter" role="img" :aria-label="d.cpu_percent == null ? 'CPU 使用率待采集' : `CPU 使用率 ${fmtCpu(d.cpu_percent)}`"><span :style="{ width: `${Math.min(100, Math.max(0, d.cpu_percent ?? 0))}%`, background: cpuType === 'error' ? 'var(--yt-danger)' : cpuType === 'warning' ? 'var(--yt-warning)' : 'var(--yt-primary)' }" /></div></div>
-        <div class="resource-block"><div class="resource-label">进程内存</div><div class="resource-value">{{ d.mem_rss_bytes == null ? '—' : memMb }} <small>MB</small></div><p class="panel-note">系统总内存 {{ d.mem_total_bytes == null ? '—' : fmtNum(Math.round(d.mem_total_bytes / 1048576)) }} MB</p></div>
-        <div class="resource-block"><div class="resource-label">今日模型用量</div><div class="resource-value">{{ d.tokens_today == null ? '—' : fmtNum(d.tokens_today) }} <small>token</small></div><dl class="resource-details"><div><dt>输入</dt><dd>{{ d.tokens_in_today == null ? '—' : fmtNum(d.tokens_in_today) }}</dd></div><div><dt>输出</dt><dd>{{ d.tokens_out_today == null ? '—' : fmtNum(d.tokens_out_today) }}</dd></div><div><dt>调用次数</dt><dd>{{ d.llm_calls_today ?? '—' }}</dd></div></dl></div>
-        <p class="panel-note">事件实时更新；运行资源与用量每 60 秒校准。</p>
+
+      <n-card title="资源与模型消耗" class="resource-card" size="small">
+        <div class="resource-block">
+          <div class="resource-label">
+            <span>CPU 占用</span>
+            <n-tag size="tiny" :type="cpuType" :bordered="false">
+              {{ d.cpu_percent == null ? '待采样' : cpuType === 'error' ? '高负载' : cpuType === 'warning' ? '中等' : '正常' }}
+            </n-tag>
+          </div>
+          <div class="resource-value mono">{{ d.cpu_percent == null ? '—' : fmtCpu(d.cpu_percent) }}</div>
+          <div class="resource-meter">
+            <span :style="{ width: `${Math.min(100, Math.max(0, d.cpu_percent ?? 0))}%`, background: cpuType === 'error' ? 'var(--yt-danger)' : cpuType === 'warning' ? 'var(--yt-warning)' : 'var(--yt-primary)' }" />
+          </div>
+        </div>
+
+        <div class="resource-block">
+          <div class="resource-label">
+            <span>进程内存</span>
+            <span class="mono resource-cap" v-if="d.mem_total_bytes">/ {{ fmtNum(Math.round(d.mem_total_bytes / 1048576)) }} MB</span>
+          </div>
+          <div class="resource-value mono">{{ d.mem_rss_bytes == null ? '—' : memMb }} <small>MB</small></div>
+        </div>
+
+        <div class="resource-block last">
+          <div class="resource-label">
+            <span>今日 Token 总量</span>
+            <span class="mono resource-cap">{{ d.llm_calls_today ?? 0 }} 次调用</span>
+          </div>
+          <div class="resource-value mono">{{ d.tokens_today == null ? '—' : fmtNum(d.tokens_today) }}</div>
+          <div class="token-split">
+            <div class="token-item">
+              <span class="k">输入</span>
+              <span class="v mono">{{ d.tokens_in_today == null ? '—' : fmtNum(d.tokens_in_today) }}</span>
+            </div>
+            <div class="token-item">
+              <span class="k">输出</span>
+              <span class="v mono">{{ d.tokens_out_today == null ? '—' : fmtNum(d.tokens_out_today) }}</span>
+            </div>
+          </div>
+        </div>
       </n-card>
     </div>
   </div>
 </template>
 
 <script>
-// 会话级采样历史（模块作用域，切页不丢）：四个指标的近实时走势，30s 一个点
 const TREND_CAP = 40
 const trend = { inToday: [], outToday: [], decision: [], tasks: [], tokens: [], mem: [] }
 </script>
@@ -75,7 +125,7 @@ import HourBars from '../components/HourBars.vue'
 import EmptyState from '../components/EmptyState.vue'
 import CountUp from '../components/CountUp.vue'
 import YtSkeleton from '../components/YtSkeleton.vue'
-import { subscribeWs, wsConnected } from '../ws'
+import { subscribeWs } from '../ws'
 
 /** @type {import('vue').Ref<Record<string, any>>} */
 const d = ref({})
@@ -98,10 +148,10 @@ function sample(key, v) {
 }
 
 const statCards = computed(() => [
-  { label: '今日收到消息', value: d.value.messages_in_today, points: trend.inToday, hint: '收到的群聊与私聊消息' },
-  { label: '今日发送回复', value: d.value.messages_out_today, points: trend.outToday, hint: '实际发送的回复气泡' },
-  { label: '今日参与决策', value: d.value.decision_calls_today, points: trend.decision, hint: '模型判断是否参与的次数' },
-  { label: '活跃任务', value: d.value.active_tasks, points: trend.tasks, hint: '当前尚未结束的任务' },
+  { label: '今日接收消息', value: d.value.messages_in_today, points: trend.inToday, color: 'var(--yt-primary)' },
+  { label: '今日发送回复', value: d.value.messages_out_today, points: trend.outToday, color: 'var(--yt-ok)' },
+  { label: '策略决策次数', value: d.value.decision_calls_today, points: trend.decision, color: 'var(--yt-violet)' },
+  { label: '运行中任务', value: d.value.active_tasks, points: trend.tasks, color: 'var(--yt-warning)' },
 ])
 
 const memMb = computed(() => Math.round((d.value.mem_rss_bytes ?? 0) / 1048576))
@@ -109,8 +159,9 @@ const cpuType = computed(() => {
   const c = d.value.cpu_percent ?? 0
   if (c >= 80) return 'error'
   if (c >= 50) return 'warning'
-  return 'default'
+  return 'success'
 })
+
 function fmtNum(n) {
   if (n == null) return '0'
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
@@ -121,7 +172,6 @@ function fmtCpu(c) {
   return (c ?? 0).toFixed(1) + '%'
 }
 
-// 前端聚合：拉最近事件样本，按今天 0 点起分小时桶（收=MessageReceived，发=BubbleSent）
 function aggregateHours(events) {
   const midnight = new Date()
   midnight.setHours(0, 0, 0, 0)
@@ -151,19 +201,22 @@ async function load() {
     sample('tasks', data.active_tasks)
     sample('tokens', data.tokens_today)
     sample('mem', Math.round((data.mem_rss_bytes ?? 0) / 1048576))
-  } catch { loadError.value = d.value.uptime_secs == null ? '运行数据获取失败，请检查服务后刷新。' : '运行数据获取失败。显示的是上次成功加载的数据，请检查服务后刷新。' }
+  } catch {
+    loadError.value = '运行数据获取失败，请检查后端服务状态。'
+  }
   try {
     const { data } = await api.get('/events?limit=500')
     recent.value = data.events.slice(0, 8)
     const { buckets, any } = aggregateHours(data.events)
     hourSeries.value = buckets
     hasHourData.value = any
-  } catch { loadError.value = '事件数据获取失败，请检查服务后刷新。' }
+  } catch {
+    loadError.value = '事件流获取失败，请检查后端服务状态。'
+  }
   loadingFirst.value = false
   refreshing.value = false
 }
 
-// WS 实时增量：事件到 → 对应卡片 +1，事件流前插；不再等 30s 轮询
 function onWsEvent(ev) {
   if (!ev || !ev.kind) return
   const now = Math.floor(Date.now() / 1000)
@@ -184,10 +237,8 @@ function onWsEvent(ev) {
     d.value.active_tasks = Math.max(0, (d.value.active_tasks ?? 0) - 1)
     sample('tasks', d.value.active_tasks)
   }
-  // 事件流前插（去重 by 时间+kind 粗略）
   const item = { _k: Math.random(), kind: ev.kind, payload: ev.payload ?? ev, ts: ev.ts ?? now }
   recent.value = [item, ...recent.value].slice(0, 8)
-  // 小时桶同步 +1（仅今天时段）
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0)
   const t0 = Math.floor(midnight.getTime() / 1000)
   if (item.ts >= t0) {
@@ -200,7 +251,6 @@ function onWsEvent(ev) {
 let off = null
 onMounted(() => {
   load()
-  // 拉长到 60s：WS 主驱动，HTTP 仅作漂移校准
   timer = setInterval(load, 60000)
   off = subscribeWs(onWsEvent)
 })
@@ -208,34 +258,113 @@ onUnmounted(() => { clearInterval(timer); off && off() })
 </script>
 
 <style scoped>
-.dashboard-status { display: flex; gap: 20px; align-items: center; padding: 20px 24px; margin-bottom: 20px; background: var(--yt-surface); border: 1px solid var(--yt-card-border); border-left: 4px solid var(--yt-primary); border-radius: 10px; flex-wrap: wrap; }
-.status-indicator { width: 10px; height: 10px; border-radius: 50%; background: var(--yt-ink-3); flex: none; }
-.status-indicator.connected { background: var(--yt-ok); }
-.status-note { display: block; color: var(--yt-ink-3); font-size: 12px; }
-.status-meta { color: var(--yt-ink-3); font-size: 12px; margin-left: auto; }
-.status-meta strong { display: block; font-size: 14px; color: var(--yt-ink-1); font-weight: 500; }
-a { color: var(--yt-primary); text-decoration: none; font-size: 13px; }
-a:hover { text-decoration: underline; }
-.dashboard-columns { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 20px; margin-top: 20px; align-items: start; }
-.dashboard-main { display: grid; gap: 20px; min-width: 0; }
-.live-pill { color: var(--yt-ink-3); font-size: 12px; }
-.live-pill.on { color: var(--yt-ok); }
-.chart-legend, .chart-legend > span { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--yt-ink-2); }
-.chart-legend { gap: 18px; }
-.chart-legend i { width: 12px; height: 12px; border-radius: 3px; }
+.dashboard-columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: start;
+}
+.dashboard-main {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.card-link {
+  color: var(--yt-primary);
+  text-decoration: none;
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.card-link:hover {
+  text-decoration: underline;
+}
+.chart-legend,
+.chart-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--yt-ink-2);
+}
+.chart-legend {
+  gap: 14px;
+}
+.chart-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
 .legend-in { background: var(--yt-chart-in); }
 .legend-out { background: var(--yt-chart-out); }
-.panel-note { margin: 0 0 16px; color: var(--yt-ink-3); font-size: 12px; line-height: 1.7; }
-.resource-block { padding: 4px 0 22px; margin-bottom: 20px; border-bottom: 1px solid var(--yt-card-border); }
-.resource-label { display: flex; justify-content: space-between; align-items: center; color: var(--yt-ink-2); font-size: 13px; }
-.resource-value { margin: 12px 0; font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.resource-value small { font-size: 13px; font-weight: 400; color: var(--yt-ink-3); }
-.resource-meter { height: 6px; border-radius: 3px; overflow: hidden; background: var(--yt-soft-bg); }
-.resource-meter span { display: block; height: 100%; }
-.resource-details { margin: 0; font-size: 13px; }
-.resource-details > div { display: flex; justify-content: space-between; margin-top: 8px; }
-.resource-details dt { color: var(--yt-ink-3); }
-.resource-details dd { margin: 0; font-variant-numeric: tabular-nums; }
-@media (max-width: 1100px) { .dashboard-columns { grid-template-columns: 1fr; } }
-@media (max-width: 800px) { .dashboard-status { padding: 16px; gap: 12px; } .status-meta { margin-left: 0; } }
+
+.resource-block {
+  padding-bottom: 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--yt-card-border);
+}
+.resource-block.last {
+  padding-bottom: 0;
+  margin-bottom: 0;
+  border-bottom: none;
+}
+.resource-label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--yt-ink-3);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+.resource-cap {
+  font-size: 12px;
+  color: var(--yt-ink-3);
+}
+.resource-value {
+  margin: 8px 0 10px;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--yt-ink-1);
+}
+.resource-value small {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--yt-ink-3);
+}
+.resource-meter {
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--yt-soft-bg);
+}
+.resource-meter span {
+  display: block;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+.token-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+.token-item {
+  background: var(--yt-soft-bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.token-item .k {
+  font-size: 11.5px;
+  color: var(--yt-ink-3);
+}
+.token-item .v {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--yt-ink-1);
+}
+@media (max-width: 1080px) {
+  .dashboard-columns { grid-template-columns: 1fr; }
+}
 </style>

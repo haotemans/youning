@@ -1,59 +1,78 @@
-// 时间/文案小工具：多页共用，语气和格式全站统一
 export function fmtTs(ts) {
-  return ts ? new Date(ts * 1000).toLocaleString() : '—'
+  return ts ? new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }) : '—'
 }
 
 export function fmtAgo(ts) {
   if (!ts) return '—'
   const s = Math.max(0, Math.floor(Date.now() / 1000 - ts))
-  if (s < 60) return `${s} 秒前`
+  if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
-  if (m < 60) return `${m} 分钟前`
+  if (m < 60) return `${m}m`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  return `${Math.floor(h / 24)} 天前`
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
 export function fmtUptime(s) {
   if (s == null) return '—'
-  const h = Math.floor(s / 3600)
+  const d = Math.floor(s / 86400)
+  const h = Math.floor((s % 86400) / 3600)
   const m = Math.floor((s % 3600) / 60)
-  return h > 0 ? `${h}h${m}m` : `${m}m${s % 60}s`
+  if (d > 0) return `${d}d ${h}h`
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${s % 60}s`
 }
 
-// 事件 kind 主色：trace 时间线、仪表盘迷你流、详情徽标共用一份
 export const KIND_COLORS = {
   MessageReceived: 'var(--yt-ink-3)',
   DecisionMade: 'var(--yt-primary)',
-  BubbleSent: 'var(--yt-primary)',
+  BubbleSent: 'var(--yt-ok)',
   ReplyInterrupted: 'var(--yt-danger)',
   ConsolidationDone: 'var(--yt-primary)',
-  MemoryWritten: 'var(--yt-ink-3)',
-  MoodChanged: 'var(--yt-ink-3)',
-  ConfigReloaded: 'var(--yt-ink-3)',
+  MemoryWritten: 'var(--yt-ink-2)',
+  MoodChanged: 'var(--yt-warning)',
+  ConfigReloaded: 'var(--yt-ink-2)',
+  TaskCreated: 'var(--yt-primary)',
+  TaskFinished: 'var(--yt-ok)',
 }
+
 export function kindColor(kind) {
   return KIND_COLORS[kind] || 'var(--yt-ink-3)'
 }
 
-// DecisionMade 的 action 语义色：卡片头部色条与徽标共用
 export const ACTION_COLORS = {
   reply: 'var(--yt-ok)',
   ignore: 'var(--yt-ink-3)',
   send_meme: 'var(--yt-primary)',
   start_task: 'var(--yt-warning)',
 }
+
 export function actionColor(action) {
   return ACTION_COLORS[action] || 'var(--yt-ink-3)'
 }
 
-export const KIND_LABELS = { MessageReceived: '收到消息', DecisionMade: '参与决策', BubbleSent: '发送回复', ReplyInterrupted: '回复中断', ConsolidationDone: '归纳完成', MemoryWritten: '写入记忆', MoodChanged: '情绪变化', ConfigReloaded: '配置更新', TaskCreated: '创建任务', TaskFinished: '任务结束' }
-export function kindLabel(kind) { return KIND_LABELS[kind] || kind }
+export const KIND_LABELS = {
+  MessageReceived: '收到消息',
+  DecisionMade: '策略决策',
+  BubbleSent: '发送回复',
+  ReplyInterrupted: '回复中断',
+  ConsolidationDone: '记忆归纳',
+  MemoryWritten: '写入记忆',
+  MoodChanged: '情绪变更',
+  ConfigReloaded: '配置重载',
+  TaskCreated: '创建任务',
+  TaskFinished: '任务完成',
+}
 
-// 事件行摘要：trace 列表与仪表盘迷你流统一口径
+export function kindLabel(kind) {
+  return KIND_LABELS[kind] || kind
+}
+
 export function eventSummary(e) {
   const p = e.payload || {}
-  if (e.kind === 'DecisionMade') return `${p.action} / ${p.mood} / ${p.reason ?? ''}`
+  if (e.kind === 'DecisionMade') {
+    const parts = [p.action, p.mood, p.reason].filter(Boolean)
+    return parts.join(' · ')
+  }
   if (p.text) return String(p.text)
   if (p.chat_id) return String(p.chat_id)
   return e.kind
