@@ -10,6 +10,8 @@ use std::sync::Mutex;
 #[derive(Clone, Default)]
 struct ServerState {
     requests: Arc<Mutex<Vec<Value>>>,
+    fail_domains: Arc<Mutex<bool>>,
+    authorization: Arc<Mutex<Vec<Option<String>>>>,
 }
 struct Server {
     origin: String,
@@ -28,6 +30,11 @@ async fn server() -> Server {
         Json(body): Json<Value>,
     ) -> (StatusCode, Json<Value>) {
         assert_eq!(headers.get("x-anysearch-client").unwrap(), "skill/3.1.1");
+        state.authorization.lock().unwrap().push(
+            headers
+                .get("authorization")
+                .map(|h| h.to_str().unwrap().to_owned()),
+        );
         state.requests.lock().unwrap().push(body.clone());
         match body["query"].as_str().unwrap() {
             "quota" => {
@@ -58,10 +65,19 @@ async fn server() -> Server {
         ],"api_key":"auto-key"}})),
         )
     }
-    async fn domains(State(state): State<ServerState>) -> Json<Value> {
+    async fn domains(State(state): State<ServerState>) -> (StatusCode, Json<Value>) {
         state.requests.lock().unwrap().push(json!({"catalog":true}));
-        Json(
-            json!({"code":0,"data":{"domains":[{"domain":"code","sub_domains":[{"sub_domain":"code.doc","description":"documentation","params":{"library":{"required":true,"description":"name"}}}]}]}}),
+        if *state.fail_domains.lock().unwrap() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"message":"unavailable"})),
+            );
+        }
+        (
+            StatusCode::OK,
+            Json(
+                json!({"code":0,"data":{"domains":[{"domain":"code","sub_domains":[{"sub_domain":"code.doc","description":"documentation","params":{"library":{"required":true,"description":"name"}}}]}]}}),
+            ),
         )
     }
     async fn extract(Json(body): Json<Value>) -> Json<Value> {
@@ -205,6 +221,8 @@ async fn chat_skill_routes_and_returns_sources_without_private_context() {
     assert!(!serde_json::to_string(&*requests)
         .unwrap()
         .contains("private"));
+    assert_eq!(requests.len(), 2, "目录只应获取一次，随后直接搜索");
+    assert_eq!(requests[0]["catalog"], true);
     assert_eq!(requests.last().unwrap()["params"]["library"], "rust");
 }
 #[test]
@@ -218,6 +236,40 @@ fn config_validates_without_disclosing_credentials() {
         .validate_config(&json!({"api_key":"","max_results":5}))
         .is_ok());
     assert!(query(&json!({"query":""})).is_err());
+    for url in [
+        "file:///tmp/test",
+        "https://user:secret@example.com",
+        "https://example.com/?key=secret",
+        "https://example.com/#v1",
+        "bad",
+    ] {
+        assert!(plugin
+            .validate_config(&json!({"api_base_url":url}))
+            .is_err());
+    }
+}
+
+#[tokio::test]
+async fn configured_endpoint_and_key_are_used_by_plugin() {
+    let s = server().await;
+    let caps = plugin()
+        .start(
+            PluginContext {
+                host: Arc::new(FakeHost),
+            },
+            json!({"api_base_url":format!("{}/v1/",s.origin),"api_key":"configured-key"}),
+        )
+        .await
+        .unwrap();
+    caps.skills[0]
+        .invoke(&ctx(), json!({"query":"Rust","explicit_command":true}))
+        .await
+        .unwrap();
+    assert_eq!(
+        *s.state.authorization.lock().unwrap(),
+        vec![Some("Bearer configured-key".into())]
+    );
+    assert_eq!(s.state.requests.lock().unwrap().len(), 1);
 }
 
 /// Explicit live verification only: sends a public query with no API key.
@@ -233,4 +285,48 @@ async fn live_anonymous_search() {
         .await
         .unwrap();
     assert!(!result["results"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn domain_outage_falls_back_to_general_search() {
+    let s = server().await;
+    *s.state.fail_domains.lock().unwrap() = true;
+    let skill = SearchSkill {
+        api: Arc::new(Client::new(&s.origin, "", 5).unwrap()),
+        host: Arc::new(FakeHost),
+    };
+    let out = skill
+        .invoke(&ctx(), json!({"query":"Rust","domain":"code"}))
+        .await
+        .unwrap();
+    assert!(out.data["rendered"]
+        .as_str()
+        .unwrap()
+        .contains("领域目录暂不可用"));
+    assert_eq!(out.data["results"].as_array().unwrap().len(), 1);
+    assert!(s
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .get("tag")
+        .is_none());
+}
+#[tokio::test]
+async fn explicit_command_skips_model_planning_and_domain_calls() {
+    let s = server().await;
+    *s.state.fail_domains.lock().unwrap() = true;
+    let skill = SearchSkill {
+        api: Arc::new(Client::new(&s.origin, "", 5).unwrap()),
+        host: Arc::new(FakeHost),
+    };
+    skill
+        .invoke(&ctx(), json!({"query":"Rust","explicit_command":true}))
+        .await
+        .unwrap();
+    let requests = s.state.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["query"], "Rust");
 }

@@ -28,6 +28,7 @@ impl Plugin for HelloPlugin {
             kind: ConfigKind::String,
             default: json!("你好"),
             secret: false,
+            options: vec![],
         }]
     }
     fn validate_config(&self, config: &Value) -> Result<()> {

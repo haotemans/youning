@@ -41,7 +41,7 @@ impl Default for PluginSettings {
 }
 impl PluginSettings {
     fn validate(&self) -> Result<()> {
-        if !(100..=120_000).contains(&self.timeout_ms)
+        if !(100..=360_000).contains(&self.timeout_ms)
             || !(1..=16).contains(&self.max_concurrency)
             || !(1024..=1_048_576).contains(&self.max_output_bytes)
         {
@@ -180,7 +180,9 @@ impl Skill for HostedSkill {
     fn def(&self) -> SkillDef {
         self.inner.def()
     }
-    fn commands(&self) -> &'static [&'static str] { self.inner.commands() }
+    fn commands(&self) -> &'static [&'static str] {
+        self.inner.commands()
+    }
     fn artifact_retention(&self) -> ArtifactRetention {
         self.inner.artifact_retention()
     }
@@ -206,9 +208,25 @@ struct Services {
     llm: crate::bot::SharedLlm,
     policy: PluginSettings,
     io: Mutex<()>,
+    moderation: Option<Arc<dyn GroupModeration>>,
 }
 #[async_trait]
 impl HostServices for Services {
+    async fn moderate(&self, ctx: &ToolCtx, action: ModerationAction) -> Result<()> {
+        if self
+            .policy
+            .allowed_chats
+            .as_ref()
+            .is_some_and(|a| !a.contains(&ctx.chat_id))
+        {
+            bail!("会话不在插件范围内");
+        }
+        self.moderation
+            .as_ref()
+            .context("插件未声明群管理能力或 QQ 适配器未启用")?
+            .execute(ctx, action)
+            .await
+    }
     async fn chat(&self, ctx: &ToolCtx, system: &str, user: &str) -> Result<String> {
         if self
             .policy
@@ -310,6 +328,17 @@ impl PluginManager {
         skills: crate::skills::SkillRegistry,
         llm: crate::bot::SharedLlm,
     ) -> Result<Arc<Self>> {
+        Self::load_with_moderation(plugins, data_root, source_root, tools, skills, llm, None).await
+    }
+    pub async fn load_with_moderation(
+        plugins: Vec<Arc<dyn Plugin>>,
+        data_root: PathBuf,
+        source_root: PathBuf,
+        tools: crate::tools::Registry,
+        skills: crate::skills::SkillRegistry,
+        llm: crate::bot::SharedLlm,
+        moderation: Option<Arc<dyn GroupModeration>>,
+    ) -> Result<Arc<Self>> {
         let mut manager = Self {
             entries: BTreeMap::new(),
             tools,
@@ -372,6 +401,11 @@ impl PluginManager {
                     llm: llm.clone(),
                     policy: settings.clone(),
                     io: Mutex::new(()),
+                    moderation: if plugin.uses_group_moderation() {
+                        moderation.clone()
+                    } else {
+                        None
+                    },
                 });
                 let result = gate
                     .run(plugin.start(PluginContext { host }, settings.config.clone()))

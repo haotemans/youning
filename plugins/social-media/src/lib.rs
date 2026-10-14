@@ -33,6 +33,7 @@ impl Plugin for SocialMedia {
                 kind: ConfigKind::Boolean,
                 default: json!(true),
                 secret: false,
+                options: vec![],
             },
             ConfigField {
                 key: "max_file_mb",
@@ -40,6 +41,7 @@ impl Plugin for SocialMedia {
                 kind: ConfigKind::Integer,
                 default: json!(50),
                 secret: false,
+                options: vec![],
             },
             ConfigField {
                 key: "max_total_mb",
@@ -47,6 +49,7 @@ impl Plugin for SocialMedia {
                 kind: ConfigKind::Integer,
                 default: json!(100),
                 secret: false,
+                options: vec![],
             },
             ConfigField {
                 key: "max_items",
@@ -54,6 +57,7 @@ impl Plugin for SocialMedia {
                 kind: ConfigKind::Integer,
                 default: json!(20),
                 secret: false,
+                options: vec![],
             },
         ];
         for (key, label) in [
@@ -67,6 +71,7 @@ impl Plugin for SocialMedia {
                 kind: ConfigKind::String,
                 default: json!(""),
                 secret: true,
+                options: vec![],
             });
         }
         fields
@@ -223,6 +228,9 @@ impl Tool for Downloader {
 }
 #[async_trait]
 impl Skill for Downloader {
+    fn commands(&self) -> &'static [&'static str] {
+        &["/下载", "/download"]
+    }
     fn artifact_retention(&self) -> ArtifactRetention {
         ArtifactRetention::DeleteAfterSend
     }

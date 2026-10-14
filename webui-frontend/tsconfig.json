@@ -3,7 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "types": ["vite/client"],
+    "types": ["vite/client", "node"],
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "allowJs": true,
     "checkJs": true,
@@ -16,5 +16,5 @@
     "verbatimModuleSyntax": false,
     "useDefineForClassFields": true
   },
-  "include": ["src/**/*.js", "src/**/*.vue"]
+  "include": ["vite.config.js", "src/**/*.js", "src/**/*.vue"]
 }

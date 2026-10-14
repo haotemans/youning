@@ -2,10 +2,10 @@
   <div class="cap-card" :class="{ 'is-disabled': !plugin.enabled, 'is-dirty': dirty }" @click="$emit('open', plugin)">
     <div class="cap-card-head">
       <div class="cap-card-icon plugin">
-        {{ plugin.name[0].toUpperCase() }}
+        {{ (plugin.display_name || plugin.name)[0].toUpperCase() }}
       </div>
       <div class="cap-card-title">
-        <div class="cap-card-name">{{ plugin.name }}</div>
+        <div class="cap-card-name">{{ plugin.display_name || plugin.name }}</div>
         <div class="cap-card-status">
           <span v-if="plugin.version" class="mono">v{{ plugin.version }} · </span>
           <span v-if="plugin.enabled && plugin.loaded" class="ok">已加载</span>

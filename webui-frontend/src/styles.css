@@ -897,3 +897,23 @@ pre,
     padding: 32px 24px;
   }
 }
+
+/* 侧栏折叠态：隐藏所有分组标题并居中图标，防止窄栏文字折行重叠 */
+.yt-sider.is-collapsed .n-menu-item-group-title,
+.n-menu--collapsed .n-menu-item-group-title {
+  display: none !important;
+  height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+.yt-sider.is-collapsed .yt-nav-menu {
+  padding: 8px 6px;
+}
+
+@media (max-width: 600px) {
+  .yt-header { padding: 0 12px; }
+  .yt-header-left, .yt-header-right { gap: 6px; min-width: 0; }
+  .yt-header-right { flex: 1; justify-content: flex-end; }
+  .yt-status-pill, .yt-mood-pill { display: none; }
+}

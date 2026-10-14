@@ -8,49 +8,60 @@
       <n-space align="center" :size="10">
         <n-select :value="sel?.id" :options="data.nodes.map(n => ({ label: n.name || n.id, value: n.id }))"
                   clearable placeholder="定位人物节点" size="small" style="width: 200px" @update:value="selectPerson" />
-        <n-button size="small" secondary :disabled="!hasNodes" @click="net?.fit({ animation: false })">重置视图</n-button>
+        <n-button size="small" secondary :disabled="!hasNodes" @click="net?.fit({ animation: !reduceMotion })">重置视图</n-button>
       </n-space>
     </div>
 
-    <div class="relations-layout">
-      <div class="relations-main">
-        <n-card size="small" title="拓扑视图">
-          <template #header-extra>
-            <div class="graph-legend">
-              <span><i class="self-node" />云团</span>
-              <span><i class="peer-node" />群成员</span>
-            </div>
-          </template>
-          <div v-show="hasNodes" ref="el" class="graph-canvas" />
-          <empty-state v-if="!hasNodes" title="暂无关系图谱数据" />
-        </n-card>
-      </div>
+    <n-card size="small" class="relations-card">
+      <div class="relations-stage">
+        <div v-show="hasNodes" ref="el" class="graph-canvas" />
+        <empty-state v-if="!hasNodes" title="暂无关系图谱数据" />
 
-      <div>
-        <Transition name="slide-in" mode="out-in">
-          <n-card v-if="sel" :key="sel.id" size="small" :title="sel.name || sel.id">
-            <template #header-extra>
-              <span class="mono" style="font-size: 12px; color: var(--yt-ink-3)">{{ sel.id }}</span>
-            </template>
-            <div class="node-meta">
-              <div class="meta-row"><span class="k">首次记录</span><span class="v mono">{{ fmtTs(sel.first_seen) }}</span></div>
-              <div class="meta-row"><span class="k">最近活跃</span><span class="v mono">{{ fmtTs(sel.last_seen) }}</span></div>
+        <Transition name="slide-in">
+          <aside v-if="sel" :key="sel.id" class="person-drawer">
+            <div class="person-drawer-head">
+              <img :src="avatarUrl(sel)" class="person-avatar" :alt="sel.name || sel.id" @error="(e) => onImgErr(e, sel)" />
+              <div class="person-title-wrap">
+                <div class="person-name">{{ sel.name || sel.id }}</div>
+                <div class="person-id mono">{{ formatNodeId(sel) }}</div>
+              </div>
+              <button type="button" class="drawer-close" @click="selectPerson(null)" aria-label="关闭详情">×</button>
             </div>
-            <n-divider style="margin: 12px 0" />
-            <div class="edge-list" v-if="relatedEdges.length">
-              <div v-for="e in relatedEdges" :key="e.from + '→' + e.to" class="edge-item">
-                <span class="mono edge-target">{{ e.from === sel.id ? `→ ${e.to}` : `← ${e.from}` }}</span>
-                <span class="mono edge-metrics">信任 {{ e.trust.toFixed(2) }} · 熟悉 {{ e.familiar.toFixed(2) }}</span>
+
+            <div class="node-meta">
+              <div class="meta-row">
+                <span class="k">首次记录</span>
+                <span class="v mono">{{ fmtTs(sel.first_seen) }}</span>
+              </div>
+              <div class="meta-row">
+                <span class="k">最近活跃</span>
+                <span class="v mono">{{ fmtTs(sel.last_seen) }}</span>
+              </div>
+              <div class="meta-row">
+                <span class="k">关联边数</span>
+                <span class="v mono">{{ relatedEdges.length }} 条</span>
               </div>
             </div>
-            <empty-state v-else title="暂无关联边" />
-          </n-card>
-          <n-card v-else size="small" title="节点详情">
-            <empty-state title="点击画布节点查看关系" />
-          </n-card>
+
+            <div class="edge-section-title">关系明细</div>
+            <div class="edge-list" v-if="relatedEdges.length">
+              <button type="button" v-for="e in relatedEdges" :key="e.from + '→' + e.to" class="edge-item"
+                   @click="selectPerson(e.from === sel.id ? e.to : e.from)">
+                <div class="edge-peer">
+                  <span class="edge-dir mono">{{ e.from === sel.id ? '→' : '←' }}</span>
+                  <span class="edge-target">{{ peerName(e.from === sel.id ? e.to : e.from) }}</span>
+                </div>
+                <div class="edge-metrics mono">
+                  <span class="metric-pill">信任 {{ e.trust.toFixed(2) }}</span>
+                  <span class="metric-pill">熟悉 {{ e.familiar.toFixed(2) }}</span>
+                </div>
+              </button>
+            </div>
+            <div v-else class="edge-empty">暂无与其他节点的关系记录</div>
+          </aside>
         </Transition>
       </div>
-    </div>
+    </n-card>
   </div>
 </template>
 
@@ -61,6 +72,7 @@ import { api } from '../api'
 import { fmtTs } from '../fmt'
 import { useUiStore } from '../store/ui'
 import EmptyState from '../components/EmptyState.vue'
+import mascot from '../assets/mascot.png'
 
 const el = ref(null)
 const hasNodes = ref(true)
@@ -68,33 +80,80 @@ const hasNodes = ref(true)
 const sel = ref(null)
 /** @type {import('vue').Ref<{ nodes: any[], edges: any[] }>} */
 const data = ref({ nodes: [], edges: [] })
+const selfQq = ref(0)
 const ui = useUiStore()
+const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 /** @type {any} */
 let net = null
-
-const relatedEdges = computed(() =>
-  data.value.edges.filter((e) => sel.value && (e.from === sel.value.id || e.to === sel.value.id))
-)
-
-const selfColor = () => ui.dark ? '#60a5fa' : '#2563eb'
-const peerColor = () => ui.dark ? '#475569' : '#94a3b8'
 /** @type {any} */
 let graphNodes = null
 /** @type {any} */
 let graphEdges = null
 
-function selectPerson(id) {
-  sel.value = data.value.nodes.find(n => n.id === id) || null
-  if (net) net.selectNodes(id == null ? [] : [id])
+const relatedEdges = computed(() =>
+  data.value.edges.filter((e) => sel.value && (e.from === sel.value.id || e.to === sel.value.id))
+)
+
+function extractQq(id) {
+  if (!id) return ''
+  const m = String(id).match(/^(?:p_)?(\d{5,12})$/)
+  return m ? m[1] : ''
 }
 
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
+function nodeQq(node) {
+  const qq = String(node?.qq || '')
+  return /^\d{5,12}$/.test(qq) ? qq : extractQq(node?.id)
+}
 
-function labelColor() {
-  return ui.dark ? '#e2e8f0' : '#1e293b'
+function formatNodeId(node) {
+  if (node.id === 'self') return selfQq.value ? `QQ ${selfQq.value}` : '云团'
+  const qq = nodeQq(node)
+  return qq ? `QQ ${qq}` : String(node.id)
+}
+
+function peerName(id) {
+  const found = data.value.nodes.find((n) => n.id === id)
+  return found ? (found.name || found.id) : id
+}
+
+function svgFallbackAvatar(label, isSelf = false) {
+  const ch = String(label || '?').replace(/^['"\s]+/, '').charAt(0).toUpperCase() || 'U'
+  const bg = isSelf ? '#2563eb' : '#475569'
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" rx="60" fill="${bg}"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-size="52" font-weight="600">${ch.replace(/[<>&"']/g, '')}</text></svg>`
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
+}
+
+function avatarUrl(node) {
+  if (!node) return ''
+  if (/^https?:\/\//.test(node.avatar_url || '')) return node.avatar_url
+  if (node.id === 'self') {
+    return selfQq.value ? `https://q1.qlogo.cn/g?b=qq&nk=${selfQq.value}&s=100` : mascot
+  }
+  const qq = nodeQq(node)
+  if (qq) return `https://q1.qlogo.cn/g?b=qq&nk=${qq}&s=100`
+  return svgFallbackAvatar(node.name || node.id, false)
+}
+
+function onImgErr(e, node) {
+  const fallback = node?.id === 'self' ? mascot : svgFallbackAvatar(node?.name || node?.id, false)
+  if (e.target && e.target.src !== fallback) e.target.src = fallback
+}
+
+const selfBorder = () => ui.dark ? '#60a5fa' : '#2563eb'
+const peerBorder = () => ui.dark ? '#475569' : '#cbd5e1'
+const labelColor = () => ui.dark ? '#f1f5f9' : '#0f172a'
+
+function selectPerson(id) {
+  sel.value = id ? (data.value.nodes.find(n => n.id === id) || null) : null
+  if (net) net.selectNodes(sel.value ? [sel.value.id] : [])
 }
 
 onMounted(async () => {
+  try {
+    const { data: dash } = await api.get('/dashboard')
+    if (dash?.self_qq) selfQq.value = dash.self_qq
+  } catch { /* ignore */ }
+
   const { data: d } = await api.get('/relations')
   data.value = d
   hasNodes.value = d.nodes.length > 0
@@ -105,41 +164,67 @@ onMounted(async () => {
     degree[e.from] = (degree[e.from] || 0) + 1
     degree[e.to] = (degree[e.to] || 0) + 1
   }
-  const baseSize = (id) => 12 + Math.min(18, (degree[id] || 0) * 3)
-  const tip = (n) =>
-    `<b>${esc(n.name || n.id)}</b><br/>ID: ${esc(n.id)}<br/>最近: ${fmtTs(n.last_seen)}`
+  const baseSize = (id) => (id === 'self' ? 28 : 24) + Math.min(12, (degree[id] || 0) * 2)
 
+  // 画布内仅展示圆形头像 + 昵称，不挂载悬浮 title 气泡；点击头像再弹出右侧详情卡片
   /** @type {any} */
   const nodes = new DataSet(d.nodes.map((n) => ({
     id: n.id,
     label: n.name || n.id,
-    title: tip(n),
-    color: n.id === 'self' ? selfColor() : peerColor(),
-    font: { color: n.id === 'self' ? (ui.dark ? '#0f172a' : '#ffffff') : labelColor() },
-    shape: n.id === 'self' ? 'box' : 'dot',
+    shape: 'circularImage',
+    image: avatarUrl(n),
+    brokenImage: n.id === 'self' ? mascot : svgFallbackAvatar(n.name || n.id, false),
     size: baseSize(n.id),
-    _base: baseSize(n.id),
+    borderWidth: n.id === 'self' ? 3 : 2,
+    borderWidthSelected: 4,
+    color: {
+      border: n.id === 'self' ? selfBorder() : peerBorder(),
+      background: ui.dark ? '#1e293b' : '#f1f5f9',
+      highlight: {
+        border: selfBorder(),
+        background: ui.dark ? '#1e293b' : '#f1f5f9',
+      },
+      hover: {
+        border: selfBorder(),
+        background: ui.dark ? '#1e293b' : '#f1f5f9',
+      },
+    },
+    font: {
+      color: labelColor(),
+      size: 13,
+      vadjust: 6,
+    },
   })))
+
   const edges = new DataSet(d.edges.map((e) => ({
     from: e.from,
     to: e.to,
-    width: 1 + e.familiar * 4,
-    color: { color: e.from === 'self' || e.to === 'self' ? selfColor() : '#94a3b8', opacity: 0.75 },
-    title: `信任 ${e.trust.toFixed(2)} / 熟悉 ${e.familiar.toFixed(2)}`,
-    arrows: 'to',
+    width: 1.2 + e.familiar * 3.5,
+    color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
+    arrows: { to: { enabled: true, scaleFactor: 0.6 } },
   })))
 
   graphNodes = nodes
   graphEdges = edges
   net = new Network(el.value, { nodes, edges }, {
-    physics: { stabilization: true },
-    edges: { smooth: true },
-    interaction: { hover: true, tooltipDelay: 120 },
+    physics: {
+      stabilization: true,
+      barnesHut: { gravitationalConstant: -2600, springLength: 140, springConstant: 0.04 },
+    },
+    edges: { smooth: { enabled: true, type: 'continuous', roundness: 0.2 } },
+    interaction: { hover: true },
     nodes: {
-      borderWidth: 2,
-      font: { face: getComputedStyle(document.documentElement).getPropertyValue('--yt-font'), size: 13, color: labelColor(), strokeWidth: 0 },
+      font: {
+        face: getComputedStyle(document.documentElement).getPropertyValue('--yt-font'),
+        size: 13,
+        color: labelColor(),
+        strokeWidth: 0,
+      },
     },
   })
+
+  // Keep the settled graph still; selecting a person should not restart simulation.
+  net.once('stabilizationIterationsDone', () => net?.setOptions({ physics: false }))
 
   net.on('click', (p) => {
     sel.value = p.nodes.length ? d.nodes.find((n) => n.id === p.nodes[0]) : null
@@ -149,78 +234,190 @@ onMounted(async () => {
 onUnmounted(() => { net?.destroy(); net = null })
 
 watch(() => ui.dark, () => {
-  if (!net) return
-  net.setOptions({ nodes: { font: { color: labelColor() } } })
+  if (!net || !graphNodes) return
   graphNodes.update(data.value.nodes.map(n => ({
     id: n.id,
-    color: n.id === 'self' ? selfColor() : peerColor(),
-    font: { color: n.id === 'self' ? (ui.dark ? '#0f172a' : '#ffffff') : labelColor() },
+    color: {
+      border: n.id === 'self' ? selfBorder() : peerBorder(),
+      background: ui.dark ? '#1e293b' : '#f1f5f9',
+      highlight: { border: selfBorder(), background: ui.dark ? '#1e293b' : '#f1f5f9' },
+      hover: { border: selfBorder(), background: ui.dark ? '#1e293b' : '#f1f5f9' },
+    },
+    font: { color: labelColor(), size: 13, vadjust: 6 },
   })))
   graphEdges.update(graphEdges.get().map(e => ({
     id: e.id,
-    color: { color: e.from === 'self' || e.to === 'self' ? selfColor() : '#94a3b8', opacity: 0.75 },
+    color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
   })))
 })
 </script>
 
 <style scoped>
-.relations-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
-  gap: 16px;
-  align-items: start;
+.relations-card :deep(.n-card__content) {
+  padding: 0 !important;
 }
-.relations-main { min-width: 0; }
-.graph-legend {
+.relations-stage {
+  position: relative;
+  overflow: hidden;
+  border-radius: 12px;
+}
+.graph-canvas {
+  height: calc(100vh - 165px);
+  min-height: 500px;
+  border: none;
+  border-radius: 12px;
+}
+.person-drawer {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  width: 320px;
+  max-width: calc(100% - 32px);
+  background: var(--yt-surface);
+  border: 1px solid var(--yt-card-border);
+  border-radius: 12px;
+  box-shadow: var(--yt-card-shadow-hover);
+  padding: 18px;
   display: flex;
-  gap: 14px;
+  flex-direction: column;
+  z-index: 10;
+}
+.person-drawer-head {
+  display: flex;
   align-items: center;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--yt-card-border);
+}
+.person-avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--yt-primary);
+  background: var(--yt-soft-bg);
+  flex: none;
+}
+.person-title-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.person-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--yt-ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.person-id {
   font-size: 12px;
+  color: var(--yt-ink-3);
+  margin-top: 2px;
+}
+.drawer-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--yt-card-border);
+  background: var(--yt-soft-bg);
   color: var(--yt-ink-2);
-}
-.graph-legend span {
-  display: inline-flex;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  flex: none;
 }
-.graph-legend i {
-  width: 10px;
-  height: 10px;
-  display: inline-block;
+.drawer-close:hover {
+  color: var(--yt-ink-1);
+  border-color: var(--yt-card-border-hover);
 }
-.self-node { background: var(--yt-primary); border-radius: 2px; }
-.peer-node { background: var(--yt-chart-in); border-radius: 50%; }
 .node-meta {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--yt-card-border);
 }
 .meta-row {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 12.5px;
 }
 .meta-row .k { color: var(--yt-ink-3); }
 .meta-row .v { color: var(--yt-ink-1); }
+.edge-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--yt-ink-3);
+  margin: 14px 0 8px;
+}
 .edge-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 360px;
+  flex: 1;
   overflow-y: auto;
 }
 .edge-item {
+  width: 100%;
+  text-align: left;
+  font: inherit;
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 10px;
-  background: var(--yt-soft-bg);
-  border-radius: 6px;
-  font-size: 12px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--yt-elevated);
+  border: 1px solid var(--yt-card-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 0.14s ease;
 }
-.edge-target { font-weight: 600; color: var(--yt-ink-1); }
-.edge-metrics { color: var(--yt-ink-2); }
-@media (max-width: 1080px) {
-  .relations-layout { grid-template-columns: 1fr; }
+.edge-item:hover {
+  border-color: var(--yt-primary);
+}
+.edge-peer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--yt-ink-1);
+}
+.edge-dir {
+  color: var(--yt-primary);
+}
+.edge-target {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.edge-metrics {
+  display: flex;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--yt-ink-2);
+}
+.metric-pill {
+  padding: 1px 6px;
+  background: var(--yt-soft-bg);
+  border-radius: 4px;
+}
+.edge-empty {
+  font-size: 12.5px;
+  color: var(--yt-ink-3);
+  text-align: center;
+  padding: 24px 0;
+}
+@media (max-width: 600px) {
+  .graph-canvas { min-height: 420px; }
+  .person-drawer { top: 8px; right: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge-item, .slide-in-enter-active { transition: none; }
 }
 </style>

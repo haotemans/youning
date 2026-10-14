@@ -22,7 +22,7 @@ feature = "plugin-hello"
 ## 接口
 
 - `metadata()`：稳定 id、显示名、版本、描述、`API_VERSION`。接口版本不一致时拒绝加载。
-- `config_fields()`：声明 string / boolean / integer 字段、默认值、显示名与 secret 标记，面板生成表单。
+- `config_fields()`：声明 string / boolean / integer / choice 字段、默认值、显示名与 secret 标记，面板生成表单；choice 字段通过 `options` 提供下拉项。
 - `validate_config()`：先调用 API 的类型校验，再补充业务范围校验。不要在错误信息中包含敏感配置值。
 - `start(context, config)`：校验后调用，返回 `Capabilities { tools, skills }`。
 - `subscriptions()` / `on_event()`：声明事件类型，宿主按插件串行分发；有会话范围限制时，不分发没有 chat_id 的全局事件。

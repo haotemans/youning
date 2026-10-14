@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+yuantuan-plugin-api = { path = "../plugin-api" }
+async-trait = "0.1"
 yuantuan-core = { path = "../core" }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

@@ -7,7 +7,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub mod media;
 pub mod sandbox;
 
 pub use yuantuan_plugin_api::{Tool, ToolCtx, ToolOutput};

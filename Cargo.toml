@@ -9,6 +9,8 @@ members = [
     "plugins/hello",
     "plugins/anysearch",
     "plugins/social-media",
+    "plugins/moderator",
+    "plugins/nai-image",
 ]
 
 [workspace.dependencies]

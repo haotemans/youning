@@ -327,7 +327,6 @@ async fn build_rig(
             yuantuan_core::context_builder::ContextCfg::default(),
         )),
         memes_dir: temp_dir("reply-memes"),
-        media_ctx: None,
         skill_registry: None,
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });

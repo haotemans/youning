@@ -42,8 +42,6 @@ pub struct PipelineDeps {
     pub ctx_cfg: crate::context_builder::SharedContextCfg,
     /// data/memes 根目录（meme 抽图）
     pub memes_dir: PathBuf,
-    /// 媒体命令上下文（MOD-022e /image 直派）；None 时命令忽略走原 Decision 管线
-    pub media_ctx: Option<crate::tools::media::command::MediaCtx>,
     /// Skill 注册表（Q-S02 Decision 自-driven 调用 Skill）；None 时 Decision 不提供 invoke_skill 选项
     pub skill_registry: Option<crate::skills::SkillRegistry>,
     /// Q52 per-chat mpsc 容量热应用槽（G008）；新 worker spawn 时读
@@ -123,8 +121,8 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
                 }
             };
         let text = text.unwrap_or_default();
-        // Q55 裁决：回放跳过 /image 直派命令（media 副作用大）
-        if crate::tools::media::command::match_image_command(&text).is_some() {
+        // Q55 裁决：回放跳过生图命令，避免重启后重复调用付费 API。
+        if is_image_command(&text) {
             mark_processed(&deps.db_path, msg_id).await;
             debug!(msg_id, "回放跳过 /image 命令（直接标记已处理）");
             continue;
@@ -211,9 +209,8 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
-                    // /image 等命令走原 dispatcher→worker 直派,不进窗口(特效速报)
-                    let is_media_cmd = deps.media_ctx.is_some()
-                        && crate::tools::media::command::match_image_command(&m.text).is_some();
+                    // 生图命令走 dispatcher→worker 直派，不进消息聚合窗口。
+                    let is_media_cmd = is_image_command(&m.text);
 
                     if is_media_cmd {
                         let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
@@ -292,6 +289,36 @@ fn reply_engine_route(m: &MessageReceivedPayload) -> anyhow::Result<(reply_engin
     crate::reply_engine::route_of(m).map(|(ct, target, _)| (ct, target))
 }
 
+fn is_image_command(text: &str) -> bool {
+    let text = text.trim();
+    ["/image", "/画"].iter().any(|command| {
+        text == *command
+            || text
+                .strip_prefix(command)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    })
+}
+
+fn enqueue_image_plugin_disabled(deps: &PipelineDeps, m: &MessageReceivedPayload) {
+    let Some(engine) = &deps.reply else { return };
+    let Ok((chat_type, target)) = reply_engine_route(m) else {
+        return;
+    };
+    engine.enqueue(reply_engine::ReplyJob {
+        chat_id: m.chat_id.clone(),
+        chat_type,
+        target,
+        anchor_msg_id: m.msg_id,
+        mention: false,
+        mention_qq: None,
+        kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
+            text: "NAI 生图插件尚未启用，请在插件面板启用并配置 API Key。".into(),
+            at: false,
+            meme: None,
+        }]),
+    });
+}
+
 /// Q55 包装层：处理完毕无条件回写 messages.processed_at（含 Prefilter Drop 分支——
 /// 「处理过」不等于「回复过」；重启回放只扫进程崩溃前来不及进 handle 的消息）。
 async fn handle(deps: &PipelineDeps, m: &MessageReceivedPayload) {
@@ -327,14 +354,12 @@ async fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
 }
 
 async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) {
-    if handle_plugin_command(deps, m).await { return; }
-    // Q008=C：/image /画 显式命令直派，先于 Prefilter 与 Decision（Command deterministic path）。
-    // 显式命令不参与节流与成本闸，且独立于 LLM 角色可用性——用户在配 LLM 之前也能用 media。
-    if let (Some(media_ctx), Some(body)) = (
-        deps.media_ctx.as_ref(),
-        crate::tools::media::command::match_image_command(&m.text),
-    ) {
-        crate::tools::media::command::handle_image_command(media_ctx, m, body).await;
+    if handle_plugin_command(deps, m).await {
+        return;
+    }
+    // 生图只由已启用的 NAI 插件处理；不再回退到旧 Core 媒体实现。
+    if is_image_command(&m.text) {
+        enqueue_image_plugin_disabled(deps, m);
         return;
     }
 
@@ -435,6 +460,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                         m.chat_id, m.sender_pid, m.chat_type
                     ));
                 }
+                add_message_slots(deps, m, &mut slots).await;
                 match skill.invoke(&ctx, slots).await {
                     Ok(out) => {
                         info!(
@@ -468,7 +494,11 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                         });
                         for path in out.artifacts {
                             if let Err(e) = engine.enqueue_attachment_with_retention(
-                                m.chat_id.clone(), chat_type, target, path.into(), skill.artifact_retention(),
+                                m.chat_id.clone(),
+                                chat_type,
+                                target,
+                                path.into(),
+                                skill.artifact_retention(),
                             ) {
                                 warn!(error=%e, "插件附件入队失败");
                             }
@@ -477,11 +507,19 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                     Err(e) => {
                         warn!(chat_id = %m.chat_id, skill = %skill_name, error = %e, "invoke_skill 执行失败");
                         engine.enqueue(reply_engine::ReplyJob {
-                            chat_id: m.chat_id.clone(), chat_type, target, anchor_msg_id: m.msg_id,
-                            mention: false, mention_qq: None,
+                            chat_id: m.chat_id.clone(),
+                            chat_type,
+                            target,
+                            anchor_msg_id: m.msg_id,
+                            mention: false,
+                            mention_qq: None,
                             kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
-                                text: format!("处理失败：{}", e.to_string().chars().take(500).collect::<String>()),
-                                at: false, meme: None,
+                                text: format!(
+                                    "处理失败：{}",
+                                    e.to_string().chars().take(500).collect::<String>()
+                                ),
+                                at: false,
+                                meme: None,
                             }]),
                         });
                     }
@@ -601,36 +639,115 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
 }
 
 /// Explicit plugin commands use registered, permission-checked skills even without LLM roles.
+async fn add_message_slots(
+    deps: &PipelineDeps,
+    m: &MessageReceivedPayload,
+    slots: &mut serde_json::Value,
+) {
+    slots["reply_to"] = serde_json::json!(m.reply_to);
+    let mentions = async {
+        let mut conn = crate::db::connect(&deps.db_path).await.ok()?;
+        let mentions: String = conn
+            .query_row(
+                "SELECT mentions FROM messages WHERE msg_id=?1 AND chat_id=?2 AND chat_type=?3",
+                crate::db::params![m.msg_id, m.chat_id, m.chat_type],
+                |r| r.try_get(0),
+            )
+            .await
+            .ok()?;
+        serde_json::from_str::<Vec<String>>(&mentions).ok()
+    }
+    .await
+    .unwrap_or_default();
+    let own_qq = deps.self_qq.load(Ordering::Relaxed);
+    let mut targets: Vec<u64> = mentions
+        .iter()
+        .filter_map(|p| p.strip_prefix("p_")?.parse().ok())
+        .filter(|n| *n != own_qq)
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    slots["mentioned_qqs"] = serde_json::json!(targets);
+}
+
 async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) -> bool {
     let own_qq = deps.self_qq.load(Ordering::Relaxed);
-    if m.sender_pid == "self" || (own_qq != 0 && m.sender_pid == format!("p_{own_qq}")) { return false; }
-    let Some(registry) = deps.skill_registry.as_ref() else { return false; };
+    if m.sender_pid == "self" || (own_qq != 0 && m.sender_pid == format!("p_{own_qq}")) {
+        return false;
+    }
+    let Some(registry) = deps.skill_registry.as_ref() else {
+        return false;
+    };
     let command = match registry.command(&m.text) {
         Ok(Some(command)) => command,
         Ok(None) => return false,
-        Err(e) => { warn!(error=%e, "插件命令匹配失败"); return true; }
-    };
-    let Some(engine) = deps.reply.as_ref() else { return true; };
-    let Ok((chat_type, target)) = reply_engine_route(m) else { return true; };
-    let (skill, body) = command;
-    let ctx = crate::tools::ToolCtx { task_id:None, chat_id:m.chat_id.clone(), chat_type:m.chat_type.clone(), sender_pid:m.sender_pid.clone(), locale:Some("zh-CN".into()) };
-    let result = if body.is_empty() { Err(anyhow::anyhow!("请在命令后填写内容，例如 /搜索 Rust 官方文档")) }
-        else { skill.invoke(&ctx, serde_json::json!({"query":body,"user_text":body})).await };
-    let text = match result {
-        Ok(out) => {
-            let text = out.data["rendered"].as_str().unwrap_or(&out.summary).to_string();
-            for path in out.artifacts {
-                if let Err(e) = engine.enqueue_attachment_with_retention(m.chat_id.clone(), chat_type, target, path.into(), skill.artifact_retention()) {
-                    warn!(error=%e, "插件命令附件入队失败");
-                }
-            }
-            text
+        Err(e) => {
+            warn!(error=%e, "插件命令匹配失败");
+            return true;
         }
-        Err(e) => format!("命令未完成：{e}"),
     };
-    engine.enqueue(reply_engine::ReplyJob { chat_id:m.chat_id.clone(), chat_type, target,
-        anchor_msg_id:m.msg_id, mention:false, mention_qq:None,
-        kind:reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble { text, at:false, meme:None }]) });
+    let Some(engine) = deps.reply.as_ref() else {
+        return true;
+    };
+    let Ok((chat_type, target)) = reply_engine_route(m) else {
+        return true;
+    };
+    let (skill, body) = command;
+    let ctx = crate::tools::ToolCtx {
+        task_id: None,
+        chat_id: m.chat_id.clone(),
+        chat_type: m.chat_type.clone(),
+        sender_pid: m.sender_pid.clone(),
+        locale: Some("zh-CN".into()),
+    };
+    let mut slots = serde_json::json!({"query":body,"user_text":body,"explicit_command":true});
+    add_message_slots(deps, m, &mut slots).await;
+    let result = if body.is_empty()
+        && m.reply_to.is_none()
+        && slots["mentioned_qqs"]
+            .as_array()
+            .is_none_or(|a| a.is_empty())
+    {
+        Err(anyhow::anyhow!(
+            "请填写命令参数；撤回可引用目标消息后发送 /撤回"
+        ))
+    } else {
+        skill.invoke(&ctx, slots).await
+    };
+    let (text, artifacts) = match result {
+        Ok(out) => (
+            out.data["rendered"]
+                .as_str()
+                .unwrap_or(&out.summary)
+                .to_string(),
+            out.artifacts,
+        ),
+        Err(e) => (format!("命令未完成：{e}"), vec![]),
+    };
+    engine.enqueue(reply_engine::ReplyJob {
+        chat_id: m.chat_id.clone(),
+        chat_type,
+        target,
+        anchor_msg_id: m.msg_id,
+        mention: false,
+        mention_qq: None,
+        kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
+            text,
+            at: false,
+            meme: None,
+        }]),
+    });
+    for path in artifacts {
+        if let Err(e) = engine.enqueue_attachment_with_retention(
+            m.chat_id.clone(),
+            chat_type,
+            target,
+            path.into(),
+            skill.artifact_retention(),
+        ) {
+            warn!(error=%e, "插件命令附件入队失败");
+        }
+    }
     true
 }
 
@@ -639,34 +756,144 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn plugin_command_works_without_models_and_keeps_output_as_text() {
-        struct Search;
+        struct Search {
+            artifact: String,
+        }
         #[async_trait::async_trait]
         impl crate::skills::Skill for Search {
-            fn def(&self) -> crate::skills::SkillDef { crate::skills::SkillDef { name:"test.search",description:"test",prompt_template:"".into(),tools:vec![],role_hint:None } }
-            fn commands(&self) -> &'static [&'static str] { &["/搜索"] }
-            async fn invoke(&self, _: &crate::tools::ToolCtx, slots:serde_json::Value) -> anyhow::Result<crate::tools::ToolOutput> {
-                assert_eq!(slots["query"],"Rust");
-                Ok(crate::tools::ToolOutput { summary:"Rust\n::meme 开心\nhttps://www.rust-lang.org/".into(), artifacts:vec![],data:serde_json::json!({}) })
+            fn def(&self) -> crate::skills::SkillDef {
+                crate::skills::SkillDef {
+                    name: "test.search",
+                    description: "test",
+                    prompt_template: "".into(),
+                    tools: vec![],
+                    role_hint: None,
+                }
+            }
+            fn commands(&self) -> &'static [&'static str] {
+                &["/搜索", "/下载", "/撤回"]
+            }
+            async fn invoke(
+                &self,
+                _: &crate::tools::ToolCtx,
+                slots: serde_json::Value,
+            ) -> anyhow::Result<crate::tools::ToolOutput> {
+                assert_eq!(slots["explicit_command"], true);
+                assert_eq!(slots["user_text"], slots["query"]);
+                if slots["user_text"] == "" {
+                    assert_eq!(slots["reply_to"], -321);
+                    assert_eq!(slots["mentioned_qqs"], serde_json::json!([456]));
+                    return Ok(crate::tools::ToolOutput {
+                        summary: "已撤回".into(),
+                        artifacts: vec![],
+                        data: serde_json::json!({}),
+                    });
+                }
+                if slots["query"] == "https://www.bilibili.com/video/BV1xx411c7mD" {
+                    return Ok(crate::tools::ToolOutput {
+                        summary: "下载完成，开始交付".into(),
+                        artifacts: vec![self.artifact.clone()],
+                        data: serde_json::json!({}),
+                    });
+                }
+                assert_eq!(slots["query"], "Rust");
+                Ok(crate::tools::ToolOutput {
+                    summary: "Rust\n::meme 开心\nhttps://www.rust-lang.org/".into(),
+                    artifacts: vec![],
+                    data: serde_json::json!({}),
+                })
             }
         }
-        let db=temp_db().await;
-        let sent=Arc::new(std::sync::Mutex::new(Vec::new()));
-        let capture=sent.clone();
-        let send:reply_engine::SendFn=Arc::new(move |request| { capture.lock().unwrap().push(request); Box::pin(async { Ok(serde_json::json!({"message_id":1})) }) });
-        let bus=EventBus::default();
-        let mood=MoodState::default();
-        let cfg=Arc::new(RwLock::new(reply_engine::ReplyCfg { first_delay_min_ms:0,first_delay_max_ms:0,min_delay_ms:0,max_delay_ms:0,..Default::default() }));
-        let engine=reply_engine::ReplyEngine::new(db.clone(),bus.clone(),send,SelfMsgIds::default(),cfg.clone(),mood.clone()).spawn();
-        let skills=crate::skills::SkillRegistry::new(); skills.register_arc(Arc::new(Search));
-        let deps=PipelineDeps { bus,db_path:db,llm:Arc::new(RwLock::new(None)),self_qq:Arc::new(AtomicU64::new(100)),self_ids:SelfMsgIds::default(),mood,prefilter:Arc::new(RwLock::new(Default::default())),reply:Some(engine.clone()),reply_cfg:cfg,ctx_cfg:Arc::new(RwLock::new(Default::default())),memes_dir:PathBuf::new(),media_ctx:None,skill_registry:Some(skills),per_chat_cap:Arc::new(RwLock::new(32)) };
-        let mut message=MessageReceivedPayload { msg_id:0,chat_id:"42".into(),chat_type:"group".into(),sender_pid:"p_1".into(),text:"/搜索 Rust".into(),at_me:false,has_image:false,reply_to:None,sender_bot:false,image_urls:vec![],ts:1 };
-        handle_inner(&deps,&message,1).await;
-        message.sender_pid="self".into();
-        assert!(!handle_plugin_command(&deps,&message).await);
+        let db = temp_db().await;
+        let artifact = db.parent().unwrap().join("command.mp4");
+        std::fs::write(&artifact, b"video").unwrap();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = sent.clone();
+        let send: reply_engine::SendFn = Arc::new(move |request| {
+            capture.lock().unwrap().push(request);
+            Box::pin(async { Ok(serde_json::json!({"message_id":1})) })
+        });
+        let bus = EventBus::default();
+        let mood = MoodState::default();
+        let cfg = Arc::new(RwLock::new(reply_engine::ReplyCfg {
+            first_delay_min_ms: 0,
+            first_delay_max_ms: 0,
+            min_delay_ms: 0,
+            max_delay_ms: 0,
+            ..Default::default()
+        }));
+        let engine = reply_engine::ReplyEngine::new(
+            db.clone(),
+            bus.clone(),
+            send,
+            SelfMsgIds::default(),
+            cfg.clone(),
+            mood.clone(),
+        )
+        .spawn();
+        let skills = crate::skills::SkillRegistry::new();
+        skills.register_arc(Arc::new(Search {
+            artifact: artifact.to_string_lossy().into_owned(),
+        }));
+        let deps = PipelineDeps {
+            bus,
+            db_path: db,
+            llm: Arc::new(RwLock::new(None)),
+            self_qq: Arc::new(AtomicU64::new(100)),
+            self_ids: SelfMsgIds::default(),
+            mood,
+            prefilter: Arc::new(RwLock::new(Default::default())),
+            reply: Some(engine.clone()),
+            reply_cfg: cfg,
+            ctx_cfg: Arc::new(RwLock::new(Default::default())),
+            memes_dir: PathBuf::new(),
+            skill_registry: Some(skills),
+            per_chat_cap: Arc::new(RwLock::new(32)),
+        };
+        let mut message = MessageReceivedPayload {
+            msg_id: 0,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_1".into(),
+            text: "/搜索 Rust".into(),
+            at_me: false,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1,
+        };
+        handle_inner(&deps, &message, 1).await;
+        message.text = "/下载 https://www.bilibili.com/video/BV1xx411c7mD".into();
+        handle_inner(&deps, &message, 1).await;
+        let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
+        conn.execute(
+            "INSERT INTO persons(person_id,first_seen,last_seen) VALUES ('p_1',1,1)",
+            crate::db::params![],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,mentions) VALUES ('42','group','p_1','/撤回',1,?1)",crate::db::params!["[\"p_100\",\"p_456\",\"p_456\"]"]).await.unwrap();
+        message.msg_id = conn.last_insert_rowid().await.unwrap();
+        drop(conn);
+        message.text = "/撤回".into();
+        message.reply_to = Some(-321);
+        handle_inner(&deps, &message, 1).await;
+        message.sender_pid = "self".into();
+        assert!(!handle_plugin_command(&deps, &message).await);
+        message.sender_pid = "p_100".into();
+        assert!(!handle_plugin_command(&deps, &message).await);
         assert!(engine.shutdown(std::time::Duration::from_secs(3)).await);
-        let sent=sent.lock().unwrap(); assert_eq!(sent.len(),1);
-        assert_eq!(sent[0].segments[0]["type"],"text");
-        assert!(sent[0].segments[0]["data"]["text"].as_str().unwrap().contains("::meme"));
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 4);
+        assert_eq!(sent[0].segments[0]["type"], "text");
+        assert!(sent[0].segments[0]["data"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("::meme"));
+        assert_eq!(sent[1].segments[0]["data"]["text"], "下载完成，开始交付");
+        assert_eq!(sent[2].segments[0]["type"], "video");
+        assert_eq!(sent[3].segments[0]["data"]["text"], "已撤回");
     }
     use crate::db::params;
 
@@ -742,7 +969,7 @@ mod tests {
             ).await.unwrap();
         }
 
-        // 构造最简 PipelineDeps：无 LLM、无 reply、无 media_ctx、无 skills
+        // 构造最简 PipelineDeps：无 LLM、无 reply、无 skills
         let bus = crate::event::EventBus::default();
         let llm_slot: SharedLlm = std::sync::Arc::new(std::sync::RwLock::new(None));
         let prefilter_slot: SharedPrefilter =
@@ -765,7 +992,6 @@ mod tests {
             reply_cfg: reply_slot,
             ctx_cfg: ctx_slot,
             memes_dir: std::path::PathBuf::from("data/memes"),
-            media_ctx: None,
             skill_registry: None,
             per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
         };
@@ -831,7 +1057,6 @@ mod tests {
                 crate::context_builder::ContextCfg::default(),
             )),
             memes_dir: std::path::PathBuf::from("data/memes"),
-            media_ctx: None,
             skill_registry: None,
             per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
         };

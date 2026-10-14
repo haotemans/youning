@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+yuantuan-plugin-moderator = { path = "../../plugins/moderator", optional = true }
 yuantuan-plugin-anysearch = { path = "../../plugins/anysearch", optional = true }
+yuantuan-plugin-nai-image = { path = "../../plugins/nai-image", optional = true }
 yuantuan-plugin-api = { path = "../plugin-api" }
 yuantuan-core = { path = "../core" }
 yuantuan-adapter-qq = { path = "../adapter-qq" }
@@ -22,12 +24,18 @@ tracing-subscriber = "0.3"
 
 [features]
 plugin-anysearch = ["dep:yuantuan-plugin-anysearch"]
-default = ["plugin-hello", "plugin-social-media", "plugin-anysearch"]
+default = ["plugin-hello", "plugin-social-media", "plugin-anysearch", "plugin-moderator", "plugin-nai-image"]
+plugin-moderator = ["dep:yuantuan-plugin-moderator"]
+plugin-nai-image = ["dep:yuantuan-plugin-nai-image"]
 plugin-hello = ["dep:yuantuan-plugin-hello"]
 plugin-social-media = ["dep:yuantuan-plugin-social-media"]
 
 [build-dependencies]
 toml = "0.8"
+
+[[package.metadata.yuantuan.plugins]]
+dependency = "yuantuan-plugin-moderator"
+feature = "plugin-moderator"
 
 [[package.metadata.yuantuan.plugins]]
 dependency = "yuantuan-plugin-hello"
@@ -40,3 +48,7 @@ feature = "plugin-social-media"
 [[package.metadata.yuantuan.plugins]]
 dependency = "yuantuan-plugin-anysearch"
 feature = "plugin-anysearch"
+
+[[package.metadata.yuantuan.plugins]]
+dependency = "yuantuan-plugin-nai-image"
+feature = "plugin-nai-image"

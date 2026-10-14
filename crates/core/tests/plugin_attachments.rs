@@ -105,8 +105,13 @@ async fn plugin_media_uses_correct_segments_and_records_delivery_outcome() {
 struct TempFiles(std::path::PathBuf);
 impl TempFiles {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("yt-delivery-cleanup-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        // Windows clock resolution can give parallel tests the same timestamp.
+        let root = std::env::temp_dir().join(format!(
+            "yt-delivery-cleanup-{}-{}",
+            std::process::id(),
+            rand::random::<u128>()
+        ));
+        std::fs::create_dir(&root).unwrap();
         std::fs::create_dir_all(root.join("plugins/social-media/artifacts")).unwrap();
         Self(root)
     }
@@ -116,12 +121,21 @@ impl TempFiles {
         path
     }
     fn engine(&self, bus: EventBus, send: SendFn) -> yuantuan_core::reply_engine::EngineHandle {
-        ReplyEngine::new(self.0.join("db.sqlite"), bus, send, SelfMsgIds::default(),
-            Arc::new(std::sync::RwLock::new(ReplyCfg::default())), MoodState::default()).spawn()
+        ReplyEngine::new(
+            self.0.join("db.sqlite"),
+            bus,
+            send,
+            SelfMsgIds::default(),
+            Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
+            MoodState::default(),
+        )
+        .spawn()
     }
 }
 impl Drop for TempFiles {
-    fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[tokio::test]
@@ -134,17 +148,26 @@ async fn temporary_attachments_survive_retries_and_delete_only_after_their_recei
     let retry_started = Arc::new(tokio::sync::Notify::new());
     let receipt = Arc::new(tokio::sync::Notify::new());
     let send: SendFn = {
-        let attempts = attempts.clone(); let retry_started = retry_started.clone();
-        let receipt = receipt.clone(); let video = video.clone(); let photo = photo.clone();
+        let attempts = attempts.clone();
+        let retry_started = retry_started.clone();
+        let receipt = receipt.clone();
+        let video = video.clone();
+        let photo = photo.clone();
         Arc::new(move |_| {
             let attempt = attempts.fetch_add(1, Ordering::Relaxed);
-            let retry_started = retry_started.clone(); let receipt = receipt.clone();
-            let video = video.clone(); let photo = photo.clone();
+            let retry_started = retry_started.clone();
+            let receipt = receipt.clone();
+            let video = video.clone();
+            let photo = photo.clone();
             Box::pin(async move {
-                if attempt == 0 { assert!(video.exists()); anyhow::bail!("first send failed"); }
+                if attempt == 0 {
+                    assert!(video.exists());
+                    anyhow::bail!("first send failed");
+                }
                 if attempt == 1 {
                     assert!(video.exists(), "重试发送时文件必须仍可读");
-                    retry_started.notify_one(); receipt.notified().await;
+                    retry_started.notify_one();
+                    receipt.notified().await;
                 } else {
                     assert!(!video.exists(), "已确认的视频已清理");
                     assert!(photo.exists(), "尚未发送的图片必须保留");
@@ -153,22 +176,39 @@ async fn temporary_attachments_survive_retries_and_delete_only_after_their_recei
             })
         })
     };
-    let bus = EventBus::new(8); let mut events = bus.subscribe();
+    let bus = EventBus::new(8);
+    let mut events = bus.subscribe();
     let engine = files.engine(bus, send);
     for path in [&video, &photo] {
-        engine.enqueue_attachment_with_retention("group".into(), ChatType::Group, 123,
-            path.clone(), ArtifactRetention::DeleteAfterSend).unwrap();
+        engine
+            .enqueue_attachment_with_retention(
+                "group".into(),
+                ChatType::Group,
+                123,
+                path.clone(),
+                ArtifactRetention::DeleteAfterSend,
+            )
+            .unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(2), retry_started.notified()).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), retry_started.notified())
+        .await
+        .unwrap();
     assert!(video.exists(), "下载或入队成功不能提前删除文件");
     assert!(photo.exists());
     receipt.notify_one();
     assert!(engine.shutdown(Duration::from_secs(3)).await);
-    assert!(!video.exists()); assert!(!photo.exists());
-    assert!(photo.parent().unwrap().exists(), "只删除文件，不删除插件目录");
+    assert!(!video.exists());
+    assert!(!photo.exists());
+    assert!(
+        photo.parent().unwrap().exists(),
+        "只删除文件，不删除插件目录"
+    );
     for _ in 0..2 {
         match events.try_recv().unwrap() {
-            Event::BubbleSent(p) => { assert!(p.ok); assert!(p.note.unwrap().contains("临时文件已删除")); },
+            Event::BubbleSent(p) => {
+                assert!(p.ok);
+                assert!(p.note.unwrap().contains("临时文件已删除"));
+            }
             _ => panic!("missing delivery event"),
         }
     }
@@ -184,22 +224,43 @@ async fn failed_unconfirmed_and_cancelled_deliveries_keep_their_files() {
             Box::pin(async move { response.ok_or_else(|| anyhow::anyhow!("adapter failed")) })
         });
         let engine = files.engine(EventBus::new(8), send);
-        engine.enqueue_attachment_with_retention("group".into(), ChatType::Group, 123,
-            path.clone(), ArtifactRetention::DeleteAfterSend).unwrap();
+        engine
+            .enqueue_attachment_with_retention(
+                "group".into(),
+                ChatType::Group,
+                123,
+                path.clone(),
+                ArtifactRetention::DeleteAfterSend,
+            )
+            .unwrap();
         assert!(engine.shutdown(Duration::from_secs(3)).await);
         assert!(path.exists(), "{name} must be retained");
     }
     let path = files.artifact("cancelled.mp4");
     let started = Arc::new(tokio::sync::Notify::new());
-    let send: SendFn = { let started = started.clone(); Arc::new(move |_| {
-        let started = started.clone(); Box::pin(async move {
-            started.notify_one(); std::future::pending().await
+    let send: SendFn = {
+        let started = started.clone();
+        Arc::new(move |_| {
+            let started = started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                std::future::pending().await
+            })
         })
-    }) };
+    };
     let engine = files.engine(EventBus::new(8), send);
-    engine.enqueue_attachment_with_retention("group".into(), ChatType::Group, 123,
-        path.clone(), ArtifactRetention::DeleteAfterSend).unwrap();
-    tokio::time::timeout(Duration::from_secs(2), started.notified()).await.unwrap();
+    engine
+        .enqueue_attachment_with_retention(
+            "group".into(),
+            ChatType::Group,
+            123,
+            path.clone(),
+            ArtifactRetention::DeleteAfterSend,
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
     assert!(!engine.shutdown(Duration::from_millis(20)).await);
     assert!(path.exists());
 }
@@ -212,18 +273,30 @@ async fn cleanup_cannot_delete_files_outside_plugin_artifacts() {
     std::fs::write(&external, b"meme").unwrap();
     let config = files.0.join("plugins/social-media/keep.mp4");
     std::fs::write(&config, b"not an output").unwrap();
-    let bus = EventBus::new(8); let mut events = bus.subscribe();
+    let bus = EventBus::new(8);
+    let mut events = bus.subscribe();
     let send: SendFn = Arc::new(|_| Box::pin(async { Ok(json!({"message_id":42})) }));
     let engine = files.engine(bus, send);
     for path in [&external, &config] {
-        engine.enqueue_attachment_with_retention("group".into(), ChatType::Group, 123,
-            path.clone(), ArtifactRetention::DeleteAfterSend).unwrap();
+        engine
+            .enqueue_attachment_with_retention(
+                "group".into(),
+                ChatType::Group,
+                123,
+                path.clone(),
+                ArtifactRetention::DeleteAfterSend,
+            )
+            .unwrap();
     }
     assert!(engine.shutdown(Duration::from_secs(3)).await);
-    assert!(external.exists()); assert!(config.exists());
+    assert!(external.exists());
+    assert!(config.exists());
     for _ in 0..2 {
         match events.try_recv().unwrap() {
-            Event::BubbleSent(p) => { assert!(p.ok); assert!(p.note.unwrap().contains("清理失败")); },
+            Event::BubbleSent(p) => {
+                assert!(p.ok);
+                assert!(p.note.unwrap().contains("清理失败"));
+            }
             _ => panic!("missing delivery event"),
         }
     }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub const API_VERSION: u32 = 1;
+pub const API_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct PluginMeta {
@@ -21,12 +21,19 @@ pub struct PluginMeta {
     pub api_version: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigKind {
     String,
     Boolean,
     Integer,
+    Choice,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigOption {
+    pub label: &'static str,
+    pub value: &'static str,
 }
 
 /// A small form schema understood by the host, with optional plugin validation.
@@ -37,6 +44,8 @@ pub struct ConfigField {
     pub kind: ConfigKind,
     pub default: Value,
     pub secret: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ConfigOption>,
 }
 
 pub fn validate_config(fields: &[ConfigField], value: &Value) -> Result<()> {
@@ -52,6 +61,9 @@ pub fn validate_config(fields: &[ConfigField], value: &Value) -> Result<()> {
             ConfigKind::String => value.is_string(),
             ConfigKind::Boolean => value.is_boolean(),
             ConfigKind::Integer => value.is_i64(),
+            ConfigKind::Choice => value
+                .as_str()
+                .is_some_and(|value| field.options.iter().any(|option| option.value == value)),
         };
         if !valid {
             bail!("配置项 {key} 的类型不正确");
@@ -68,10 +80,25 @@ pub struct KnowledgeHit {
     pub source: String,
 }
 
+/// Restricted group actions; the adapter must verify live roles and message ownership.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModerationAction {
+    Recall { message_id: i64 },
+    Ban { user_id: u64, duration_secs: u32 },
+}
+
+#[async_trait]
+pub trait GroupModeration: Send + Sync {
+    async fn execute(&self, ctx: &ToolCtx, action: ModerationAction) -> Result<()>;
+}
+
 /// Host services are scoped to one plugin. Call context is supplied by the host.
 /// Native Rust code is trusted code: this interface is not an OS sandbox.
 #[async_trait]
 pub trait HostServices: Send + Sync {
+    async fn moderate(&self, _ctx: &ToolCtx, _action: ModerationAction) -> Result<()> {
+        bail!("宿主未提供群管理服务")
+    }
     async fn chat(&self, ctx: &ToolCtx, system: &str, user: &str) -> Result<String>;
     async fn read_data(&self, key: &str) -> Result<Option<Value>>;
     async fn write_data(&self, key: &str, value: Value) -> Result<()>;
@@ -110,6 +137,10 @@ pub struct PluginEvent {
 #[async_trait]
 pub trait Plugin: Send + Sync {
     fn metadata(&self) -> PluginMeta;
+    /// Opt in to the restricted host service; adapter authorization still applies.
+    fn uses_group_moderation(&self) -> bool {
+        false
+    }
     fn default_timeout_ms(&self) -> u64 {
         30_000
     }

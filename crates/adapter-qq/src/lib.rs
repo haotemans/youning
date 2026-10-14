@@ -5,6 +5,8 @@
 mod client;
 mod ingest;
 mod server;
+mod moderation;
+pub use moderation::moderation_service;
 
 pub use client::{send_fn, shared_token, AdapterHandle, NapcatConfig, NapcatSender, SharedToken};
 pub use server::spawn;

@@ -129,6 +129,7 @@ impl Plugin for TestPlugin {
             kind: ConfigKind::String,
             default: json!("test-secret"),
             secret: true,
+            options: vec![],
         }]
     }
     async fn start(&self, ctx: PluginContext, _: Value) -> Result<Capabilities> {
@@ -171,6 +172,120 @@ fn enabled() -> PluginSettings {
         enabled: true,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn moderation_requires_declaration_scope_and_active_plugin() {
+    struct AdminPlugin {
+        declared: bool,
+    }
+    struct AdminTool {
+        host: Arc<dyn HostServices>,
+        declared: bool,
+    }
+    struct Service(AtomicUsize);
+    #[async_trait]
+    impl GroupModeration for Service {
+        async fn execute(&self, _: &ToolCtx, _: ModerationAction) -> Result<()> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+    #[async_trait]
+    impl Plugin for AdminPlugin {
+        fn metadata(&self) -> PluginMeta {
+            PluginMeta {
+                id: if self.declared {
+                    "declared"
+                } else {
+                    "undeclared"
+                },
+                name: "test",
+                version: "1",
+                description: "test",
+                api_version: API_VERSION,
+            }
+        }
+        fn uses_group_moderation(&self) -> bool {
+            self.declared
+        }
+        async fn start(&self, ctx: PluginContext, _: Value) -> Result<Capabilities> {
+            Ok(Capabilities {
+                tools: vec![Arc::new(AdminTool {
+                    host: ctx.host,
+                    declared: self.declared,
+                })],
+                skills: vec![],
+            })
+        }
+    }
+    #[async_trait]
+    impl Tool for AdminTool {
+        fn name(&self) -> &'static str {
+            if self.declared {
+                "declared.ban"
+            } else {
+                "undeclared.ban"
+            }
+        }
+        fn description(&self) -> &'static str {
+            "test"
+        }
+        async fn call(&self, ctx: &ToolCtx, _: Value) -> Result<ToolOutput> {
+            self.host
+                .moderate(
+                    ctx,
+                    ModerationAction::Ban {
+                        user_id: 456,
+                        duration_secs: 60,
+                    },
+                )
+                .await?;
+            Ok(ToolOutput {
+                summary: "ok".into(),
+                artifacts: vec![],
+                data: json!({}),
+            })
+        }
+    }
+    let f = Fixture::new();
+    for id in ["declared", "undeclared"] {
+        f.settings(
+            id,
+            PluginSettings {
+                allowed_chats: Some(vec!["42".into()]),
+                ..enabled()
+            },
+        );
+    }
+    let service = Arc::new(Service(AtomicUsize::new(0)));
+    let tools = Registry::new();
+    let host = PluginManager::load_with_moderation(
+        vec![
+            Arc::new(AdminPlugin { declared: true }),
+            Arc::new(AdminPlugin { declared: false }),
+        ],
+        f.root.clone(),
+        f.root.join("source"),
+        tools.clone(),
+        SkillRegistry::new(),
+        Arc::new(RwLock::new(None)),
+        Some(service.clone()),
+    )
+    .await
+    .unwrap();
+    let tool = tools.get("declared.ban").unwrap();
+    tool.call(&context("42"), json!({})).await.unwrap();
+    assert!(tool.call(&context("43"), json!({})).await.is_err());
+    assert!(tools
+        .get("undeclared.ban")
+        .unwrap()
+        .call(&context("42"), json!({}))
+        .await
+        .is_err());
+    host.shutdown().await;
+    assert!(tool.call(&context("42"), json!({})).await.is_err());
+    assert_eq!(service.0.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]

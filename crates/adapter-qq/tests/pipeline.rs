@@ -224,7 +224,6 @@ async fn decision_pipeline_q54_window_aggregation() {
             yuantuan_core::context_builder::ContextCfg::default(),
         )),
         memes_dir: temp_dir("pipeline-memes"),
-        media_ctx: None,
         skill_registry: None,
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
@@ -362,7 +361,6 @@ async fn decision_pipeline_fallback_retries() {
             yuantuan_core::context_builder::ContextCfg::default(),
         )),
         memes_dir: temp_dir("pipeline-memes"),
-        media_ctx: None,
         skill_registry: None,
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });

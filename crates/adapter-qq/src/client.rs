@@ -202,7 +202,7 @@ impl NapcatSender {
         }
     }
 
-    async fn action(&self, action: &str, params: Value) -> Result<Value> {
+    pub(crate) async fn action(&self, action: &str, params: Value) -> Result<Value> {
         let echo = next_echo(&self.counter);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(echo.clone(), tx);

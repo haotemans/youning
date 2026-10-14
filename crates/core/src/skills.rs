@@ -49,10 +49,12 @@ impl SkillRegistry {
                 anyhow::bail!("能力名称冲突：{name}");
             }
             for command in tool.commands() {
+                let nai_image_command =
+                    name == "nai-image.generate" && ["/image", "/画"].contains(command);
                 if !command.starts_with('/')
                     || command.len() <= 1
                     || command.chars().any(char::is_whitespace)
-                    || ["/image", "/画"].contains(command)
+                    || (["/image", "/画"].contains(command) && !nai_image_command)
                     || !commands.insert(*command)
                 {
                     anyhow::bail!("插件命令无效或冲突：{command}");

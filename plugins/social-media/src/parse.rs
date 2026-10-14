@@ -129,11 +129,19 @@ pub fn douyin(data: &Value, source: String) -> Result<Post> {
     let loaders = data["loaderData"]
         .as_object()
         .context("抖音没有返回作品数据")?;
+    let requested = Url::parse(&source)
+        .ok()
+        .and_then(|url| douyin_id(&url).ok());
     let item = loaders
         .values()
-        .find_map(|p| {
+        .filter_map(|p| {
             p.pointer("/videoInfoRes/item_list/0")
                 .or_else(|| p.pointer("/noteInfoRes/item_list/0"))
+        })
+        .find(|item| {
+            requested
+                .as_ref()
+                .is_none_or(|id| item["aweme_id"].as_str() == Some(id))
         })
         .context("抖音作品不可用或需要登录")?;
     let mut media = vec![];
@@ -171,13 +179,6 @@ pub fn xiaohongshu(data: &Value, source: String) -> Result<Post> {
         .and_then(|s| s.filter(|s| !s.is_empty()).next_back());
     let item = requested
         .and_then(|id| map.get(id))
-        .or_else(|| {
-            if map.len() == 1 {
-                map.values().next()
-            } else {
-                None
-            }
-        })
         .and_then(|v| v.get("note"))
         .context("页面未包含该笔记的数据")?;
     let mut media = vec![];
@@ -295,6 +296,19 @@ fn syndication_token(id: &str) -> Result<String> {
         .collect())
 }
 
+fn douyin_id(url: &Url) -> Result<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == "modal_id" || k == "aweme_id")
+        .map(|(_, v)| v.into_owned())
+        .or_else(|| {
+            url.path_segments()
+                .and_then(|s| s.filter(|s| !s.is_empty()).next_back())
+                .map(str::to_owned)
+        })
+        .filter(|s| (10..=24).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_digit()))
+        .context("未识别到抖音作品 ID")
+}
+
 pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
     let mut url = share_url(input)?;
     let site = platform(&url)?;
@@ -313,17 +327,7 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
     let post = match site {
         Platform::Bilibili => bilibili(http, &url).await?,
         Platform::Douyin => {
-            let id = url
-                .query_pairs()
-                .find(|(k, _)| k == "modal_id")
-                .map(|(_, v)| v.into_owned())
-                .or_else(|| {
-                    url.path_segments()
-                        .and_then(|s| s.filter(|s| !s.is_empty()).next_back())
-                        .map(str::to_owned)
-                })
-                .filter(|s| s.len() >= 10 && s.bytes().all(|c| c.is_ascii_digit()))
-                .context("未识别到抖音作品 ID")?;
+            let id = douyin_id(&url)?;
             let kind = if url.path().contains("/note/") {
                 "note"
             } else {
@@ -335,7 +339,11 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
                     "https://www.douyin.com/",
                 )
                 .await?;
-            douyin(&state(&html, "window._ROUTER_DATA")?, source)?
+            // Match the original work ID even if the short link resolves to a generic landing page.
+            douyin(
+                &state(&html, "window._ROUTER_DATA")?,
+                format!("https://www.douyin.com/{kind}/{id}"),
+            )?
         }
         Platform::Xiaohongshu => {
             let (_, html) = http
@@ -449,6 +457,27 @@ async fn bilibili(http: &Http, url: &Url) -> Result<Post> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn rejects_recommended_posts_instead_of_downloading_wrong_work() {
+        let xhs = json!({"note":{"noteDetailMap":{"other":{"note":{"type":"normal","imageList":[{"urlDefault":"https://cdn.test/other.jpg"}]}}}}});
+        assert!(xiaohongshu(&xhs, "https://www.xiaohongshu.com/explore/requested".into()).is_err());
+        let dy = json!({"loaderData":{"video_(id)/page":{"videoInfoRes":{"item_list":[{"aweme_id":"12345678901","video":{"play_addr":{"url_list":["https://cdn.test/v.mp4"]}}}]}}}});
+        assert!(douyin(&dy, "https://www.douyin.com/video/99999999999".into()).is_err());
+        assert_eq!(
+            douyin(&dy, "https://www.douyin.com/video/12345678901".into())
+                .unwrap()
+                .media
+                .len(),
+            1
+        );
+        assert_eq!(
+            douyin_id(
+                &Url::parse("https://www.iesdouyin.com/share/video/?aweme_id=12345678901").unwrap()
+            )
+            .unwrap(),
+            "12345678901"
+        );
+    }
     #[test]
     fn syndication_tokens_match_javascript() {
         assert_eq!(

@@ -46,10 +46,11 @@
         </n-layout-header>
 
         <n-layout has-sider position="absolute" style="top: 56px">
-          <n-layout-sider class="yt-sider" bordered collapse-mode="width" :width="212" :collapsed-width="64"
-                          :collapsed="ui.collapsed" :native-scrollbar="false">
+          <n-layout-sider class="yt-sider" :class="{ 'is-collapsed': ui.collapsed }" bordered collapse-mode="width"
+                          :width="212" :collapsed-width="64" :collapsed="ui.collapsed" :native-scrollbar="false">
             <n-menu :options="menuOptions" :value="String($route.name)" :collapsed="ui.collapsed"
-                    :collapsed-icon-size="18" :root-indent="16" :indent="14" class="yt-nav-menu" @update:value="go" />
+                    :collapsed-width="64" :collapsed-icon-size="18" :root-indent="16" :indent="14"
+                    class="yt-nav-menu" @update:value="go" />
           </n-layout-sider>
           <n-layout-content class="yt-main-content" :native-scrollbar="false" content-style="padding: 24px 28px;">
             <router-view v-slot="{ Component }">
@@ -65,9 +66,9 @@
 </template>
 
 <script setup>
-import { h, onMounted, watchEffect } from 'vue'
+import { computed, h, onMounted, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { darkTheme, NTooltip } from 'naive-ui'
+import { darkTheme } from 'naive-ui'
 import { useUiStore } from './store/ui'
 import { lightOverrides, darkOverrides } from './theme'
 import { wsConnected, ensureWs } from './ws'
@@ -105,22 +106,30 @@ const groups = [
   ]],
 ]
 
-const iconWithTip = (icon, label) => () =>
-  h(NTooltip, { trigger: 'hover', placement: 'right', disabled: !ui.collapsed }, {
-    trigger: () => h(YtIcon, { name: icon, size: 18 }),
-    default: () => label,
-  })
+const renderIcon = (icon) => () => h(YtIcon, { name: icon, size: 18 })
 
-const menuOptions = groups.map(([label, children]) => ({
-  type: 'group',
-  label,
-  key: label,
-  children: children.map(([key, l, icon]) => ({
-    label: () => h('span', l),
-    key,
-    icon: iconWithTip(icon, l),
-  })),
-}))
+// 折叠态下自动拍平菜单项，彻底移除分组文字标题，避免窄栏文字换行重叠
+const menuOptions = computed(() => {
+  if (ui.collapsed) {
+    return groups.flatMap(([, children]) =>
+      children.map(([key, l, icon]) => ({
+        label: l,
+        key,
+        icon: renderIcon(icon),
+      }))
+    )
+  }
+  return groups.map(([label, children]) => ({
+    type: 'group',
+    label,
+    key: label,
+    children: children.map(([key, l, icon]) => ({
+      label: l,
+      key,
+      icon: renderIcon(icon),
+    })),
+  }))
+})
 
 function go(key) {
   router.push({ name: key })
