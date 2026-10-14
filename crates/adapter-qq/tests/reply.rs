@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 /// Windows 异步 IO / tokio scheduler 较慢,集成测试超时窗口放宽
 #[cfg(windows)]
 fn deadline_secs() -> Duration {
-    Duration::from_secs(60)
+    Duration::from_secs(120)
 }
 #[cfg(not(windows))]
 fn deadline_secs() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(60)
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

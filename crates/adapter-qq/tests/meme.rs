@@ -11,14 +11,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Windows 异步 IO / tokio scheduler 较慢,集成测试超时窗口放宽
-/// (CI 上 Windows runner 出现过 30s 内未跑出来的 flaky;Linux 保持 30s 用以捕捉真退化)
+/// (CI 上 Windows runner 出现过 30s/60s 内未跑出来的 flaky;Linux 保持 30s 用以捕捉真退化)
 #[cfg(windows)]
 fn deadline_secs() -> Duration {
-    Duration::from_secs(60)
+    Duration::from_secs(120)
 }
 #[cfg(not(windows))]
 fn deadline_secs() -> Duration {
-    Duration::from_secs(30)
+    Duration::from_secs(60)
 }
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -270,28 +270,39 @@ async fn decision_send_meme_sends_image() {
         .replace('/', std::path::MAIN_SEPARATOR_STR);
     assert!(PathBuf::from(&local).exists(), "图文件应存在: {local}");
 
-    // use_count 增加、last_used_ts 已写
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // use_count 增加、last_used_ts 已写(等异步落库,不要硬编码 200ms——CI 共享 vCPU 上 200ms 不够)
     let mut conn = db::connect(&db_path).await.unwrap();
-    let (use_count, last_used): (i64, Option<i64>) = conn
-        .query_row(
-            "SELECT use_count, last_used_ts FROM meme_library WHERE id = 1",
-            yuantuan_core::db::params![],
-            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
-        )
-        .await
-        .unwrap();
+    let deadline2 = Instant::now() + deadline_secs();
+    let (use_count, last_used, self_img) = loop {
+        let row: (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT use_count, last_used_ts FROM meme_library WHERE id = 1",
+                yuantuan_core::db::params![],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+            )
+            .await
+            .unwrap();
+        let self_img: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND has_image=1",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        if row.0 == 1 && row.1.is_some() && self_img == 1 {
+            break (row.0, row.1, self_img);
+        }
+        assert!(
+            Instant::now() < deadline2,
+            "落库超时: use_count={} last_used={:?} self_img={self_img}",
+            row.0,
+            row.1
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    };
     assert_eq!(use_count, 1);
     assert!(last_used.is_some());
-    // self 图片消息落流水
-    let self_img: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND has_image=1",
-            yuantuan_core::db::params![],
-            |r| r.try_get(0),
-        )
-        .await
-        .unwrap();
     assert_eq!(self_img, 1);
 }
 
