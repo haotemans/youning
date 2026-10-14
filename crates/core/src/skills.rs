@@ -9,69 +9,13 @@
 //!           main 装配时把 Skill 注入 SkillRegistry；Decision 看到 skill 描述列表后
 //!           可以在 JSON 里返回 action=invoke_skill 主动触发（Q-S02 裁决）。
 
-use anyhow::Result;
-use async_trait::async_trait;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::tools::{ToolCtx, ToolOutput};
-
-/// Skill 元数据（编译期常量 + prompt_template 运行期持有）
-#[derive(Debug, Clone)]
-pub struct SkillDef {
-    /// 稳定 ID（snake_case），Decision 用这个名字索引
-    pub name: &'static str,
-    /// 一句中文：注入 Decision 系统提示，让模型知道何时使用这个 Skill
-    pub description: &'static str,
-    /// 提示词模板；支持 {user_text} / {context} 槽位，由 Bot 在调用前替换
-    pub prompt_template: String,
-    /// 可选联动 Tool 名（skill 执行完后可以接着调这些 tool，多用于发图/发文）
-    pub tools: Vec<&'static str>,
-    /// 可选 role 提示：拼到 chat role 的 system 尾部；默认 None
-    pub role_hint: Option<&'static str>,
-}
-
-/// Skill trait：插件实现它提供提示词级别的能力复用。
-/// 与 Tool 一样是 Send + Sync，Registry 在 tokio 多任务间共享。
-#[async_trait]
-pub trait Skill: Send + Sync {
-    /// 返回 Skill 元数据
-    fn def(&self) -> SkillDef;
-
-    /// 执行 Skill：Bot 已把 slots 塞进 prompt_template，这里专注调 chat LLM。
-    /// 默认实现是不调 LLM 直接把 slots 塞进模板渲染出来（用于 deterministic 场景）；
-    /// 大多数场景插件会 override 使用自己的 LLM 调用。
-    async fn invoke(&self, _ctx: &ToolCtx, slots: Value) -> Result<ToolOutput> {
-        let def = self.def();
-        let rendered = render_template(&def.prompt_template, &slots);
-        Ok(ToolOutput {
-            summary: format!("skill {} 渲染完成", def.name),
-            artifacts: vec![],
-            data: serde_json::json!({
-                "skill": def.name,
-                "rendered": rendered,
-                "slots": slots,
-            }),
-        })
-    }
-}
-
-/// 模板渲染：把 {key} 槽位替换成 slots[key] 的字符串值；缺失的槽保留原样
-pub fn render_template(template: &str, slots: &Value) -> String {
-    let mut out = template.to_string();
-    if let Some(obj) = slots.as_object() {
-        for (k, v) in obj {
-            let needle = format!("{{{k}}}");
-            let replacement = match v {
-                Value::String(s) => s.clone(),
-                other => other.to_string(),
-            };
-            out = out.replace(&needle, &replacement);
-        }
-    }
-    out
-}
+pub use yuantuan_plugin_api::{
+    arc_skill, build_slots, render_skill_catalog, render_template, validate_slots, Skill, SkillDef,
+    SkillImpl,
+};
 
 /// Skill 注册表（类似 tools::Registry）
 #[derive(Default, Clone)]
@@ -90,6 +34,61 @@ impl SkillRegistry {
             .write()
             .expect("skills registry poisoned")
             .insert(name, skill);
+    }
+
+    pub fn register_batch(&self, items: Vec<Arc<dyn Skill>>) -> anyhow::Result<()> {
+        let mut registry = self.inner.write().unwrap();
+        let mut names = std::collections::HashSet::new();
+        let mut commands: std::collections::HashSet<_> = registry
+            .values()
+            .flat_map(|s| s.commands().iter().copied())
+            .collect();
+        for tool in &items {
+            let name = tool.def().name;
+            if registry.contains_key(name) || !names.insert(name) {
+                anyhow::bail!("能力名称冲突：{name}");
+            }
+            for command in tool.commands() {
+                if !command.starts_with('/')
+                    || command.len() <= 1
+                    || command.chars().any(char::is_whitespace)
+                    || ["/image", "/画"].contains(command)
+                    || !commands.insert(*command)
+                {
+                    anyhow::bail!("插件命令无效或冲突：{command}");
+                }
+            }
+        }
+        for tool in items {
+            registry.insert(tool.def().name, tool);
+        }
+        Ok(())
+    }
+
+    pub fn command(&self, text: &str) -> anyhow::Result<Option<(Arc<dyn Skill>, String)>> {
+        let text = text.trim_start();
+        let mut found = None;
+        for skill in self.inner.read().unwrap().values() {
+            for command in skill.commands() {
+                if let Some(body) = text
+                    .strip_prefix(command)
+                    .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+                {
+                    if found.is_some() {
+                        anyhow::bail!("插件命令存在冲突");
+                    }
+                    found = Some((skill.clone(), body.trim().to_string()));
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    pub fn unregister(&self, names: &[&str]) {
+        let mut registry = self.inner.write().unwrap();
+        for name in names {
+            registry.remove(*name);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Skill>> {
@@ -123,10 +122,7 @@ impl SkillRegistry {
     }
 
     pub fn len(&self) -> usize {
-        self.inner
-            .read()
-            .expect("skills registry poisoned")
-            .len()
+        self.inner.read().expect("skills registry poisoned").len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -134,76 +130,46 @@ impl SkillRegistry {
     }
 }
 
-/// 便捷构造器：插件用 `SkillImpl::new(def)` 直接得到一个简单 Skill
-pub struct SkillImpl {
-    def: SkillDef,
-}
-
-impl SkillImpl {
-    pub fn new(def: SkillDef) -> Self {
-        Self { def }
-    }
-}
-
-#[async_trait]
-impl Skill for SkillImpl {
-    fn def(&self) -> SkillDef {
-        self.def.clone()
-    }
-}
-
-/// 从 Def 直接构造 Arc<dyn Skill>（插件 register() 里用）
-pub fn arc_skill(def: SkillDef) -> Result<Arc<dyn Skill>> {
-    if def.name.is_empty() {
-        anyhow::bail!("skill name 不能为空");
-    }
-    if def.description.is_empty() {
-        anyhow::bail!("skill description 不能为空");
-    }
-    Ok(Arc::new(SkillImpl::new(def)))
-}
-
-/// 校验 skill 调用的 slots（Decision 可选提供）
-pub fn validate_slots(_def: &SkillDef, _slots: &Value) -> Result<()> {
-    // 第一版不做强 schema 校验，模板渲染时缺槽保留原样
-    Ok(())
-}
-
-/// 帮助函数：Skill 联动 Tool 时，Bot 按顺序调多个
-pub async fn chain_with_tools(
-    _skill_output: ToolOutput,
-    _tool_names: &[&'static str],
-    _ctx: &ToolCtx,
-) -> Result<ToolOutput> {
-    // Phase 2 简化：不在 Skill 链路里自动调 Tool，由 Bot 看到 def.tools 后显式调
-    // Phase 3 视需要补全自动链
-    anyhow::bail!("chain_with_tools 未实现；请由 Bot 显式编排")
-}
-
-/// 上下文便捷方法（由 Bot 调用前填槽用）
-pub fn build_slots(user_text: &str, context: Option<&str>) -> Value {
-    serde_json::json!({
-        "user_text": user_text,
-        "context": context.unwrap_or(""),
-    })
-}
-
-/// 便捷：描述列表渲染成 Decision 系统提示片段
-pub fn render_skill_catalog(skills: &[(String, String)]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("\n\n可用 Skills（当消息语义匹配时可返回 action=invoke_skill 触发）：\n");
-    for (name, desc) in skills {
-        out.push_str(&format!("- {name}: {desc}\n"));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use yuantuan_plugin_api::ToolCtx;
+
+    struct CommandSkill(&'static str);
+    #[async_trait::async_trait]
+    impl Skill for CommandSkill {
+        fn def(&self) -> SkillDef {
+            SkillDef {
+                name: self.0,
+                description: "test",
+                prompt_template: "".into(),
+                tools: vec![],
+                role_hint: None,
+            }
+        }
+        fn commands(&self) -> &'static [&'static str] {
+            &["/搜索", "/search"]
+        }
+    }
+    #[test]
+    fn commands_require_explicit_prefix_and_unique_registration() {
+        let registry = SkillRegistry::new();
+        registry
+            .register_batch(vec![Arc::new(CommandSkill("first"))])
+            .unwrap();
+        assert_eq!(registry.command("/搜索 Rust").unwrap().unwrap().1, "Rust");
+        assert_eq!(
+            registry.command("/search\nRust").unwrap().unwrap().1,
+            "Rust"
+        );
+        assert!(registry.command("/searching Rust").unwrap().is_none());
+        assert!(registry.command("用户说 /搜索 Rust").unwrap().is_none());
+        assert!(registry
+            .register_batch(vec![Arc::new(CommandSkill("second"))])
+            .is_err());
+        assert!(registry.get("second").is_none());
+    }
 
     fn make_skill(name: &'static str, desc: &'static str) -> Arc<dyn Skill> {
         arc_skill(SkillDef {

@@ -60,6 +60,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/backup/file/{name}", get(backup_api::file))
         .route("/api/plugins/list", get(plugins_api::list))
         .route("/api/plugins/toggle", post(plugins_api::toggle))
+        .route("/api/plugins/config", post(plugins_api::save_config))
         .route("/api/mcp/list", get(mcp_api::list))
         .route("/api/mcp/save", post(mcp_api::save))
         .route("/api/mcp/call", post(mcp_api::call))

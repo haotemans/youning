@@ -2768,7 +2768,10 @@ dependencies = [
  "tracing-subscriber",
  "yuantuan-adapter-qq",
  "yuantuan-core",
+ "yuantuan-plugin-anysearch",
+ "yuantuan-plugin-api",
  "yuantuan-plugin-hello",
+ "yuantuan-plugin-social-media",
  "yuantuan-webui",
 ]
 
@@ -2801,6 +2804,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "flate2",
+ "futures-util",
  "image",
  "md-5",
  "rand 0.9.5",
@@ -2812,6 +2816,31 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "yuantuan-plugin-api",
+]
+
+[[package]]
+name = "yuantuan-plugin-anysearch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "futures-util",
+ "reqwest",
+ "serde_json",
+ "tokio",
+ "yuantuan-plugin-api",
+]
+
+[[package]]
+name = "yuantuan-plugin-api"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2823,7 +2852,22 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "yuantuan-core",
+ "yuantuan-plugin-api",
+]
+
+[[package]]
+name = "yuantuan-plugin-social-media"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "http",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "yuantuan-plugin-api",
 ]
 
 [[package]]
@@ -2847,6 +2891,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "yuantuan-core",
+ "yuantuan-plugin-hello",
 ]
 
 [[package]]

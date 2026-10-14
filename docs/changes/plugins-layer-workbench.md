@@ -6,10 +6,10 @@
 
 ## 状态
 
-- status: verifying（Phase 2 Skills 抽象 completed + Phase 3 MCP stdio client core + 面板 completed，待群里端到端验证 /Decision 在群里选定 invoke_skill）
+- status: verifying（Phase 2 Skills 抽象 completed + Phase 3 MCP stdio client core + 面板 completed；Phase 4 插件层 V2 于 2026-10-14 落地为 staged settings + PluginManager，见下文）
 - owner: hsb + kimi
 - last-grill: 2026-10-07
-- frontier: 群里真人发"帮我整理一下"看 Decision 是否返回 invoke_skill；Phase 4 备份范围扩大待定
+- frontier: 群里真人发"帮我整理一下"看 Decision 是否返回 invoke_skill；Phase 5 备份范围扩大 + Skills 自动 chain 待 grill
 
 ## 已确认裁决
 
@@ -160,3 +160,32 @@ pub struct SkillRegistry { /* 类似 tools::Registry，RwLock<HashMap> */ }
 - **MCP spawn_and_init tools 字段**：初版用 Vec 不可变导致无法 handshake 后填充；改 RwLock<Vec<...>> 就顺了。
 - **MCP stdio 在 Windows**：需要 CREATE_NO_WINDOW 标志避免 npx 弹黑窗；但不用 use std::os::windows::process::CommandExt（tokio::process::Command 自己也暴露 .creation_flags()）。
 - **WeUI Extras.mcp_manager 是 Option<Arc<...>>**：测试 for_test 给 None，生产 Some；调用方需 None-check。
+
+### Phase 4: 插件层 V2 — 宿主 Staged Settings + 编译清单注册（本期，2026-10-14）
+
+**裁决（Q-V201/V202/V203/V204，全 confirmed）**
+
+| Q | 裁决 | 理由 |
+| --- | --- | --- |
+| Q-V201 启禁持久化 | **staged settings.json**（取代 `plugins/<name>/enabled` 标记） | 原方式只覆盖 on/off；新版需要承载 `timeout_ms / max_concurrency / max_output_bytes / allowed_chats / config` 多字段，且"待生效 desired"与"已生效 applied"分离 |
+| Q-V202 插件发现 | **`build.rs` 从 `Cargo.toml [package.metadata.yuantuan].plugins` 生成 `compiled_plugins()`** | 不再扫 `plugins/*/Cargo.toml`；ran 时表通过 Cargo feature 控制编译 |
+| Q-V203 能力命名 | **`<plugin_id>.` 前缀强制**（`hello.greet`、`anysearch.search`） | 杜绝注册冲突；原 hello 裸名迁到命名空间 |
+| Q-V204 宿主边界 | **`HostServices` 提供 chat/data/log/artifact；插件不依赖 `yuantuan-core`** | 宿主 = 边界。chat 跟随面板热重建；data 单键 ≤1 MiB；artifact 扩展名白名单 + 路径归属校验 |
+
+**关键改动（这次 commit）**
+
+- 新增 `crates/plugin-api/`：定义 `Plugin` / `Tool` / `Skill` / `HostServices` / `PluginMeta` / `Capabilities` 契约，`API_VERSION = 1`。插件只依赖这个 crate。
+- 新增 `crates/core/src/plugins.rs`（~580 行）：`PluginManager` 负责加载/staged 启停/配置校验/事件分发/Gate（超时 + panic 捕获 + 并发信号量 + 附件大小/路径校验）/优雅 shutdown。
+- 新增 `crates/yuantuan/build.rs`：从 Cargo metadata 生成 `compiled_plugins()` 函数；`main.rs` 用 `include!(concat!(env!("OUT_DIR"), "/plugins.rs"))` 嵌入。
+- `plugins/hello`：迁到 `Plugin` trait，能力改名 `hello.meeting_notes` / `hello.translate_zh_en` 命名空间。
+- 新增 `plugins/anysearch`：通用搜索 + 领域搜索 + 批量搜索 + 网页正文提取（AnySearch REST,API Key 可选，走 `chat` 宿主）；含 `SKILL.md` + 测试。
+- 新增 `plugins/social-media`：实验性 B 站/抖音/小红书/X 视频图文直解（无第三方解析服务，直连源站）；含 `examples/`。
+- `crates/webui/plugins_api.rs` 重写：从「enabled 标记文件读写」改为「`PluginManager.list / save`」,`POST /api/plugins/config` 新增。
+- `plugins/README.md` 重写为接入指南（Cargo metadata 清单 + `Plugin` trait + HostServices 边界）。
+
+**遗留（不在本期）**
+
+- 面板「保存并重启」当前在 docker 容器内返回 409(G007/G014 同款），插件配置变更需要 SSH `docker restart yuantuan`。
+- Knowledge 检索（Q-K 系列）：`PluginManager.search_knowledge` 只是预留；`crates/kb/`、`docs/knowledge-base/` 文档导入未启动。
+- `plugins/anysearch/`、`plugins/social-media/` 还没有走 `skills_register` 的 SKILL 版本（Phase 5)；当期间 Decision `invoke_skill` 暂不会触发它们。
+- Windows CI `decision_send_meme_sends_image` flaky 在 60s 已修（见 test: raise adapter-qq integration test deadline)；新插件不引入同类等待。

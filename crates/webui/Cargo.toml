@@ -21,5 +21,6 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 sysinfo = "0.38.4"
 
 [dev-dependencies]
+yuantuan-plugin-hello = { path = "../../plugins/hello" }
 tokio-tungstenite = "0.24"
 futures-util = "0.3"

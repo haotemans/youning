@@ -1,0 +1,270 @@
+//! Public share-link media plugin. No third-party parser service or Python runtime.
+mod http;
+mod parse;
+use anyhow::{bail, Result};
+use async_trait::async_trait;
+use serde_json::{json, Value};
+use std::{path::PathBuf, sync::Arc};
+use yuantuan_plugin_api::*;
+
+pub struct SocialMedia;
+pub fn plugin() -> Arc<dyn Plugin> {
+    Arc::new(SocialMedia)
+}
+#[async_trait]
+impl Plugin for SocialMedia {
+    fn metadata(&self) -> PluginMeta {
+        PluginMeta {
+            id: "social-media",
+            name: "解析视频下载",
+            version: env!("CARGO_PKG_VERSION"),
+            api_version: API_VERSION,
+            description: "实验性解析 B站、抖音、小红书和 X 的视频、图文；平台可用性见插件文档",
+        }
+    }
+    fn default_timeout_ms(&self) -> u64 {
+        120_000
+    }
+    fn config_fields(&self) -> Vec<ConfigField> {
+        let mut fields = vec![
+            ConfigField {
+                key: "public_dns",
+                label: "代理 Fake-IP 兼容（必要时使用 Cloudflare 公共 DNS）",
+                kind: ConfigKind::Boolean,
+                default: json!(true),
+                secret: false,
+            },
+            ConfigField {
+                key: "max_file_mb",
+                label: "单文件上限（MiB，1–100）",
+                kind: ConfigKind::Integer,
+                default: json!(50),
+                secret: false,
+            },
+            ConfigField {
+                key: "max_total_mb",
+                label: "单次总大小上限（MiB，1–200）",
+                kind: ConfigKind::Integer,
+                default: json!(100),
+                secret: false,
+            },
+            ConfigField {
+                key: "max_items",
+                label: "单次最多文件数（1–30）",
+                kind: ConfigKind::Integer,
+                default: json!(20),
+                secret: false,
+            },
+        ];
+        for (key, label) in [
+            ("bilibili_cookie", "B站 Cookie（可选）"),
+            ("douyin_cookie", "抖音 Cookie（可选）"),
+            ("xiaohongshu_cookie", "小红书 Cookie（可选）"),
+        ] {
+            fields.push(ConfigField {
+                key,
+                label,
+                kind: ConfigKind::String,
+                default: json!(""),
+                secret: true,
+            });
+        }
+        fields
+    }
+    fn validate_config(&self, config: &Value) -> Result<()> {
+        validate_config(&self.config_fields(), config)?;
+        for (key, max) in [
+            ("max_file_mb", 100),
+            ("max_total_mb", 200),
+            ("max_items", 30),
+        ] {
+            if config
+                .get(key)
+                .is_some_and(|v| !v.as_i64().is_some_and(|v| (1..=max).contains(&v)))
+            {
+                bail!("{key} 超出允许范围");
+            }
+        }
+        for field in self.config_fields().into_iter().filter(|f| f.secret) {
+            if config[field.key]
+                .as_str()
+                .is_some_and(|s| s.len() > 16384 || s.contains(['\r', '\n']))
+            {
+                bail!("Cookie 格式不正确");
+            }
+        }
+        Ok(())
+    }
+    async fn start(&self, ctx: PluginContext, config: Value) -> Result<Capabilities> {
+        let cookies = [
+            ("bilibili.com", "bilibili_cookie"),
+            ("douyin.com", "douyin_cookie"),
+            ("iesdouyin.com", "douyin_cookie"),
+            ("xiaohongshu.com", "xiaohongshu_cookie"),
+        ]
+        .into_iter()
+        .map(|(domain, key)| (domain.into(), config[key].as_str().unwrap_or("").into()))
+        .collect();
+        let downloader = Arc::new(Downloader {
+            host: ctx.host,
+            http: http::Http {
+                cookies,
+                public_dns: config["public_dns"].as_bool().unwrap_or(true),
+            },
+            file_limit: config["max_file_mb"].as_u64().unwrap_or(50) * 1048576,
+            total_limit: config["max_total_mb"].as_u64().unwrap_or(100) * 1048576,
+            max_items: config["max_items"].as_u64().unwrap_or(20) as usize,
+        });
+        Ok(Capabilities {
+            tools: vec![downloader.clone()],
+            skills: vec![downloader],
+        })
+    }
+}
+struct Downloader {
+    host: Arc<dyn HostServices>,
+    http: http::Http,
+    file_limit: u64,
+    total_limit: u64,
+    max_items: usize,
+}
+/// Remove partially completed collections on error or cancellation, retain only successful results.
+struct Outputs(Vec<PathBuf>);
+impl Drop for Outputs {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+impl Downloader {
+    async fn execute(&self, input: &str) -> Result<ToolOutput> {
+        self.host.log("开始解析分享链接");
+        let post = parse::resolve(&self.http, input).await?;
+        if post.media.len() > self.max_items {
+            bail!(
+                "作品包含 {} 个文件，超过配置上限 {}",
+                post.media.len(),
+                self.max_items
+            );
+        }
+        let mut outputs = Outputs(vec![]);
+        let mut total = 0;
+        let mut items = vec![];
+        let referer = match post.platform {
+            parse::Platform::Bilibili => "https://www.bilibili.com/",
+            parse::Platform::Douyin => "https://www.douyin.com/",
+            parse::Platform::Xiaohongshu => "https://www.xiaohongshu.com/",
+            parse::Platform::X => "https://x.com/",
+        };
+        for (i, media) in post.media.iter().enumerate() {
+            if total >= self.total_limit {
+                bail!("超过单次下载总大小限制");
+            }
+            self.host
+                .log(&format!("下载文件 {}/{}", i + 1, post.media.len()));
+            let path = PathBuf::from(
+                self.host
+                    .artifact_path(if media.video { "mp4" } else { "jpg" })
+                    .await?,
+            );
+            outputs.0.push(path.clone());
+            let bytes = self
+                .http
+                .download(
+                    &media.url,
+                    referer,
+                    &path,
+                    self.file_limit.min(self.total_limit - total),
+                    media.video,
+                )
+                .await?;
+            total += bytes;
+            items.push(json!({"kind":if media.video {"video"} else {"image"},"bytes":bytes}));
+        }
+        let paths = std::mem::take(&mut outputs.0)
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let summary = format!(
+            "{}\n已下载 {} 个文件，正在交付附件。",
+            post.title,
+            paths.len()
+        );
+        self.host.log("文件下载完成");
+        Ok(ToolOutput {
+            summary: summary.clone(),
+            artifacts: paths,
+            data: json!({"rendered":summary,"platform":post.platform,"source":post.source,"items":items,"total_bytes":total}),
+        })
+    }
+}
+#[async_trait]
+impl Tool for Downloader {
+    fn name(&self) -> &'static str {
+        "social-media.download"
+    }
+    fn artifact_retention(&self) -> ArtifactRetention {
+        ArtifactRetention::DeleteAfterSend
+    }
+    fn description(&self) -> &'static str {
+        "下载用户指定的 B站、抖音、小红书或 X 分享链接中的视频、图文"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"url":{"type":"string","maxLength":8192}},"required":["url"],"additionalProperties":false})
+    }
+    async fn call(&self, _ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        let input = args["url"]
+            .as_str()
+            .filter(|s| s.len() <= 8192)
+            .ok_or_else(|| anyhow::anyhow!("缺少有效分享链接"))?;
+        self.execute(input).await
+    }
+}
+#[async_trait]
+impl Skill for Downloader {
+    fn artifact_retention(&self) -> ArtifactRetention {
+        ArtifactRetention::DeleteAfterSend
+    }
+    fn def(&self) -> SkillDef {
+        SkillDef{name:"social-media.download",description:"用户明确要求解析或下载 B站、抖音、小红书、X 的分享链接时，下载视频及图文并返回附件。",prompt_template:String::new(),tools:vec![],role_hint:None}
+    }
+    async fn invoke(&self, _ctx: &ToolCtx, slots: Value) -> Result<ToolOutput> {
+        let input = slots
+            .get("url")
+            .or_else(|| slots.get("user_text"))
+            .and_then(Value::as_str)
+            .filter(|s| s.len() <= 8192)
+            .ok_or_else(|| anyhow::anyhow!("缺少有效分享链接"))?;
+        self.execute(input).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejects_unsafe_config() {
+        assert!(SocialMedia
+            .validate_config(&json!({"max_file_mb":1000}))
+            .is_err());
+        assert!(SocialMedia
+            .validate_config(&json!({"douyin_cookie":"a\r\nb"}))
+            .is_err());
+    }
+}
+
+/// Read-only resolver for diagnostics; does not download or send media.
+pub async fn inspect_link(input: &str) -> Result<Value> {
+    let post = parse::resolve(
+        &http::Http {
+            cookies: vec![],
+            public_dns: true,
+        },
+        input,
+    )
+    .await?;
+    Ok(
+        json!({"platform":post.platform,"title":post.title,"files":post.media.len(),"videos":post.media.iter().filter(|m|m.video).count()}),
+    )
+}

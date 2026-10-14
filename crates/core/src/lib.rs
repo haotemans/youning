@@ -22,3 +22,5 @@ pub mod state;
 pub mod supervisor;
 pub mod tools;
 pub mod window;
+
+pub mod plugins;

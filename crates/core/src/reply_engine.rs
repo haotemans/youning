@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
+use yuantuan_plugin_api::ArtifactRetention;
 
 // ---------- 发送抽象（core 不依赖适配层：由装配侧注入闭包） ----------
 
@@ -343,6 +344,9 @@ pub enum JobKind {
     Bubbles(Vec<Bubble>),
     /// 已抽好的 meme 图片绝对路径（直接发图，无打字延时/无作废核对）
     Image(PathBuf),
+    Video(PathBuf),
+    /// Plugin-owned temporary media; cleanup is tied to its delivery receipt.
+    TemporaryAttachment { path: PathBuf, video: bool },
 }
 
 #[derive(Debug, Clone)]
@@ -422,6 +426,32 @@ impl EngineHandle {
             self.abort.abort();
             false
         }
+    }
+
+    /// Validated plugin output; actual success is recorded only after the adapter replies.
+    pub fn enqueue_attachment(&self, chat_id: String, chat_type: ChatType, target: u64, path: PathBuf) -> Result<()> {
+        self.enqueue_attachment_with_retention(chat_id, chat_type, target, path, ArtifactRetention::Keep)
+    }
+
+    pub fn enqueue_attachment_with_retention(
+        &self, chat_id: String, chat_type: ChatType, target: u64, path: PathBuf,
+        retention: ArtifactRetention,
+    ) -> Result<()> {
+        let video = match path.extension().and_then(|s| s.to_str()) {
+            Some("mp4") => true,
+            Some("jpg" | "png" | "gif" | "webp") => false,
+            _ => anyhow::bail!("不支持的附件格式"),
+        };
+        let kind = if retention == ArtifactRetention::DeleteAfterSend {
+            JobKind::TemporaryAttachment { path, video }
+        } else if video {
+            JobKind::Video(path)
+        } else {
+            JobKind::Image(path)
+        };
+        self.tx.send(EngineCommand::Enqueue(ReplyJob {
+            chat_id, chat_type, target, anchor_msg_id: 0, mention: false, mention_qq: None, kind,
+        })).map_err(|_| anyhow::anyhow!("回复队列已停止"))
     }
 
     /// 直接发图（meme）：入 per-chat 串行队列，与普通回复同队列保序（稳定六条②）
@@ -518,48 +548,102 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
     match job.kind.clone() {
         JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
         JobKind::Image(path) => process_image(eng, &job, &path, "meme").await,
+        JobKind::Video(path) => process_media(eng, &job, &path, "video", "视频", ArtifactRetention::Keep).await,
+        JobKind::TemporaryAttachment { path, video } => process_media(
+            eng, &job, &path, if video { "video" } else { "image" }, "插件附件",
+            ArtifactRetention::DeleteAfterSend,
+        ).await,
     }
 }
 
 /// 直接发图：无首泡延时、无作废核对，失败退避重试一次；落 self 图片消息保持流水连贯
 async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
+    process_media(eng, job, path, "image", note, ArtifactRetention::Keep).await
+}
+
+async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind: &str, note: &str, retention: ArtifactRetention) {
     let req = SendRequest {
         chat_type: job.chat_type,
         target: job.target,
-        segments: json!([{"type": "image", "data": {"file": meme::file_url(path)}}]),
+        segments: json!([{"type": kind, "data": {"file": meme::file_url(path)}}]),
     };
     match send_with_retry(&eng.send, &req).await {
         Ok(data) => {
-            if let Some(id) = data.get("message_id").and_then(|x| x.as_i64()) {
+            let message_id = data.get("message_id").and_then(|x| x.as_i64());
+            if let Some(id) = message_id {
                 eng.self_ids.record(id);
             }
             insert_self_message_ex(
                 &eng.db_path,
                 job,
-                "（图片）",
-                true,
-                data.get("message_id").and_then(|x| x.as_i64()),
+                if kind == "video" { "（视频）" } else { "（图片）" },
+                kind == "image",
+                message_id,
             )
             .await;
+            let note = if retention == ArtifactRetention::DeleteAfterSend {
+                if message_id.is_some() {
+                    match remove_delivered_artifact(&eng.db_path, path).await {
+                        Ok(()) => format!("{note}；临时文件已删除"),
+                        Err(e) => {
+                            warn!(chat_id = %job.chat_id, error = %e, "附件已发送，但临时文件清理失败");
+                            format!("{note}；临时文件清理失败：{e}")
+                        }
+                    }
+                } else {
+                    warn!(chat_id = %job.chat_id, "发送回执缺少 message_id，保留临时附件");
+                    format!("{note}；回执缺少消息 ID，临时文件已保留")
+                }
+            } else { note.to_owned() };
             eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                 chat_id: job.chat_id.clone(),
                 bubble_index: 0,
                 total: 1,
                 ok: true,
-                note: Some(note.into()),
+                note: Some(note),
             }));
         }
         Err(e) => {
-            warn!(chat_id = %job.chat_id, error = %e, "meme 图发送失败");
+            warn!(chat_id = %job.chat_id, error = %e, "媒体附件发送失败");
             eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                 chat_id: job.chat_id.clone(),
                 bubble_index: 0,
                 total: 1,
                 ok: false,
-                note: Some(format!("meme 发送失败: {e}")),
+                note: Some(format!("{kind} 发送失败: {e}")),
             }));
         }
     }
+}
+
+/// Delete only a single plugin output, never a meme, config, directory, or external file.
+async fn remove_delivered_artifact(db_path: &Path, path: &Path) -> Result<()> {
+    let canonical = match tokio::fs::canonicalize(path).await {
+        Ok(path) => path,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let root = tokio::fs::canonicalize(db_path.parent().context("数据库缺少父目录")?.join("plugins")).await?;
+    let relative = canonical.strip_prefix(&root).context("拒绝清理插件目录外的文件")?;
+    let parts: Vec<_> = relative.components().collect();
+    if parts.len() != 3
+        || !parts.iter().all(|p| matches!(p, std::path::Component::Normal(_)))
+        || parts[1].as_os_str() != "artifacts"
+        || !tokio::fs::metadata(&canonical).await?.is_file()
+    {
+        anyhow::bail!("仅允许清理插件 artifacts 目录中的文件");
+    }
+    for attempt in 0..3 {
+        match tokio::fs::remove_file(&canonical).await {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 2 => {
+                tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!()
 }
 
 /// ::meme 类别缺省时按 mood 映射（happy→开心/angry→生气/down→低落/calm→misc，映射不到→misc）

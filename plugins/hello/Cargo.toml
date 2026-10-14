@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["rlib"]
 
 [dependencies]
-yuantuan-core = { path = "../../crates/core" }
+yuantuan-plugin-api = { path = "../../crates/plugin-api" }
 async-trait = "0.1"
 anyhow = "1"
 serde_json = "1"

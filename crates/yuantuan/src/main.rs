@@ -5,6 +5,7 @@ use yuantuan_core::db::SqliteExt;
 mod config;
 mod db;
 mod shutdown;
+include!(concat!(env!("OUT_DIR"), "/plugins.rs"));
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -168,10 +169,7 @@ async fn main() -> Result<()> {
     )
     .spawn();
 
-    // h1'. 插件层装配（先放在 PipelineDeps 之前：PipelineDeps.skill_registry 需要借用注册表）
-    //     Q-P01 编译期加载 Rust crate；Q-P04 面板启禁走 enabled 标记文件
-    //     当前加载：plugins/<name>/enabled 存在则其 register() / skills() 被调用，
-    //     返回的 Tool / Skill 分别进 Registry / SkillRegistry
+    // 由构建清单生成插件目录，宿主统一校验配置并装配能力。
     let tools_registry = yuantuan_core::tools::Registry::new();
     if cfg.sandbox.enabled {
         let sandbox = yuantuan_core::tools::sandbox::SandboxExecTool::new(cfg.sandbox.clone())?;
@@ -180,14 +178,12 @@ async fn main() -> Result<()> {
         info!(image = %cfg.sandbox.image, "Docker 开发沙箱已就绪");
     }
     let skill_registry = yuantuan_core::skills::SkillRegistry::new();
-    let enabled_plugins = load_enabled_plugins(&tools_registry, &skill_registry);
-    if !enabled_plugins.is_empty() {
-        info!(
-            plugins = ?enabled_plugins,
-            skills = ?skill_registry.names(),
-            "插件层装配完成"
-        );
-    }
+    let llm_slot: yuantuan_core::bot::SharedLlm = Arc::new(RwLock::new(llm.clone()));
+    let plugins = yuantuan_core::plugins::PluginManager::load(
+        compiled_plugins(), data_root.clone(), std::path::PathBuf::from("plugins"),
+        tools_registry.clone(), skill_registry.clone(), llm_slot.clone(),
+    ).await?;
+    plugins.subscribe(&bus).await;
 
     // h1''. MCP stdio client（Q-M01 裁决：spawn 外部 MCP server，tools 注入 ToolRegistry）
     //        未配置 = 跳过；任一 server 失败 = warn + 继续（不阻塞其他）
@@ -208,8 +204,6 @@ async fn main() -> Result<()> {
 
     // h. Decision 管线（订阅 MessageReceived → Prefilter → 成本闸 → Decision → 副作用 → reply/send_meme）
     //    llm/prefilter/reply/context 走共享槽：WebUI config 写回即热应用
-    let llm_slot: yuantuan_core::bot::SharedLlm =
-        std::sync::Arc::new(std::sync::RwLock::new(llm.clone()));
     let prefilter_slot: yuantuan_core::bot::SharedPrefilter =
         std::sync::Arc::new(std::sync::RwLock::new(yuantuan_core::prefilter::Config {
             window_secs: cfg.prefilter.window_secs,
@@ -269,7 +263,7 @@ async fn main() -> Result<()> {
         result = yuantuan_core::bot::replay_pending(&pipeline_deps) => result,
         signal = shutdown_signal.wait() => {
             info!(signal = signal?, "启动回放期间收到停止信号");
-            return finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await;
+            return finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager, &plugins).await;
         }
     };
     match replay {
@@ -296,16 +290,6 @@ async fn main() -> Result<()> {
         supervisor.spawn("task_runner", move || {
             yuantuan_core::agent::spawn_runner(deps.clone())
         });
-    }
-
-    // 装配完 LlmGateway 后让插件的 Skill 能调 BotChat LLM
-    // （Skill trait 不依赖 LLM；插件用 OnceLock 槽在装配时被注入；未注入时退回模板渲染）
-    {
-        let gw_opt = llm_slot.read().unwrap().clone();
-        if let Some(gw) = gw_opt {
-            // 目前仅 hello 插件；未来扩为多插件时改成各自命名空间注入
-            let _ = yuantuan_plugin_hello::set_llm(gw);
-        }
     }
 
     // h2. 偷表情包监听（开关走热应用槽，进程内常驻）
@@ -419,6 +403,7 @@ async fn main() -> Result<()> {
         backup_cfg: backup_cfg_slot.clone(),
         tools_registry: tools_registry.clone(),
         skill_registry: skill_registry.clone(),
+        plugin_manager: Some(plugins.clone()),
         mcp_manager: Some(mcp_manager.clone()),
         per_chat_cap: per_chat_cap_slot.clone(),
         self_ids: self_ids.clone(),
@@ -432,13 +417,14 @@ async fn main() -> Result<()> {
     tokio::select! {
         res = webui_serve => {
             info!(result = ?res, "WebUI 退出(服务自然结束)");
+            plugins.shutdown().await;
             res
         }
         signal = shutdown_signal.wait() => {
             info!(signal = signal?, "收到停止信号，开始优雅停机");
             _backup_scheduler.abort();
             if let Some(handle) = consolidation_handle.lock().unwrap().take() { handle.abort(); }
-            finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager).await
+            finish_shutdown(&db_path, &database, adapter.as_ref(), &reply_engine, &supervisor, &mcp_manager, &plugins).await
         }
     }
 }
@@ -450,6 +436,7 @@ async fn finish_shutdown(
     reply: &yuantuan_core::reply_engine::EngineHandle,
     supervisor: &yuantuan_core::supervisor::Supervisor,
     mcp: &yuantuan_core::mcp::McpManager,
+    plugins: &yuantuan_core::plugins::PluginManager,
 ) -> Result<()> {
     use std::time::Duration;
     if let Some(adapter) = adapter {
@@ -458,6 +445,7 @@ async fn finish_shutdown(
     for name in ["pipeline", "task_runner", "steal_listener"] {
         supervisor.stop(name);
     }
+    plugins.shutdown().await;
     tokio::task::yield_now().await;
     let drained = reply.shutdown(Duration::from_secs(5)).await;
     info!(drained, "发送队列关闭");
@@ -489,41 +477,6 @@ async fn finish_shutdown(
     }
     info!("优雅停机完成");
     Ok(())
-}
-
-/// 扫描 plugins/<name>/enabled 标记：启用的插件调用其 register() 把 Tool 注册进 Registry
-/// 当前编译期决定（crate 是否被 link 进 yuantuan）；enabled 文件只控制运行时是否注册
-/// 未来热加插件需要 build.rs 监听这个目录做条件 include——本期先做编译期注册
-fn load_enabled_plugins(
-    registry: &yuantuan_core::tools::Registry,
-    skill_registry: &yuantuan_core::skills::SkillRegistry,
-) -> Vec<String> {
-    let plugins_dir = std::path::Path::new("plugins");
-    if !plugins_dir.exists() {
-        return vec![];
-    }
-    let mut out = Vec::new();
-    // 已知编译进来的插件：构建期通过 Cargo feature 决定是否链接；enabled 文件只是运行时开关
-    #[cfg(feature = "plugin-hello")]
-    {
-        let enabled_marker = plugins_dir.join("hello").join("enabled");
-        if enabled_marker.exists() {
-            for tool in yuantuan_plugin_hello::register() {
-                registry.register_arc(tool);
-            }
-            for skill in yuantuan_plugin_hello::skills() {
-                skill_registry.register_arc(skill);
-            }
-            out.push("hello".to_string());
-            info!(
-                skills = ?skill_registry.names(),
-                "插件 hello 已启用并注册"
-            );
-        } else {
-            info!("插件 hello 存在但未启用（缺 plugins/hello/enabled 标记）");
-        }
-    }
-    out
 }
 
 /// 从 media_providers 表装配 MediaProvider registry：

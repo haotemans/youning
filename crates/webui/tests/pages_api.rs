@@ -35,6 +35,13 @@ async fn seed(db_path: &PathBuf) {
         "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self','云团',?1,?1),('p_2001','小明',?1,?1)",
         yuantuan_core::db::params![now],
     ).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO identities(person_id, platform, platform_uid) VALUES
+         ('self', 'qq', '10000'), ('self', 'qq', '10001'),
+         ('p_2001', 'other', '2001')",
+    )
+    .await
+    .unwrap();
     conn.execute(
         "INSERT INTO relationship_edges(from_pid, to_pid, trust, familiar, updated_at) VALUES ('p_2001','self',0.7,0.3,?1)",
         yuantuan_core::db::params![now],
@@ -99,7 +106,11 @@ async fn start() -> Rig {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
-    let extras = Extras::for_test(cfg_path, prov_path);
+    let mut extras = Extras::for_test(cfg_path, prov_path);
+    extras.plugin_manager = Some(yuantuan_core::plugins::PluginManager::load(
+        vec![yuantuan_plugin_hello::plugin()], dir.clone(), dir.join("plugin-sources"),
+        extras.tools_registry.clone(), extras.skill_registry.clone(), extras.llm_slot.clone(),
+    ).await.unwrap());
     let db2 = db_path.clone();
     tokio::spawn(async move {
         let _ = serve(db2, "127.0.0.1", port, extras).await;
@@ -197,11 +208,22 @@ async fn pages_api_full_pass() {
         "今天很热闹"
     );
 
-    // 关系网
+    // 关系网：没有 QQ 身份时不从内部 person_id 猜测帐号。
     let (_, rj) = rig.get("/api/relations").await;
     let nodes = rj["nodes"].as_array().unwrap();
     assert!(nodes.iter().any(|n| n["id"] == "self"));
     assert!(nodes.iter().any(|n| n["id"] == "p_2001"));
+    let peer = nodes.iter().find(|n| n["id"] == "p_2001").unwrap();
+    assert_eq!(peer["name"], "小明");
+    assert!(peer["qq"].is_null());
+    assert!(peer["avatar_url"].is_null());
+    assert_eq!(nodes.len(), 2, "多个身份不应重复生成人物节点");
+    let me = nodes.iter().find(|n| n["id"] == "self").unwrap();
+    assert_eq!(me["qq"], "10001");
+    assert_eq!(
+        me["avatar_url"],
+        "https://q1.qlogo.cn/g?b=qq&nk=10001&s=100"
+    );
     let edges = rj["edges"].as_array().unwrap();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0]["from"], "p_2001");
@@ -261,6 +283,28 @@ async fn pages_api_full_pass() {
     // v2 不再 active
     let (_, v2) = rig.get("/api/personality/versions/2").await;
     assert_eq!(v2["active"], false);
+
+    // 插件目录来自运行时，配置校验失败不能覆盖旧配置。
+    let (_, plugins) = rig.get("/api/plugins/list").await;
+    assert_eq!(plugins["plugins"][0]["name"], "hello");
+    assert_eq!(plugins["plugins"][0]["loaded"], false);
+    let mut settings = plugins["plugins"][0]["settings"].clone();
+    settings["config"]["greeting"] = json!("欢迎");
+    settings["enabled"] = json!(true);
+    let response = rig.http.post(format!("{}/api/plugins/config", rig.base))
+        .bearer_auth(&rig.token).json(&json!({"name":"hello", "settings":settings})).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    settings["config"]["greeting"] = json!(12);
+    let response = rig.http.post(format!("{}/api/plugins/config", rig.base))
+        .bearer_auth(&rig.token).json(&json!({"name":"hello", "settings":settings})).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+    let (_, plugins) = rig.get("/api/plugins/list").await;
+    assert_eq!(plugins["plugins"][0]["settings"]["config"]["greeting"], "欢迎");
+    assert_eq!(plugins["plugins"][0]["pending_restart"], true);
+    assert_eq!(plugins["plugins"][0]["loaded"], false);
+    let response = rig.http.post(format!("{}/api/plugins/toggle", rig.base))
+        .bearer_auth(&rig.token).json(&json!({"name":"not-compiled", "enabled":true})).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 400);
 
     // 知识库占位
     let (_, kb) = rig.get("/api/kb/status").await;

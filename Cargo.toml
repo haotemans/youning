@@ -2,10 +2,13 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/plugin-api",
     "crates/adapter-qq",
     "crates/webui",
     "crates/yuantuan",
     "plugins/hello",
+    "plugins/anysearch",
+    "plugins/social-media",
 ]
 
 [workspace.dependencies]

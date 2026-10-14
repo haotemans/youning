@@ -332,6 +332,7 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
                             json!({
                                 "round": used_calls, "tool": name, "ok": true,
                                 "summary": out.summary,
+                                "artifacts": out.artifacts,
                                 "details": tool.audit_details(&args, &out),
                             }),
                         )

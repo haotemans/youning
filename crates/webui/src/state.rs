@@ -38,6 +38,7 @@ pub struct Extras {
     /// Skill 注册表（Plugins 面板列出每个插件提供哪些 Skills；Decision 模型看到这些描述）
     pub skill_registry: yuantuan_core::skills::SkillRegistry,
     /// MCP 客户端管理器（Phase 3）：面板查询 server 列表与状态
+    pub plugin_manager: Option<Arc<yuantuan_core::plugins::PluginManager>>,
     pub mcp_manager: Option<std::sync::Arc<yuantuan_core::mcp::McpManager>>,
     /// 当前情绪（与 Decision 写回共享的同一实例）
     pub mood: yuantuan_core::state::MoodState,
@@ -68,6 +69,7 @@ impl Extras {
             backup_cfg: yuantuan_core::backup::shared_backup_cfg(),
             tools_registry: yuantuan_core::tools::Registry::new(),
             skill_registry: yuantuan_core::skills::SkillRegistry::new(),
+            plugin_manager: None,
             mcp_manager: None,
             mood: yuantuan_core::state::MoodState::default(),
             per_chat_cap: Arc::new(RwLock::new(32)),
