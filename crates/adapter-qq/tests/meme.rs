@@ -9,6 +9,17 @@ use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Windows 异步 IO / tokio scheduler 较慢,集成测试超时窗口放宽
+/// (CI 上 Windows runner 出现过 30s 内未跑出来的 flaky;Linux 保持 30s 用以捕捉真退化)
+#[cfg(windows)]
+fn deadline_secs() -> Duration {
+    Duration::from_secs(60)
+}
+#[cfg(not(windows))]
+fn deadline_secs() -> Duration {
+    Duration::from_secs(30)
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::connect_async;
@@ -237,10 +248,10 @@ async fn decision_send_meme_sends_image() {
         per_chat_cap: std::sync::Arc::new(std::sync::RwLock::new(32)),
     });
 
-    // 等 1 次发送
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // 等 1 次发送(Windows 异步 IO 慢,放宽到 60s)
+    let deadline = Instant::now() + deadline_secs();
     while captures.lock().unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "30s 内未发出 meme 图");
+        assert!(Instant::now() < deadline, "超时内未发出 meme 图");
         tokio::time::sleep(Duration::from_millis(80)).await;
     }
     let segs = captures.lock().unwrap()[0].clone();
@@ -370,7 +381,7 @@ async fn steal_then_approve_and_reject() {
     );
 
     // 等 pending 行落库
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + deadline_secs();
     loop {
         let mut conn = db::connect(&db_path).await.unwrap();
         let n: i64 = conn
@@ -386,7 +397,7 @@ async fn steal_then_approve_and_reject() {
         }
         assert!(
             Instant::now() < deadline,
-            "30s 内 pending 未落库（当前 {n}）"
+            "超时内 pending 未落库（当前 {n}）"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

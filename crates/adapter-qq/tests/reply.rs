@@ -9,6 +9,16 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Windows 异步 IO / tokio scheduler 较慢,集成测试超时窗口放宽
+#[cfg(windows)]
+fn deadline_secs() -> Duration {
+    Duration::from_secs(60)
+}
+#[cfg(not(windows))]
+fn deadline_secs() -> Duration {
+    Duration::from_secs(30)
+}
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -520,7 +530,7 @@ async fn short_reply_rejoins_broken_sentence_and_sends_one_message() {
         ReplyCfg::default(),
     )
     .await;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + deadline_secs();
     loop {
         let mut conn = db::connect(&path).await.unwrap();
         let count: i64 = conn
@@ -572,7 +582,7 @@ async fn semantic_policy_reaches_reply_prompt_and_audit_trace() {
         ReplyCfg::default(),
     )
     .await;
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + deadline_secs();
     loop {
         let mut conn = db::connect(&path).await.unwrap();
         let count: i64 = conn
@@ -687,7 +697,7 @@ async fn new_message_preserves_remaining_bubbles_and_reply_target() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     // 三个泡全部完成，普通插话不能取消原回复。
-    let deadline2 = Instant::now() + Duration::from_secs(30);
+    let deadline2 = Instant::now() + deadline_secs();
     while captures.lock().unwrap().len() < 3 {
         assert!(Instant::now() < deadline2, "原回答应发完整");
         tokio::time::sleep(Duration::from_millis(50)).await;
