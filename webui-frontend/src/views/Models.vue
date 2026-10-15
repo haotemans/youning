@@ -6,9 +6,10 @@
         <span class="yt-page-sub mono">{{ providerList.length }} 个服务商</span>
       </div>
       <n-space :size="10">
+        <span v-if="dirty" class="save-msg">有未保存更改</span>
         <span v-if="msg" :class="['save-msg', ok ? 'ok' : 'fail']">{{ msg }}</span>
-        <n-button size="small" secondary @click="load">刷新</n-button>
-        <n-button size="small" type="primary" :loading="saving" @click="save">保存配置</n-button>
+        <n-button size="small" secondary :loading="loading" :disabled="saving" @click="load">刷新</n-button>
+        <n-button size="small" type="primary" :loading="saving" :disabled="!loaded || loading" @click="save">保存配置</n-button>
       </n-space>
     </div>
 
@@ -44,11 +45,11 @@
 
             <div class="role-foot">
               <n-button size="tiny" secondary :loading="tests[r].state === 'loading'"
-                        :disabled="!roles[r].provider" @click="testRole(r)">
-                连通测试
+                        :disabled="!roles[r].provider || !roles[r].model || !loaded || loading || saving" @click="testRole(r)">
+                保存并测试
               </n-button>
               <span v-if="tests[r].state === 'ok'" class="test-badge ok mono">
-                {{ tests[r].latency }}ms
+                {{ tests[r].model }} · {{ tests[r].latency }}ms
               </span>
               <span v-else-if="tests[r].state === 'fail'" class="test-badge fail" :title="tests[r].error">
                 {{ tests[r].error || '连接失败' }}
@@ -83,7 +84,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import ProviderCard from '../components/ProviderCard.vue'
@@ -106,6 +107,9 @@ const roleLabels = {
 }
 const newName = ref('')
 const saving = ref(false)
+const loading = ref(false)
+const loaded = ref(false)
+const savedSignature = ref('')
 const msg = ref('')
 const ok = ref(false)
 /** @type {import('vue').Ref<Record<string, { state: string, latency: number|null, model: string, error: string }>>} */
@@ -117,6 +121,16 @@ const tests = ref({
 
 const providerOptions = computed(() => Object.keys(providers.value).map((n) => ({ label: n, value: n })))
 const providerList = computed(() => Object.entries(providers.value).map(([name, p]) => ({ name, p })))
+const dirty = computed(() => loaded.value && JSON.stringify(configPayload()) !== savedSignature.value)
+const testEpoch = { decision: 0, bot_chat: 0, agent_exec: 0 }
+
+watch([providers, roles], () => {
+  msg.value = ''
+  for (const r of roleNames) {
+    testEpoch[r]++
+    tests.value[r] = { state: 'idle', latency: null, model: '', error: '' }
+  }
+}, { deep: true, flush: 'sync' })
 
 function providerUsage(name) {
   return roleNames.filter((r) => roles.value[r].provider === name)
@@ -130,37 +144,58 @@ function modelOptions(role) {
   return [...new Set(models)].map((model) => ({ label: model, value: model }))
 }
 
+function applyConfig(data) {
+  const ps = data.providers?.provider || {}
+  /** @type {Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>} */
+  const next = {}
+  for (const [name, p] of Object.entries(ps)) {
+    next[name] = {
+      base_url: p.base_url || '',
+      modelsText: (p.models || []).join(', '),
+      api_key_env: '',
+      api_key_present: !!p.api_key_present,
+      protocol: 'openai_chat',
+    }
+  }
+  providers.value = next
+  const rs = data.providers?.roles || {}
+  for (const r of roleNames) {
+    roles.value[r] = rs[r]
+      ? { provider: rs[r].provider, model: rs[r].model }
+      : { provider: null, model: '' }
+  }
+  savedSignature.value = JSON.stringify(configPayload())
+  loaded.value = true
+}
+
 async function load() {
+  loading.value = true
   try {
     const { data } = await api.get('/config')
-    const ps = data.providers?.provider || {}
-    /** @type {Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>} */
-    const next = {}
-    for (const [name, p] of Object.entries(ps)) {
-      next[name] = providers.value[name] || {
-        base_url: p.base_url || '',
-        modelsText: (p.models || []).join(', '),
-        api_key_env: '',
-        api_key_present: !!p.api_key_present,
-        protocol: 'openai_chat',
-      }
-      next[name].api_key_present = !!p.api_key_present
-      if (!next[name].protocol) next[name].protocol = 'openai_chat'
-    }
-    providers.value = next
-    const rs = data.providers?.roles || {}
-    for (const r of roleNames) {
-      if (rs[r]) roles.value[r] = { provider: rs[r].provider, model: rs[r].model }
-    }
-  } catch { /* ignore */ }
+    applyConfig(data)
+  } catch (e) {
+    ok.value = false
+    msg.value = axios.isAxiosError(e) ? (e.response?.data?.error || '加载配置失败') : '加载配置失败'
+  } finally {
+    loading.value = false
+  }
 }
 
 onMounted(load)
 
 async function testRole(r) {
+  if (saving.value || tests.value[r].state === 'loading') return
+  if (!await save()) {
+    tests.value[r] = { state: 'fail', latency: null, model: roles.value[r].model, error: msg.value || '配置尚未保存，未发起测试' }
+    return
+  }
+  const model = roles.value[r].model
+  const epoch = ++testEpoch[r]
   tests.value[r] = { state: 'loading', latency: null, model: '', error: '' }
   try {
-    const { data } = await api.post('/llm/test', { role: r })
+    const { data } = await api.post('/llm/test', { role: r }, { timeout: 65000 })
+    if (epoch !== testEpoch[r]) return
+    if (data.ok && data.model !== model) throw new Error(`实际测试模型 ${data.model} 与所选模型 ${model} 不一致`)
     tests.value[r] = {
       state: data.ok ? 'ok' : 'fail',
       latency: data.latency_ms ?? null,
@@ -168,8 +203,9 @@ async function testRole(r) {
       error: data.error || '',
     }
   } catch (e) {
-    const err = axios.isAxiosError(e) ? (e.response?.data?.error || '请求失败') : '请求失败'
-    tests.value[r] = { state: 'fail', latency: null, model: '', error: err }
+    if (epoch !== testEpoch[r]) return
+    const err = axios.isAxiosError(e) ? (e.response?.data?.error || '请求失败') : (e.message || '请求失败')
+    tests.value[r] = { state: 'fail', latency: null, model, error: `测试 ${model}：${err}` }
   }
 }
 
@@ -196,28 +232,69 @@ function delProvider(n) {
   }
 }
 
+function configPayload() {
+  const provider = {}
+  for (const name of Object.keys(providers.value).sort()) {
+    const p = providers.value[name]
+    provider[name] = {
+      base_url: p.base_url,
+      api_key_env: p.api_key_env,
+      models: p.modelsText.split(',').map((s) => s.trim()).filter(Boolean),
+    }
+  }
+  const rolesOut = {}
+  for (const r of roleNames) {
+    if (roles.value[r].provider) rolesOut[r] = { provider: roles.value[r].provider, model: roles.value[r].model }
+  }
+  return { provider, roles: rolesOut }
+}
+
+function routingSignature(config) {
+  const provider = {}
+  for (const name of Object.keys(config.provider || {}).sort()) {
+    const p = config.provider[name]
+    provider[name] = { base_url: p.base_url, models: p.models || [] }
+  }
+  const bindings = {}
+  for (const r of roleNames) {
+    const bind = config.roles?.[r]
+    if (bind) bindings[r] = { provider: bind.provider, model: bind.model }
+  }
+  return JSON.stringify({ provider, roles: bindings })
+}
+
 async function save() {
+  if (!loaded.value || loading.value || saving.value) return false
+  for (const r of roleNames) {
+    if (roles.value[r].provider && !roles.value[r].model?.trim()) {
+      ok.value = false
+      msg.value = `请为 ${roleLabels[r]} 选择模型`
+      return false
+    }
+  }
+  const requested = configPayload()
+  const signature = JSON.stringify(requested)
   saving.value = true
   msg.value = ''
   try {
-    const provider = {}
-    for (const [name, p] of Object.entries(providers.value)) {
-      provider[name] = {
-        base_url: p.base_url,
-        api_key_env: p.api_key_env,
-        models: p.modelsText.split(',').map((s) => s.trim()).filter(Boolean),
-      }
+    const { data } = await api.post('/config', { providers: requested })
+    const { data: saved } = await api.get('/config')
+    if (routingSignature(requested) !== routingSignature(saved.providers || {})) {
+      throw new Error('保存后回读的模型配置不一致，请重试')
     }
-    const rolesOut = {}
-    for (const r of roleNames) {
-      if (roles.value[r].provider) rolesOut[r] = { provider: roles.value[r].provider, model: roles.value[r].model }
+    if (JSON.stringify(configPayload()) !== signature) {
+      ok.value = false
+      msg.value = '提交的配置已保存，编辑中的新更改请再次保存'
+      return false
     }
-    const { data } = await api.post('/config', { providers: { provider, roles: rolesOut } })
+    applyConfig(saved)
     ok.value = true
     msg.value = `已保存（${(data.applied || []).join('、') || '已同步'}）`
+    return true
   } catch (e) {
     ok.value = false
-    msg.value = e.response?.data?.error || '保存失败'
+    msg.value = axios.isAxiosError(e) ? (e.response?.data?.error || '保存失败') : (e.message || '保存失败')
+    return false
   } finally {
     saving.value = false
   }

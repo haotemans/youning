@@ -4,9 +4,11 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // 构建前清理旧的 static/assets 哈希产物，同时保留 static/legacy-index.html 兜底页
+/** @returns {import('vite').Plugin} */
 function cleanStaticAssets() {
   return {
     name: 'clean-static-assets',
+    apply: 'build',
     buildStart() {
       const assetsDir = path.resolve(process.cwd(), '../crates/webui/static/assets')
       if (fs.existsSync(assetsDir)) {

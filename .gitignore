@@ -3,4 +3,6 @@ target/
 data/
 webui-frontend/node_modules/
 webui-frontend/dist/
+webui-frontend/test-results/
+webui-frontend/playwright-report/
 yuantuan.exe*

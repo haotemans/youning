@@ -29,6 +29,7 @@ struct Rig {
     /// mock provider 收到的请求体（断言 ping / max_tokens）
     llm_seen: Arc<Mutex<Vec<Value>>>,
     mock_base: String,
+    providers_path: PathBuf,
 }
 
 async fn start() -> Rig {
@@ -117,6 +118,60 @@ async fn start() -> Rig {
         token: login["token"].as_str().unwrap().to_string(),
         llm_seen: seen,
         mock_base: format!("http://127.0.0.1:{mock_port}/v1"),
+        providers_path: prov_path,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn saved_model_is_used_by_test_and_survives_gateway_reload() {
+    let rig = start().await;
+    for model in ["kimi-k3", "mimo-v2.6-flash-free"] {
+        let config: Value = rig
+            .http
+            .get(format!("{}/api/config", rig.base))
+            .bearer_auth(&rig.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mut providers = config["providers"].clone();
+        providers["roles"]["decision"]["model"] = json!(model);
+        let response = rig
+            .http
+            .post(format!("{}/api/config", rig.base))
+            .bearer_auth(&rig.token)
+            .json(&json!({"providers": providers}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        let (status, result) = rig.llm_test("decision").await;
+        assert_eq!(status, 200, "{result}");
+        assert_eq!(result["model"], model);
+        assert_eq!(rig.llm_seen.lock().unwrap().last().unwrap()["model"], model);
+        let reloaded = yuantuan_core::llm::LlmGateway::load(&rig.providers_path).unwrap();
+        assert_eq!(
+            reloaded
+                .role(yuantuan_core::llm::Role::Decision)
+                .unwrap()
+                .model,
+            model
+        );
+        let saved: Value = rig
+            .http
+            .get(format!("{}/api/config", rig.base))
+            .bearer_auth(&rig.token)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(saved["providers"]["roles"]["decision"]["model"], model);
+        assert_eq!(saved["providers"]["roles"]["bot_chat"]["model"], "k-1");
     }
 }
 

@@ -24,6 +24,15 @@
 - 角色模型输入改为可搜索/可输入的选项，来源于所选 Provider 的模型列表；Provider 已有密钥时，模型探测复用当前已加载的配置。
 - 验证：`cargo test -p yuantuan-webui --test pages_api` 3 项通过；前端 `npm run build`（含类型检查）通过。
 
+### 模型选择后测试仍使用旧配置的补修
+
+- 用户截图显示选择 `kimi-k3`，错误却仍指向 `space-bunny-free`。此前的密钥保留修复未覆盖测试流程：`/api/llm/test` 只接收角色名称，使用已保存配置，页面未保存的模型选择没有参与测试。
+- 角色操作改为「保存并测试」：保存全部模型配置、GET 回读核对 Provider 和角色路由后才测试；保存失败或回读不一致则停止测试。成功结果显示实际测试模型，前端测试超时与后端 60 秒超时对齐。
+- 编辑时显示未保存状态并清除旧测试结果；编辑后迟到的测试响应不再覆盖界面。刷新重新加载服务商字段、清空不存在的角色及已保存密钥输入；加载失败明确反馈并禁止首次保存。
+- Playwright 浏览器回归覆盖选择→保存→回读→测试→刷新、保存失败、回读不一致、迟到响应四种场景。运行 `cd webui-frontend && npm run test:models`；首次运行可用 `npx playwright install chromium`，或通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定已有 Chromium/Edge。
+- 开发服务器的静态资源清理插件限制为仅构建时执行，避免浏览器测试或启动 Vite 时删除后端内嵌的发布资源。
+- 验证：浏览器回归 4 项、WebUI 的 `llm_test` / `pages_api` 集成测试共 5 项通过；新增集成测试确认所选模型实际发送到模拟上游且重新加载网关后保留。服务器使用现有 NewAPI 凭据发起单次 `kimi-k3` ping，HTTP 200，返回模型 `kimi-k3`；该诊断未修改生产角色配置。
+
 ## 2026-10-10 SQLx 全链路迁移
 
 用户明确要求从 rusqlite 迁移 SQLx、更新文档并提交推送 GitHub。先核对架构、数据模型、消息/任务事务和备份流程，再按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 实施；当前契约统一在[异步数据库访问](../reference/sqlite-access.md)维护。
