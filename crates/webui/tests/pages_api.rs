@@ -99,7 +99,7 @@ async fn start() -> Rig {
     let prov_path = dir.join("providers.toml");
     std::fs::write(
         &prov_path,
-        "[provider.mock]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n\n[roles]\ndecision = { provider = \"mock\", model = \"m\" }\n",
+        "[provider.mock]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"sk-test-provider-key\"\nmodels = [\"m\"]\n\n[roles]\ndecision = { provider = \"mock\", model = \"m\" }\n",
     )
     .unwrap();
 
@@ -237,7 +237,8 @@ async fn pages_api_full_pass() {
         c["providers"]["provider"]["mock"]["base_url"],
         "http://127.0.0.1:9/v1"
     );
-    assert_eq!(c["providers"]["provider"]["mock"]["api_key_present"], false);
+    assert_eq!(c["providers"]["provider"]["mock"]["api_key_env"], "***");
+    assert_eq!(c["providers"]["provider"]["mock"]["api_key_present"], true);
 
     // 任务
     let (_, t) = rig.get("/api/tasks?state=running").await;
@@ -388,4 +389,44 @@ async fn ws_pushes_events_and_config_write_applies() {
     let (_, c) = rig.get("/api/config").await;
     assert_eq!(c["config"]["prefilter"]["window_secs"], 45);
     assert_eq!(c["config"]["prefilter"]["self_msg_cap"], 9);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_save_preserves_masked_key_and_selected_role_model() {
+    let rig = start().await;
+
+    let response = rig
+        .http
+        .post(format!("{}/api/config", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({
+            "providers": {
+                "provider": {
+                    "mock": {
+                        "base_url": "http://127.0.0.1:9/v1",
+                        "api_key_env": "",
+                        "models": ["m", "m2"]
+                    }
+                },
+                "roles": {
+                    "decision": { "provider": "mock", "model": "m2" }
+                }
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+
+    let (_, config) = rig.get("/api/config").await;
+    assert_eq!(
+        config["providers"]["provider"]["mock"]["api_key_env"],
+        "***"
+    );
+    assert_eq!(
+        config["providers"]["provider"]["mock"]["api_key_present"],
+        true
+    );
+    assert_eq!(config["providers"]["provider"]["mock"]["models"][1], "m2");
+    assert_eq!(config["providers"]["roles"]["decision"]["model"], "m2");
 }

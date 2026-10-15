@@ -45,7 +45,7 @@
           <div class="field-block">
             <label class="field-label">API Key / 环境变量</label>
             <n-input v-model:value="p.api_key_env" type="password" show-password-on="click"
-                     placeholder="sk-... 或环境变量名（留空保持不变）" size="small" />
+                     :placeholder="p.api_key_present ? '已配置，留空保持不变' : 'sk-... 或环境变量名'" size="small" />
           </div>
         </div>
 
@@ -132,10 +132,14 @@ async function fetchModels() {
   fetchError.value = ''
   fetchOk.value = false
   try {
-    const { data } = await api.post('/llm/models/probe', {
-      base_url: props.p.base_url,
-      api_key_env: props.p.api_key_env || '',
-    })
+    const { data } = props.p.api_key_env
+      ? await api.post('/llm/models/probe', {
+          base_url: props.p.base_url,
+          api_key_env: props.p.api_key_env,
+        })
+      : props.p.api_key_present
+        ? await api.get('/llm/models', { params: { provider: props.name } })
+        : await api.post('/llm/models/probe', { base_url: props.p.base_url, api_key_env: '' })
     availableModels.value = data.models || []
     fetchOk.value = true
     if (!availableModels.value.length) fetchError.value = '远端返回空模型列表'

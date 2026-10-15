@@ -17,6 +17,13 @@
 - 服务器启用 `nai-image` 后重建云团容器并验证插件加载、面板健康及 NapCat 连接。
 - 服务器当前没有 NAI API Key；插件可在插件管理页配置，填写前不能实际发起生图。
 
+## 2026-10-15 NewAPI 模型路由与配置保存
+
+- 连接测试已到达 NewAPI；HTTP 503 的上游原因是角色模型 `space-bunny-free` 被路由到 OpenCode 免费层，该模型不能在 OpenCode 外调用。服务器角色仍保存此模型，而 Provider 模型列表列出的是 `kimi-k3` 与 `mimo-v2.6-flash-free`。
+- 模型页此前会把 API Key 字段留空提交，后端将其覆盖为空；GET 也未对 `api_key_env` 做掩码。现在 GET 掩码密钥、用统一解析逻辑报告密钥就绪状态，并在空字段保存时保留原密钥。
+- 角色模型输入改为可搜索/可输入的选项，来源于所选 Provider 的模型列表；Provider 已有密钥时，模型探测复用当前已加载的配置。
+- 验证：`cargo test -p yuantuan-webui --test pages_api` 3 项通过；前端 `npm run build`（含类型检查）通过。
+
 ## 2026-10-10 SQLx 全链路迁移
 
 用户明确要求从 rusqlite 迁移 SQLx、更新文档并提交推送 GitHub。先核对架构、数据模型、消息/任务事务和备份流程，再按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 实施；当前契约统一在[异步数据库访问](../reference/sqlite-access.md)维护。

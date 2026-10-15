@@ -15,7 +15,7 @@ use std::path::Path;
 use yuantuan_core::db::SqliteExt;
 
 /// 掩码的键名（大小写不敏感）
-const MASK_KEYS: [&str; 4] = ["token", "api_key", "password", "secret"];
+const MASK_KEYS: [&str; 5] = ["token", "api_key", "api_key_env", "password", "secret"];
 
 pub async fn get_config(
     State(state): State<AppState>,
@@ -35,10 +35,7 @@ pub async fn get_config(
                         .get("api_key_env")
                         .and_then(|e| e.as_str())
                         .unwrap_or("");
-                    let set = !env_name.is_empty()
-                        && std::env::var(env_name)
-                            .map(|v| !v.is_empty())
-                            .unwrap_or(false);
+                    let set = yuantuan_core::llm::resolve_api_key(env_name).is_some();
                     if let Some(o) = out_tbl.get_mut(name).and_then(|v| v.as_object_mut()) {
                         o.insert("api_key_present".into(), json!(set));
                     }
@@ -102,6 +99,37 @@ fn unmask_in_place(incoming: &mut Value, orig: &Value) {
             }
         }
         _ => {}
+    }
+}
+
+/// Provider keys are deliberately omitted from GET responses. Empty fields mean
+/// "keep the saved key" in the UI, so restore the original value before writing.
+fn preserve_provider_keys(incoming: &mut Value, original: &Value) {
+    unmask_in_place(incoming, original);
+    let (Some(new_providers), Some(old_providers)) = (
+        incoming.get_mut("provider").and_then(Value::as_object_mut),
+        original.get("provider").and_then(Value::as_object),
+    ) else {
+        return;
+    };
+
+    for (name, new_provider) in new_providers {
+        let new_key = new_provider
+            .get("api_key_env")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+        if new_key.is_empty() {
+            let Some(old_key) = old_providers
+                .get(name)
+                .and_then(|provider| provider.get("api_key_env"))
+            else {
+                continue;
+            };
+            if let Some(fields) = new_provider.as_object_mut() {
+                fields.insert("api_key_env".into(), old_key.clone());
+            }
+        }
     }
 }
 
@@ -353,7 +381,10 @@ pub async fn post_config(
 
     // providers.toml 写回：重建 LlmGateway 换槽；文件内容须解析+校验（roles 引用存在性）
     if let Some(p) = &body.providers {
-        let toml_text = to_toml_text(p)?;
+        let mut providers_clean = p.clone();
+        let original = read_toml_as_json(&state.extras.providers_path).unwrap_or_else(|| json!({}));
+        preserve_provider_keys(&mut providers_clean, &original);
+        let toml_text = to_toml_text(&providers_clean)?;
         let tmp = state.extras.providers_path.with_extension("hotcheck.toml");
         std::fs::write(&tmp, &toml_text).map_err(|e| err(&format!("写临时文件失败: {e}")))?;
         let check = yuantuan_core::llm::LlmGateway::load(&tmp);

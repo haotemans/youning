@@ -37,7 +37,8 @@
               </div>
               <div class="field-item">
                 <label class="field-label">模型 ID</label>
-                <n-input v-model:value="roles[r].model" size="small" placeholder="如 gpt-4o-mini / deepseek-chat" />
+                <n-select v-model:value="roles[r].model" :options="modelOptions(r)" size="small"
+                          filterable tag clearable placeholder="输入或选择模型 ID" />
               </div>
             </div>
 
@@ -119,6 +120,14 @@ const providerList = computed(() => Object.entries(providers.value).map(([name, 
 
 function providerUsage(name) {
   return roleNames.filter((r) => roles.value[r].provider === name)
+}
+
+function modelOptions(role) {
+  const provider = providers.value[roles.value[role].provider]
+  const models = (provider?.modelsText || '').split(',').map((s) => s.trim()).filter(Boolean)
+  const current = roles.value[role].model?.trim()
+  if (current && !models.includes(current)) models.unshift(current)
+  return [...new Set(models)].map((model) => ({ label: model, value: model }))
 }
 
 async function load() {
