@@ -4,6 +4,13 @@
 
 > 工作记录：保留各轮的决定、实施反馈和验证证据。前期“现状”与待办只对应记录当时；继续工作前核对最新反馈和代码，不把旧状态当作当前验收。
 
+## 2026-10-15 165 服务器更新与容器构建修复
+
+- 部署目标：`165.154.182.21`，工作目录 `/home/ubuntu/yuantuan/src`。本地 `main` 与 GitHub 起始提交 `d55f64a` 一致；生产数据、`deploy/yuantuan-config.toml`、`deploy/yuantuan-providers.toml` 和 NapCat named volumes 保留。
+- 首次镜像构建发现 Dockerfile 的依赖缓存阶段只复制旧 workspace 成员，缺少 `crates/plugin-api` 与新插件清单，`cargo fetch --locked` 因缺少 manifest 失败。补齐全部 workspace manifest 和占位源码后，服务器 release 镜像构建成功。
+- 云团容器已重建并健康运行，面板 `/login` 返回 HTTP 200；NapCat 容器保持运行，反向 WebSocket 已连接，`get_login_info` 握手完成。
+- 启用标记同步为本地已启用的 AnySearch、moderator、social-media，并保留 hello；未启用 nai-image。部署前快照保留于服务器 `/home/ubuntu/yuantuan/backups/deploy-d55f64a-20261015-4c2a`。
+
 ## 2026-10-10 SQLx 全链路迁移
 
 用户明确要求从 rusqlite 迁移 SQLx、更新文档并提交推送 GitHub。先核对架构、数据模型、消息/任务事务和备份流程，再按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 实施；当前契约统一在[异步数据库访问](../reference/sqlite-access.md)维护。
