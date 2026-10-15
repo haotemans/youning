@@ -11,6 +11,12 @@
 - 云团容器已重建并健康运行，面板 `/login` 返回 HTTP 200；NapCat 容器保持运行，反向 WebSocket 已连接，`get_login_info` 握手完成。
 - 启用标记同步为本地已启用的 AnySearch、moderator、social-media，并保留 hello；未启用 nai-image。部署前快照保留于服务器 `/home/ubuntu/yuantuan/backups/deploy-d55f64a-20261015-4c2a`。
 
+## 2026-10-15 服务器启用 NAI 生图
+
+- 审查发现运行容器没有挂载源码 `plugins/`，导致兼容启用标记对容器不可见；Compose 增加 `../plugins:/app/plugins` 挂载。
+- 服务器启用 `nai-image` 后重建云团容器并验证插件加载、面板健康及 NapCat 连接。
+- 服务器当前没有 NAI API Key；插件可在插件管理页配置，填写前不能实际发起生图。
+
 ## 2026-10-10 SQLx 全链路迁移
 
 用户明确要求从 rusqlite 迁移 SQLx、更新文档并提交推送 GitHub。先核对架构、数据模型、消息/任务事务和备份流程，再按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 实施；当前契约统一在[异步数据库访问](../reference/sqlite-access.md)维护。
