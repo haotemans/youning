@@ -210,7 +210,7 @@ async fn ingest_group_and_private_messages() {
         ("dm_2001", "private", 1)
     );
 
-    // 档案：两个发言人建档；QQ 号反查 person 稳定
+    // 档案：握手登记机器人 + 两个发言人；QQ 号反查 person 稳定
     let person_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM persons",
@@ -219,7 +219,7 @@ async fn ingest_group_and_private_messages() {
         )
         .await
         .unwrap();
-    assert_eq!(person_count, 2);
+    assert_eq!(person_count, 3);
     let pid: String = conn
         .query_row(
             "SELECT person_id FROM identities WHERE platform = 'qq' AND platform_uid = '2001'",
@@ -259,4 +259,104 @@ async fn ingest_group_and_private_messages() {
     assert_eq!(first["chat_id"], "555666");
 
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handshake_and_early_events_share_self_identity_and_keep_legacy_history() {
+    for early in [false, true] {
+        let db_path = temp_db().await;
+        let mut conn = db::connect(&db_path).await.unwrap();
+        conn.execute_batch(
+            "INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES ('p_10001','云团',1,1);
+             INSERT INTO identities(person_id,platform,platform_uid) VALUES ('p_10001','qq','10001');
+             INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES ('555666','group','p_10001','历史消息',1);",
+        ).await.unwrap();
+        let port = free_port();
+        let handle = spawn(
+            EventBus::new(64),
+            db_path.clone(),
+            NapcatConfig {
+                listen_addr: format!("127.0.0.1:{port}"),
+                token: yuantuan_adapter_qq::shared_token(""),
+            },
+            SelfMsgIds::default(),
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .unwrap();
+        let request: Value =
+            serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap()).unwrap();
+        if early {
+            for (uid, id, segments) in [
+                (
+                    SELF_QQ,
+                    71,
+                    json!([{"type":"text","data":{"text":"握手前的自身消息"}}]),
+                ),
+                (
+                    2002,
+                    72,
+                    json!([{"type":"at","data":{"qq":SELF_QQ.to_string()}}]),
+                ),
+            ] {
+                ws.send(Message::Text(json!({
+                    "post_type":"message", "self_id":SELF_QQ, "message_type":"group",
+                    "group_id":555666, "message_id":id, "sender":{"user_id":uid,"nickname":"云团"},
+                    "message":segments,
+                }).to_string().into())).await.unwrap();
+            }
+        }
+        ws.send(Message::Text(
+            json!({"status":"ok","retcode":0,"data":{"user_id":SELF_QQ},"echo":request["echo"]})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !handle.is_connected() {
+            assert!(Instant::now() < deadline, "handshake timed out");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let owner: String = conn
+            .query_row(
+                "SELECT person_id FROM identities WHERE platform='qq' AND platform_uid='10001'",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(owner, "self");
+        let self_messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='self'",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(self_messages, i64::from(early));
+        let legacy_messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='p_10001'",
+                yuantuan_core::db::params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(legacy_messages, 1);
+        if early {
+            let at_me: i64 = conn
+                .query_row(
+                    "SELECT at_me FROM messages WHERE external_msg_id=72 AND sender_pid='p_2002'",
+                    yuantuan_core::db::params![],
+                    |r| r.try_get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(at_me, 1);
+        }
+        ws.close(None).await.unwrap();
+    }
 }

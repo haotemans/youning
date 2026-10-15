@@ -75,6 +75,8 @@ CREATE TABLE member_profiles (
 
 QQ 号在同平台全局唯一：同一个人出现在多个群，天然收敛为同一 person_id，无需跨群匹配。
 
+机器人固定使用 `person_id = 'self'`。QQ 适配层在 `get_login_info` 握手成功后登记机器人 QQ 身份；若旧版本将该 QQ 绑定到 `p_<QQ>`，更新绑定为 `self`，但保留旧人物与消息。握手前到达的 OneBot 消息使用事件的 `self_id` 判断自身消息与 @机器人，避免误建普通成员身份。
+
 ---
 
 ## 三、消息流水（全量落库）
@@ -170,6 +172,7 @@ CREATE INDEX idx_re_pair ON relationship_events(from_pid, to_pid);
 
 - A→B 与 B→A 是两条独立边（A 信 B ≠ B 信 A）
 - 云团 = 特殊 person_id `'self'`；"云团↔人"亲密度就是 from/to 含 'self' 的边，不做特殊结构
+- `/api/relations` 将当前机器人 QQ 和已登记到 `self` 的 QQ 所对应的旧节点归并显示为一个 `self`，头像使用当前 QQ；不按昵称合并。图谱内关系边同步映射，合并产生的自身环不显示，同方向重复边采用更新时间较新的值、同时间优先原本连接 `self` 的值。此投影不迁移或删除历史人物、消息、记忆、关系行。
 - V1 熟悉度主要由 **@互动统计**驱动（A@B→familiar 增量，按 mentions 字段）；信任分由夜间归纳提炼（"A 帮助 B 解决问题"类事件）
 - 夜间归纳只追加 events、重算 edges 当前值——"亲密度怎么涨的"永远讲得清
 
@@ -361,6 +364,7 @@ CREATE INDEX idx_events_ts ON events(ts);
 
 ## 修订记录
 
+- 2026-10-15：明确机器人握手身份登记、握手前事件识别和图谱旧身份归并；保留历史记录并区分同名群友。
 - 2026-10-02 V0.1：数据模型定稿（拷问轮 Q21–Q25）：三主体长期记忆单表、每日摘要索引、@统计驱动熟悉度、人格线性版本链、meme 去重双档 + DINOv3 可选槽位、消息 mentions 字段、mood 免持久化、Decision 输入契约。
 - 2026-10-02（Q26–Q30）：Task 章新增完工交接契约（result_summary + artifacts + key_data）与工具结果硬性截断规则。
 - 2026-10-02（Q34–Q37）：新增第十二章 events 表（Event Bus 落库副本，7 天轮转），供 trace 与任务可视化页查询。

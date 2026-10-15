@@ -126,8 +126,8 @@ async fn session(socket: WebSocket, state: ServerState) {
         let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if v.get("echo").and_then(|e| e.as_str()) == Some(echo.as_str()) {
             match v.pointer("/data/user_id").and_then(|u| u.as_u64()) {
-                Some(uid) => break uid,
-                None => {
+                Some(uid) if uid != 0 => break uid,
+                _ => {
                     warn!("get_login_info 响应缺少 data.user_id");
                     return;
                 }
@@ -139,6 +139,10 @@ async fn session(socket: WebSocket, state: ServerState) {
                 handle_frame(&v, &state.bus, &state.db_path, 0, &pending, &state.self_ids).await;
         }
     };
+    if let Err(e) = crate::ingest::register_self(&state.db_path, self_qq).await {
+        warn!(error = %e, "登记机器人身份失败，断开等待重连");
+        return;
+    }
     state.handle.store_self_qq(self_qq);
     state.handle.store_connected(true);
     info!(self_qq, "get_login_info 完成");

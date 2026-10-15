@@ -3,6 +3,7 @@
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::net::TcpListener;
@@ -80,6 +81,8 @@ struct Rig {
     http: reqwest::Client,
     base: String,
     token: String,
+    db_path: PathBuf,
+    self_qq: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 async fn start() -> Rig {
@@ -107,10 +110,19 @@ async fn start() -> Rig {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     let mut extras = Extras::for_test(cfg_path, prov_path);
-    extras.plugin_manager = Some(yuantuan_core::plugins::PluginManager::load(
-        vec![yuantuan_plugin_hello::plugin()], dir.clone(), dir.join("plugin-sources"),
-        extras.tools_registry.clone(), extras.skill_registry.clone(), extras.llm_slot.clone(),
-    ).await.unwrap());
+    extras.plugin_manager = Some(
+        yuantuan_core::plugins::PluginManager::load(
+            vec![yuantuan_plugin_hello::plugin()],
+            dir.clone(),
+            dir.join("plugin-sources"),
+            extras.tools_registry.clone(),
+            extras.skill_registry.clone(),
+            extras.llm_slot.clone(),
+        )
+        .await
+        .unwrap(),
+    );
+    let self_qq = extras.self_qq.clone();
     let db2 = db_path.clone();
     tokio::spawn(async move {
         let _ = serve(db2, "127.0.0.1", port, extras).await;
@@ -141,7 +153,84 @@ async fn start() -> Rig {
         http,
         base,
         token: login["token"].as_str().unwrap().to_string(),
+        db_path,
+        self_qq,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn relations_folds_bot_aliases_without_merging_same_name_members_or_history() {
+    let rig = start().await;
+    rig.self_qq
+        .store(90001, std::sync::atomic::Ordering::Relaxed);
+    let mut conn = db::connect(&rig.db_path).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES
+         ('p_90001','云团',0,99),('p_10000','旧机器人',1,90),('p_90002','云团',1,2);
+         INSERT INTO identities(person_id,platform,platform_uid) VALUES
+         ('p_90001','qq','90001'),('p_90002','qq','90002');
+         INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts)
+         VALUES ('555666','group','p_90001','旧消息',1);
+         UPDATE relationship_edges SET updated_at=1;
+         INSERT INTO relationship_edges(from_pid,to_pid,trust,familiar,updated_at) VALUES
+         ('self','p_2001',0.1,0.1,1),
+         ('p_90001','p_2001',0.8,0.6,2),
+         ('p_2001','p_10000',0.9,0.7,2),
+         ('p_90001','self',0.5,0.5,3),
+         ('p_90002','self',0.4,0.3,4);",
+    )
+    .await
+    .unwrap();
+    let (status, graph) = rig.get("/api/relations").await;
+    assert_eq!(status, 200);
+    let nodes = graph["nodes"].as_array().unwrap();
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes
+        .iter()
+        .all(|n| n["id"] != "p_90001" && n["id"] != "p_10000"));
+    assert!(nodes
+        .iter()
+        .any(|n| n["id"] == "p_90002" && n["name"] == "云团"));
+    let me = nodes.iter().find(|n| n["id"] == "self").unwrap();
+    assert_eq!(me["qq"], "90001");
+    assert_eq!(me["first_seen"], 0);
+    assert!(me["last_seen"].as_i64().unwrap() >= 99);
+    let edges = graph["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 3);
+    assert!(edges.iter().all(|e| e["from"] != e["to"]));
+    let outward = edges
+        .iter()
+        .find(|e| e["from"] == "self" && e["to"] == "p_2001")
+        .unwrap();
+    assert_eq!(outward["trust"], 0.8);
+    let inward = edges
+        .iter()
+        .find(|e| e["from"] == "p_2001" && e["to"] == "self")
+        .unwrap();
+    assert_eq!(inward["trust"], 0.9);
+
+    // Once the handshake persisted ownership, aliases remain folded offline.
+    conn.execute_batch(
+        "UPDATE identities SET person_id='self' WHERE platform='qq' AND platform_uid='90001'",
+    )
+    .await
+    .unwrap();
+    rig.self_qq.store(0, std::sync::atomic::Ordering::Relaxed);
+    let (_, offline) = rig.get("/api/relations").await;
+    assert_eq!(offline["nodes"].as_array().unwrap().len(), 3);
+    assert_eq!(offline["nodes"][0]["qq"], "90001");
+    let retained: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE sender_pid='p_90001'",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        retained, 1,
+        "graph projection must preserve historical messages"
+    );
 }
 
 impl Rig {
@@ -292,19 +381,40 @@ async fn pages_api_full_pass() {
     let mut settings = plugins["plugins"][0]["settings"].clone();
     settings["config"]["greeting"] = json!("欢迎");
     settings["enabled"] = json!(true);
-    let response = rig.http.post(format!("{}/api/plugins/config", rig.base))
-        .bearer_auth(&rig.token).json(&json!({"name":"hello", "settings":settings})).send().await.unwrap();
+    let response = rig
+        .http
+        .post(format!("{}/api/plugins/config", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"name":"hello", "settings":settings}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status().as_u16(), 200);
     settings["config"]["greeting"] = json!(12);
-    let response = rig.http.post(format!("{}/api/plugins/config", rig.base))
-        .bearer_auth(&rig.token).json(&json!({"name":"hello", "settings":settings})).send().await.unwrap();
+    let response = rig
+        .http
+        .post(format!("{}/api/plugins/config", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"name":"hello", "settings":settings}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status().as_u16(), 400);
     let (_, plugins) = rig.get("/api/plugins/list").await;
-    assert_eq!(plugins["plugins"][0]["settings"]["config"]["greeting"], "欢迎");
+    assert_eq!(
+        plugins["plugins"][0]["settings"]["config"]["greeting"],
+        "欢迎"
+    );
     assert_eq!(plugins["plugins"][0]["pending_restart"], true);
     assert_eq!(plugins["plugins"][0]["loaded"], false);
-    let response = rig.http.post(format!("{}/api/plugins/toggle", rig.base))
-        .bearer_auth(&rig.token).json(&json!({"name":"not-compiled", "enabled":true})).send().await.unwrap();
+    let response = rig
+        .http
+        .post(format!("{}/api/plugins/toggle", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"name":"not-compiled", "enabled":true}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status().as_u16(), 400);
 
     // 知识库占位

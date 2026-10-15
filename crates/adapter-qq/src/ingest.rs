@@ -14,6 +14,28 @@ use yuantuan_core::db::SqliteExt;
 use yuantuan_core::event::{Event, EventBus, MessageReceivedPayload};
 use yuantuan_core::prefilter::SelfMsgIds;
 
+const UPSERT_IDENTITY: &str =
+    "INSERT INTO identities(person_id, platform, platform_uid) VALUES (?1, 'qq', ?2)
+     ON CONFLICT(platform, platform_uid) DO UPDATE SET person_id = excluded.person_id
+     WHERE excluded.person_id = 'self'";
+
+/// Register the bot even before it sends a message. Reclaim its QQ identity from
+/// legacy p_<QQ> records without deleting those records or their message history.
+pub(crate) async fn register_self(db_path: &Path, self_qq: u64) -> Result<()> {
+    let mut conn = yuantuan_core::db::connect(db_path).await?;
+    let mut tx = conn.transaction().await?;
+    tx.execute(
+        "INSERT INTO persons(person_id, display_name, first_seen, last_seen)
+         VALUES ('self', '云团', ?1, ?1)
+         ON CONFLICT(person_id) DO UPDATE SET last_seen = MAX(persons.last_seen, excluded.last_seen)",
+        params![now_secs()],
+    ).await?;
+    tx.execute(UPSERT_IDENTITY, params!["self", self_qq.to_string()])
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn ingest_message(
     v: &Value,
     bus: &EventBus,
@@ -21,6 +43,13 @@ pub async fn ingest_message(
     self_qq: u64,
     self_ids: &SelfMsgIds,
 ) -> Result<()> {
+    // OneBot events carry the logged-in account even before get_login_info's
+    // response arrives. Do not classify that account as an ordinary member.
+    let self_qq = if self_qq != 0 {
+        self_qq
+    } else {
+        v.get("self_id").and_then(Value::as_u64).unwrap_or(0)
+    };
     let message_type = v
         .get("message_type")
         .and_then(|t| t.as_str())
@@ -147,12 +176,8 @@ pub async fn ingest_message(
          ON CONFLICT(person_id) DO UPDATE SET last_seen = excluded.last_seen, display_name = excluded.display_name",
         params![person_id, display_name, ts],
     ).await?;
-    tx.execute(
-        "INSERT INTO identities(person_id, platform, platform_uid) VALUES (?1, 'qq', ?2)
-         ON CONFLICT(platform, platform_uid) DO NOTHING",
-        params![person_id, user_id.to_string()],
-    )
-    .await?;
+    tx.execute(UPSERT_IDENTITY, params![person_id, user_id.to_string()])
+        .await?;
     if chat_type == "group" && !is_self {
         tx.execute(
             "INSERT INTO member_profiles(chat_id, person_id, card, updated_at) VALUES (?1, ?2, ?3, ?4)
