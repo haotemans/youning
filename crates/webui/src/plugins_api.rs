@@ -1,4 +1,4 @@
-//! Runtime plugin catalog and staged settings. Changes take effect after restart.
+//! Runtime plugin catalog and configuration reload.
 use crate::AppState;
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
@@ -37,7 +37,7 @@ pub async fn toggle(
         .toggle(&body.name, body.enabled)
         .await
         .map_err(err)?;
-    Ok(Json(json!({"ok":true,"message":"已保存，重启云团后生效"})))
+    Ok(Json(json!({"ok":true,"message":"插件状态已即时生效"})))
 }
 #[derive(Deserialize)]
 pub struct ConfigBody {
@@ -54,7 +54,5 @@ pub async fn save_config(
         .as_ref()
         .ok_or_else(|| err("插件宿主未启动"))?;
     manager.save(&body.name, body.settings).await.map_err(err)?;
-    Ok(Json(
-        json!({"ok":true,"message":"配置已校验保存，重启后生效"}),
-    ))
+    Ok(Json(json!({"ok":true,"message":"配置已保存并热重载"})))
 }

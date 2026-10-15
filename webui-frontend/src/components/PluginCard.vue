@@ -9,7 +9,7 @@
         <div class="cap-card-status">
           <span v-if="plugin.version" class="mono">v{{ plugin.version }} · </span>
           <span v-if="plugin.enabled && plugin.loaded" class="ok">已加载</span>
-          <span v-else-if="plugin.enabled && !plugin.loaded" class="warn">待重启</span>
+          <span v-else-if="plugin.enabled && !plugin.loaded" class="warn">未加载</span>
           <span v-else>已禁用</span>
         </div>
       </div>

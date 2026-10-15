@@ -405,8 +405,8 @@ async fn pages_api_full_pass() {
         plugins["plugins"][0]["settings"]["config"]["greeting"],
         "欢迎"
     );
-    assert_eq!(plugins["plugins"][0]["pending_restart"], true);
-    assert_eq!(plugins["plugins"][0]["loaded"], false);
+    assert_eq!(plugins["plugins"][0]["pending_reload"], false);
+    assert_eq!(plugins["plugins"][0]["loaded"], true);
     let response = rig
         .http
         .post(format!("{}/api/plugins/toggle", rig.base))

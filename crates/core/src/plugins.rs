@@ -1,4 +1,4 @@
-//! Compiled plugin host. Settings are staged for next startup; native code is trusted.
+//! Compiled plugin host with runtime configuration reload; native code is trusted.
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures_util::FutureExt;
@@ -304,20 +304,28 @@ async fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 struct Entry {
     plugin: Arc<dyn Plugin>,
     meta: PluginMeta,
-    applied: PluginSettings,
+    runtime: RwLock<Runtime>,
     desired: RwLock<PluginSettings>,
     error: RwLock<Option<String>>,
+    directory: PathBuf,
+    restart_required: AtomicBool,
+}
+#[derive(Clone)]
+struct Runtime {
+    applied: PluginSettings,
     gate: Arc<Gate>,
     tools: Vec<&'static str>,
     skills: Vec<SkillDef>,
-    directory: PathBuf,
-    save_lock: Mutex<()>,
 }
 pub struct PluginManager {
     entries: BTreeMap<&'static str, Entry>,
     tools: crate::tools::Registry,
     skills: crate::skills::SkillRegistry,
     events: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    lifecycle: Mutex<()>,
+    stopped: AtomicBool,
+    llm: crate::bot::SharedLlm,
+    moderation: Option<Arc<dyn GroupModeration>>,
 }
 impl PluginManager {
     pub async fn load(
@@ -344,6 +352,10 @@ impl PluginManager {
             tools,
             skills,
             events: Mutex::new(vec![]),
+            lifecycle: Mutex::new(()),
+            stopped: AtomicBool::new(false),
+            llm: llm.clone(),
+            moderation: moderation.clone(),
         };
         // Validate the complete catalog before starting any plugin.
         let mut ids = std::collections::HashSet::new();
@@ -467,13 +479,15 @@ impl PluginManager {
                     plugin,
                     meta,
                     desired: RwLock::new(settings.clone()),
-                    applied: settings,
+                    runtime: RwLock::new(Runtime {
+                        applied: settings,
+                        gate,
+                        tools: tool_names,
+                        skills: skill_defs,
+                    }),
                     error: RwLock::new(error),
-                    gate,
-                    tools: tool_names,
-                    skills: skill_defs,
                     directory,
-                    save_lock: Mutex::new(()),
+                    restart_required: AtomicBool::new(false),
                 },
             );
         }
@@ -482,27 +496,44 @@ impl PluginManager {
     pub fn list(&self) -> Vec<Value> {
         self.entries.values().map(|e| {
             let desired = e.desired.read().unwrap();
-            let loaded = e.gate.active.load(Ordering::Acquire);
+            let runtime = e.runtime.read().unwrap();
+            let loaded = runtime.gate.active.load(Ordering::Acquire);
             let fields = e.plugin.config_fields();
             let mut config = desired.config.clone();
             for field in &fields { if field.secret { config.as_object_mut().map(|c| c.remove(field.key)); } }
             let mut settings = serde_json::to_value(&*desired).unwrap(); settings["config"] = config;
             json!({ "name": e.meta.id, "display_name": e.meta.name, "version": e.meta.version,
                 "description": e.meta.description, "api_version": e.meta.api_version,
-                "enabled": desired.enabled, "loaded": loaded, "pending_restart": *desired != e.applied,
+                "enabled": desired.enabled, "loaded": loaded, "pending_restart": e.restart_required.load(Ordering::Acquire),
+                "pending_reload": *desired != runtime.applied || (desired.enabled && !loaded),
+                "code_update_requires_restart": true,
                 "error": *e.error.read().unwrap(), "data_dir": e.directory.to_string_lossy(),
-                "tools": e.tools.iter().map(|n| json!({"name": n})).collect::<Vec<_>>(),
-                "skills": e.skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
+                "tools": runtime.tools.iter().map(|n| json!({"name": n})).collect::<Vec<_>>(),
+                "skills": runtime.skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
                 "config_fields": fields.iter().map(|f| { let mut v = serde_json::to_value(f).unwrap(); if f.secret { v["default"] = Value::Null; } v }).collect::<Vec<_>>(),
                 "settings": settings })
         }).collect()
     }
-    pub async fn save(&self, id: &str, settings: PluginSettings) -> Result<()> {
-        let entry = self.entries.get(id).context("插件未编译进当前程序")?;
-        let _guard = entry.save_lock.lock().await;
-        Self::save_locked(entry, settings).await
+    pub async fn save(self: &Arc<Self>, id: &str, settings: PluginSettings) -> Result<()> {
+        let manager = self.clone();
+        let id = id.to_owned();
+        // Finish the lifecycle transition even if the HTTP client disconnects.
+        tokio::spawn(async move {
+            let _guard = manager.lifecycle.lock().await;
+            anyhow::ensure!(!manager.stopped.load(Ordering::Acquire), "插件宿主已停止");
+            let entry = manager
+                .entries
+                .get(id.as_str())
+                .context("插件未编译进当前程序")?;
+            manager.save_locked(entry, settings).await
+        })
+        .await?
     }
-    async fn save_locked(entry: &Entry, mut settings: PluginSettings) -> Result<()> {
+    async fn save_locked(&self, entry: &Entry, mut settings: PluginSettings) -> Result<()> {
+        anyhow::ensure!(
+            !entry.restart_required.load(Ordering::Acquire),
+            "插件未能安全停止，需要重启服务后再加载"
+        );
         let old = entry.desired.read().unwrap().clone();
         // Omitted secret fields retain their old values; empty strings explicitly clear them.
         if let Some(config) = settings.config.as_object_mut() {
@@ -522,21 +553,68 @@ impl PluginManager {
             bail!("插件配置超过 64 KiB");
         }
         atomic_write(&entry.directory.join("settings.json"), &bytes).await?;
-        *entry.desired.write().unwrap() = settings;
-        Ok(())
+        *entry.desired.write().unwrap() = settings.clone();
+        let old = entry.runtime.read().unwrap().clone();
+        if old.applied == settings && (old.gate.active.load(Ordering::Acquire) || !settings.enabled)
+        {
+            return Ok(());
+        }
+        if let Err(error) = self.deactivate(entry, &old).await {
+            *entry.error.write().unwrap() = Some(error.to_string());
+            return Err(error);
+        }
+        match self.activate(entry, settings).await {
+            Ok(runtime) => {
+                *entry.runtime.write().unwrap() = runtime;
+                *entry.error.write().unwrap() = None;
+                Ok(())
+            }
+            Err(error) => {
+                if entry.restart_required.load(Ordering::Acquire) {
+                    let note = format!("热重载失败，插件清理未完成，需要重启服务：{error}");
+                    *entry.error.write().unwrap() = Some(note.clone());
+                    bail!(note);
+                }
+                // Rebuild the previous instance so a bad update does not take down other plugins.
+                let restored = self.activate(entry, old.applied.clone()).await;
+                let note = match restored {
+                    Ok(runtime) => {
+                        *entry.runtime.write().unwrap() = runtime;
+                        format!("配置已保存，热重载失败，已恢复原配置：{error}")
+                    }
+                    Err(restore_error) => {
+                        format!("配置已保存，热重载失败：{error}；恢复失败：{restore_error}")
+                    }
+                };
+                *entry.error.write().unwrap() = Some(note.clone());
+                bail!(note)
+            }
+        }
     }
-    pub async fn toggle(&self, id: &str, enabled: bool) -> Result<()> {
-        let entry = self.entries.get(id).context("插件未编译进当前程序")?;
-        let _guard = entry.save_lock.lock().await;
-        let mut settings = entry.desired.read().unwrap().clone();
-        settings.enabled = enabled;
-        Self::save_locked(entry, settings).await
+    pub async fn toggle(self: &Arc<Self>, id: &str, enabled: bool) -> Result<()> {
+        let manager = self.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            let _guard = manager.lifecycle.lock().await;
+            anyhow::ensure!(!manager.stopped.load(Ordering::Acquire), "插件宿主已停止");
+            let entry = manager
+                .entries
+                .get(id.as_str())
+                .context("插件未编译进当前程序")?;
+            let mut settings = entry.desired.read().unwrap().clone();
+            settings.enabled = enabled;
+            manager.save_locked(entry, settings).await
+        })
+        .await?
     }
     pub async fn subscribe(self: &Arc<Self>, bus: &crate::event::EventBus) {
+        let _guard = self.lifecycle.lock().await;
         let mut handles = self.events.lock().await;
+        if !handles.is_empty() || self.stopped.load(Ordering::Acquire) {
+            return;
+        }
         for (id, entry) in &self.entries {
-            if !entry.gate.active.load(Ordering::Acquire) || entry.plugin.subscriptions().is_empty()
-            {
+            if entry.plugin.subscriptions().is_empty() {
                 continue;
             }
             let mut receiver = bus.subscribe();
@@ -557,15 +635,14 @@ impl PluginManager {
                         continue;
                     }
                     let payload = serde_json::to_value(&event).unwrap_or(Value::Null);
-                    let Ok(_permit) = entry
-                        .gate
+                    let gate = entry.runtime.read().unwrap().gate.clone();
+                    let Ok(_permit) = gate
                         .enter(payload.get("chat_id").and_then(Value::as_str))
                         .await
                     else {
                         continue;
                     };
-                    let result = entry
-                        .gate
+                    let result = gate
                         .run(entry.plugin.on_event(PluginEvent {
                             kind: event.kind().into(),
                             payload,
@@ -578,34 +655,128 @@ impl PluginManager {
             }));
         }
     }
+    async fn deactivate(&self, entry: &Entry, runtime: &Runtime) -> Result<()> {
+        let was_active = runtime.gate.active.swap(false, Ordering::AcqRel);
+        // No new invocations can enter. Let calls and event handlers finish before stop/start.
+        let _drain = runtime
+            .gate
+            .permits
+            .clone()
+            .acquire_many_owned(runtime.applied.max_concurrency.min(16) as u32)
+            .await?;
+        if was_active {
+            if let Err(error) = runtime.gate.run(entry.plugin.stop()).await {
+                entry.restart_required.store(true, Ordering::Release);
+                self.tools.unregister(&runtime.tools);
+                self.skills
+                    .unregister(&runtime.skills.iter().map(|s| s.name).collect::<Vec<_>>());
+                return Err(error.context("插件停止失败，未启动新实例"));
+            }
+        }
+        self.tools.unregister(&runtime.tools);
+        self.skills
+            .unregister(&runtime.skills.iter().map(|s| s.name).collect::<Vec<_>>());
+        Ok(())
+    }
+
+    async fn activate(&self, entry: &Entry, settings: PluginSettings) -> Result<Runtime> {
+        anyhow::ensure!(entry.meta.api_version == API_VERSION, "插件接口版本不兼容");
+        let gate = Arc::new(Gate {
+            active: AtomicBool::new(false),
+            permits: Arc::new(Semaphore::new(settings.max_concurrency)),
+            policy: settings.clone(),
+            artifact_root: entry.directory.join("artifacts"),
+        });
+        let mut runtime = Runtime {
+            applied: settings.clone(),
+            gate: gate.clone(),
+            tools: vec![],
+            skills: vec![],
+        };
+        if !settings.enabled {
+            return Ok(runtime);
+        }
+        let host = Arc::new(Services {
+            id: entry.meta.id,
+            directory: entry.directory.clone(),
+            llm: self.llm.clone(),
+            policy: settings.clone(),
+            io: Mutex::new(()),
+            moderation: if entry.plugin.uses_group_moderation() {
+                self.moderation.clone()
+            } else {
+                None
+            },
+        });
+        let result = async {
+            let caps = gate
+                .run(entry.plugin.start(PluginContext { host }, settings.config))
+                .await?;
+            let prefix = format!("{}.", entry.meta.id);
+            anyhow::ensure!(
+                caps.tools.iter().all(|t| t.name().starts_with(&prefix))
+                    && caps
+                        .skills
+                        .iter()
+                        .all(|s| s.def().name.starts_with(&prefix)),
+                "插件能力名必须以 {prefix} 开头"
+            );
+            let tools = caps.tools.iter().map(|t| t.name()).collect::<Vec<_>>();
+            let skills = caps.skills.iter().map(|s| s.def()).collect::<Vec<_>>();
+            self.tools.register_batch(
+                caps.tools
+                    .into_iter()
+                    .map(|inner| {
+                        Arc::new(HostedTool {
+                            inner,
+                            gate: gate.clone(),
+                        }) as Arc<dyn Tool>
+                    })
+                    .collect(),
+            )?;
+            if let Err(error) = self.skills.register_batch(
+                caps.skills
+                    .into_iter()
+                    .map(|inner| {
+                        Arc::new(HostedSkill {
+                            inner,
+                            gate: gate.clone(),
+                        }) as Arc<dyn Skill>
+                    })
+                    .collect(),
+            ) {
+                self.tools.unregister(&tools);
+                return Err(error);
+            }
+            runtime.tools = tools;
+            runtime.skills = skills;
+            Ok(())
+        }
+        .await;
+        if let Err(error) = result {
+            if let Err(cleanup_error) = gate.run(entry.plugin.stop()).await {
+                entry.restart_required.store(true, Ordering::Release);
+                return Err(cleanup_error.context("插件启动失败后的清理失败"));
+            }
+            return Err(error);
+        }
+        gate.active.store(true, Ordering::Release);
+        Ok(runtime)
+    }
+
     pub async fn shutdown(&self) {
-        let running: Vec<_> = self
-            .entries
-            .values()
-            .filter(|e| e.gate.active.swap(false, Ordering::AcqRel))
-            .map(|e| e.meta.id)
-            .collect();
+        let _guard = self.lifecycle.lock().await;
+        if self.stopped.swap(true, Ordering::AcqRel) {
+            return;
+        }
         for handle in self.events.lock().await.drain(..) {
             handle.abort();
             let _ = handle.await;
         }
-        for e in self.entries.values() {
-            self.tools.unregister(&e.tools);
-            self.skills
-                .unregister(&e.skills.iter().map(|s| s.name).collect::<Vec<_>>());
-            if running.contains(&e.meta.id) {
-                // Wait for active calls for at most the configured call deadline.
-                let _drain = tokio::time::timeout(
-                    Duration::from_millis(e.applied.timeout_ms),
-                    e.gate
-                        .permits
-                        .clone()
-                        .acquire_many_owned(e.applied.max_concurrency.min(16) as u32),
-                )
-                .await;
-                if e.gate.run(e.plugin.stop()).await.is_err() {
-                    tracing::warn!(plugin = e.meta.id, "插件停止失败");
-                }
+        for entry in self.entries.values() {
+            let runtime = entry.runtime.read().unwrap().clone();
+            if let Err(error) = self.deactivate(entry, &runtime).await {
+                tracing::warn!(plugin = entry.meta.id, %error, "插件停止失败");
             }
         }
     }

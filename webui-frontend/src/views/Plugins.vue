@@ -5,11 +5,11 @@
         <span class="yt-page-title">插件管理</span>
         <span class="yt-page-sub mono">{{ plugins.length }} 个插件</span>
       </div>
-      <span class="yt-page-sub">点开插件查看功能与配置</span>
+      <span class="yt-page-sub">启停和配置即时生效 · 插件代码更新需重新编译并重启</span>
     </div>
 
     <n-alert v-if="dirty.size" type="warning" :bordered="false">
-      {{ dirty.size }} 个插件有待生效的变更，重启后端服务后生效。
+      {{ dirty.size }} 个插件尚未应用配置，请查看详情中的错误并重新保存。
     </n-alert>
     <n-alert v-if="error && !showDetail" type="error" :bordered="false">{{ error }}</n-alert>
 
@@ -37,12 +37,13 @@
           <span class="k">运行状态</span>
           <span class="v">
             <n-tag size="tiny" :bordered="false" type="success" v-if="detail.enabled && detail.loaded">已加载</n-tag>
-            <n-tag size="tiny" :bordered="false" type="warning" v-else-if="detail.enabled && !detail.loaded">待重启</n-tag>
+            <n-tag size="tiny" :bordered="false" type="warning" v-else-if="detail.enabled && !detail.loaded">未加载</n-tag>
             <n-tag size="tiny" :bordered="false" v-else>已禁用</n-tag>
           </span>
         </div>
         <n-alert v-if="detail.error" type="error" :bordered="false">{{ detail.error }}</n-alert>
-        <n-alert v-if="detail.pending_restart" type="info" :bordered="false">配置已保存，重启服务后生效。</n-alert>
+        <n-alert v-if="detail.pending_restart" type="warning" :bordered="false">插件停止失败，需要重启服务后再加载。</n-alert>
+        <n-alert v-else-if="detail.pending_reload" type="info" :bordered="false">配置尚未应用，请修正错误后重新保存。</n-alert>
         <div class="detail-block" v-if="detail.config_fields?.length">
           <n-form label-placement="top" :show-feedback="false">
             <n-form-item v-for="field in detail.config_fields" :key="field.key" :label="field.label">
@@ -112,7 +113,7 @@ async function load() {
   try {
     const { data } = await api.get('/plugins/list')
     plugins.value = data.plugins || []
-    dirty.value = new Set(plugins.value.filter(p => p.pending_restart).map(p => p.name))
+    dirty.value = new Set(plugins.value.filter(p => p.pending_reload).map(p => p.name))
   } catch (e) {
     error.value = e.response?.data?.error || '插件列表加载失败'
   }
@@ -125,6 +126,7 @@ async function toggle(p, v) {
     await load()
   } catch (e) {
     error.value = e.response?.data?.error || '插件状态保存失败'
+    await load()
   }
 }
 
@@ -160,9 +162,11 @@ async function saveConfig() {
       if (field.secret) configDraft.value[field.key] = ''
     }
     clearSecrets.value = {}
-    saved.value = '已保存，重启服务后生效'
+    saved.value = '已保存并即时生效'
   } catch (e) {
     error.value = e.response?.data?.error || '插件配置保存失败'
+    await load()
+    detail.value = plugins.value.find(p => p.name === detail.value.name) || detail.value
   } finally {
     saving.value = false
   }
