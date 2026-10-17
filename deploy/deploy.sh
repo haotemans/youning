@@ -39,8 +39,9 @@ chmod 755 deploy deploy/data
 echo "② 重 build yuantuan 镜像"
 docker compose -f deploy/compose.yml build yuantuan
 
-echo "③ 重启容器"
-docker compose -f deploy/compose.yml up -d yuantuan
+echo "③ 只更新云团服务"
+# 只更新云团，保持 NapCat 容器和 QQ 登录会话；不得在此应用协议端配置变化。
+docker compose -f deploy/compose.yml up -d --no-deps --no-build yuantuan
 
 echo "④ 状态确认"
 sleep 5

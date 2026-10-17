@@ -29,16 +29,16 @@ impl Default for ContextCfg {
 }
 pub type SharedContextCfg = std::sync::Arc<std::sync::RwLock<ContextCfg>>;
 
-pub const DEFAULT_PERSONA: &str = "你是「云团」，在 QQ 中与大家交流的 Bot。温和、自然、有适度幽默感，优先用简短中文回答实际问题。对不熟悉的人同样友好，不根据熟悉度猜测对方喜欢或讨厌你。不为维持人设编造个人经历、跨群活动或已完成的操作；不知道就坦诚说明，必要时简短追问。玩笑保持明显的玩笑语气，不伪装成真实行动。";
+pub use crate::personality::DEFAULT_PERSONA;
 
 /// 首次安装或从未配置人格时建立可在面板编辑的版本；不覆盖管理员历史。
 pub async fn ensure_default_persona(conn: &mut sqlx::SqliteConnection) -> Result<bool> {
     Ok(conn
         .execute(
-            "INSERT INTO personality_versions(version_no,content,note,created_by,created_at,active)
-         SELECT 1,?1,'内置默认人格','system',unixepoch(),1
+            "INSERT INTO personality_versions(version_no,content,reply_examples,note,created_by,created_at,active)
+         SELECT 1,?1,?2,'内置默认人格','system',unixepoch(),1
          WHERE NOT EXISTS (SELECT 1 FROM personality_versions)",
-            crate::db::params![DEFAULT_PERSONA],
+            crate::db::params![DEFAULT_PERSONA, crate::personality::DEFAULT_REPLY_EXAMPLES],
         )
         .await?
         > 0)
@@ -51,7 +51,7 @@ const BEHAVIOR_RULES: &str = r#"行为准则：
 - 人物简档是基于本人原话提炼的资料；记忆的 source/时间/证据状态必须一起理解，不能把提炼结果当成已验证事实
 - 当前明确陈述与旧记忆冲突时，以当前陈述为准并自然核对；记忆里的计划/偏好不能当作已完成的执行结果
 - speaker_kind=bot 的旧回答只用于对话衔接，不能当作独立事实依据
-- 本轮是纯文字回复，没有联网、跨群查询、运行代码或执行工具。不能说“刚去看了”“已经查过/运行/完成”等没有执行结果支持的话；其他群的活动未知时直接说没有这方面信息
+- 本轮正文由你生成，能力目录中的技能由宿主选择并执行。区分“具备某项能力”和“本轮已经执行”：可根据 available_skills 说明当前会话实际可用的能力；只有 execution_results 中存在实际结果才可说“刚去看了”“已经查过/运行/完成”。不能因本轮没有执行结果就否认已启用的搜索等能力；没有跨群记录时说没有这方面信息
 - 缺少记录不等于事情没发生。询问过去或“刚才”的活动/测试时，没有对应记录就说无法确认；不能据本轮无工具断言以前没执行过、从没去过其他群、只能待在这个群。例如问隔壁群做了什么，可答“我这边没有那边的聊天记录，没法确认”；问之前是否跑过测试，可答“当前没有看到测试执行记录，不能确认之前跑没跑过”
 - 对你自己的经历、动作和群内活动也适用事实依据要求；人设、玩笑、别人对你的猜测都不能证明你实际做过某事。不要把别人的经历说成自己的经历
 - dialogue 只说明之前回复过当前对象；active_tasks 只说明任务处于调度/运行中，不证明已经执行成功，不把“running”说成完成。缺失关联的旧消息不得猜测是谁的回复
@@ -267,7 +267,13 @@ pub async fn capture_reply_snapshot(
         participants
             .push(json!({"person_id":id,"nickname":name,"trust":trust,"familiar":familiar}));
     }
-    let persona = tx.query_row("SELECT content FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1", crate::db::params![], |r| r.try_get::<String, _>(0)).await.optional()?.unwrap_or_else(|| DEFAULT_PERSONA.into());
+    let (content, examples) = tx.query_row(
+        "SELECT content,reply_examples FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1",
+        crate::db::params![], |r| Ok((r.try_get::<String, _>(0)?, r.try_get::<String, _>(1)?)),
+    ).await.optional()?.unwrap_or_else(|| (DEFAULT_PERSONA.into(), crate::personality::DEFAULT_REPLY_EXAMPLES.into()));
+    let examples: Vec<crate::personality::ReplyExample> =
+        serde_json::from_str(&examples).context("读取人格回复示例失败")?;
+    let persona = crate::personality::render(&content, &examples)?;
     let since_reply: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND msg_id<=?2 AND sender_pid!='self' AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND sender_pid='self' AND msg_id<=?2),0)",
         params![anchor.chat_id,cutoff,anchor.chat_type], |r|r.try_get(0),
@@ -282,7 +288,15 @@ pub async fn capture_reply_snapshot(
     let human_messages_30s: i64 = tx.query_row(
         "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid!='self' AND msg_id<=?3 AND ts>=?4",
         params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts-30], |r|r.try_get(0)).await?;
-    let scene = json!({"recent_speakers":recent.iter().rev().take(10).map(|m|m.person_id.clone()).collect::<BTreeSet<_>>(),
+    let current_time: String = tx
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')",
+            params![],
+            |r| r.try_get(0),
+        )
+        .await?;
+    let scene = json!({"current_time":current_time,
+        "recent_speakers":recent.iter().rev().take(10).map(|m|m.person_id.clone()).collect::<BTreeSet<_>>(),
         "msgs_since_my_reply":since_reply,"my_replies_last_5min":replies,"chat_topic":null,
         "human_messages_last_30s":human_messages_30s,
         "seconds_since_my_reply":last_reply.map(|ts|anchor.ts.saturating_sub(ts).max(0))});
@@ -323,6 +337,15 @@ pub fn render_bot_context(
     mood: MoodValue,
     cfg: &ContextCfg,
 ) -> Result<BotContext> {
+    render_bot_context_with_skills(snapshot, mood, cfg, &[])
+}
+
+pub fn render_bot_context_with_skills(
+    snapshot: &ReplySnapshot,
+    mood: MoodValue,
+    cfg: &ContextCfg,
+    skill_catalog: &[(String, String)],
+) -> Result<BotContext> {
     let system = format!(
         "{}\n当前情绪：{}\n{}",
         snapshot.persona,
@@ -343,7 +366,10 @@ pub fn render_bot_context(
             "person_profile":{"person_id":snapshot.anchor.person_id,"facts":profile},
             "topic_memories":memories, "recent_messages":recent, "participants":participants,
             "limitations":snapshot.limitations, "optional_context_pruned":pruned,
-            "capabilities":{"tools_available":false,"cross_chat_history_available":false,"execution_results":[]},
+            "capabilities":{"tools_available":!skill_catalog.is_empty(),
+                "available_skills":skill_catalog.iter().map(|(name,description)|
+                    json!({"name":name,"description":description})).collect::<Vec<_>>(),
+                "cross_chat_history_available":false,"execution_results":[]},
             "dialogue":snapshot.dialogue, "active_tasks":active_tasks,
         }))?;
         if system.chars().count() + user.chars().count() <= cfg.budget_chars {

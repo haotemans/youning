@@ -14,6 +14,11 @@
     </div>
 
     <n-card title="角色模型路由" size="small">
+      <template #header-extra>
+        <n-button size="small" secondary :disabled="!loaded || loading || saving" @click="applyRecommendedReasoning">
+          决策 low / 回复 high
+        </n-button>
+      </template>
       <n-grid cols="1 m:3" :x-gap="16" :y-gap="16" responsive="screen">
         <n-gi v-for="r in roleNames" :key="r">
           <div class="role-card" :class="{ bound: roles[r].provider }">
@@ -41,6 +46,12 @@
                 <n-select v-model:value="roles[r].model" :options="modelOptions(r)" size="small"
                           filterable tag clearable placeholder="输入或选择模型 ID" />
               </div>
+              <div class="field-item">
+                <label class="field-label">思考强度</label>
+                <n-select v-model:value="roles[r].reasoning_effort" :options="reasoningOptions" size="small"
+                          placeholder="服务商默认" clearable />
+                <span class="field-label">{{ reasoningHints[r] }}；实际效果取决于模型和服务商。</span>
+              </div>
             </div>
 
             <div class="role-foot">
@@ -49,7 +60,7 @@
                 保存并测试
               </n-button>
               <span v-if="tests[r].state === 'ok'" class="test-badge ok mono">
-                {{ tests[r].model }} · {{ tests[r].latency }}ms
+                {{ tests[r].model }}{{ roles[r].reasoning_effort ? ` · ${roles[r].reasoning_effort}` : '' }} · {{ tests[r].latency }}ms
               </span>
               <span v-else-if="tests[r].state === 'fail'" class="test-badge fail" :title="tests[r].error">
                 {{ tests[r].error || '连接失败' }}
@@ -94,10 +105,24 @@ import axios from 'axios'
 /** @type {import('vue').Ref<Record<string, { base_url: string, modelsText: string, api_key_env: string, api_key_present: boolean, protocol: string }>>} */
 const providers = ref({})
 const roles = ref({
-  decision: { provider: null, model: '' },
-  bot_chat: { provider: null, model: '' },
-  agent_exec: { provider: null, model: '' },
+  decision: { provider: null, model: '', reasoning_effort: null },
+  bot_chat: { provider: null, model: '', reasoning_effort: null },
+  agent_exec: { provider: null, model: '', reasoning_effort: null },
 })
+const reasoningOptions = [
+  { label: 'low · 轻量思考', value: 'low' },
+  { label: 'medium · 平衡', value: 'medium' },
+  { label: 'high · 深入思考', value: 'high' },
+]
+const reasoningHints = {
+  decision: '建议 low，优先快速判断是否回应及使用什么能力',
+  bot_chat: '建议 high，为组织回答和核实依据留更多思考空间',
+  agent_exec: '按任务复杂度选择，留空沿用服务商设置',
+}
+function applyRecommendedReasoning() {
+  roles.value.decision.reasoning_effort = 'low'
+  roles.value.bot_chat.reasoning_effort = 'high'
+}
 const roleNames = ['decision', 'bot_chat', 'agent_exec']
 const roleIcons = { decision: 'trace', bot_chat: 'chat', agent_exec: 'tasks' }
 const roleLabels = {
@@ -161,8 +186,8 @@ function applyConfig(data) {
   const rs = data.providers?.roles || {}
   for (const r of roleNames) {
     roles.value[r] = rs[r]
-      ? { provider: rs[r].provider, model: rs[r].model }
-      : { provider: null, model: '' }
+      ? { provider: rs[r].provider, model: rs[r].model, reasoning_effort: rs[r].reasoning_effort ?? null }
+      : { provider: null, model: '', reasoning_effort: null }
   }
   savedSignature.value = JSON.stringify(configPayload())
   loaded.value = true
@@ -190,12 +215,14 @@ async function testRole(r) {
     return
   }
   const model = roles.value[r].model
+  const effort = roles.value[r].reasoning_effort
   const epoch = ++testEpoch[r]
   tests.value[r] = { state: 'loading', latency: null, model: '', error: '' }
   try {
     const { data } = await api.post('/llm/test', { role: r }, { timeout: 65000 })
     if (epoch !== testEpoch[r]) return
     if (data.ok && data.model !== model) throw new Error(`实际测试模型 ${data.model} 与所选模型 ${model} 不一致`)
+    if (data.ok && (data.reasoning_effort ?? null) !== effort) throw new Error('实际测试的思考强度与所选配置不一致')
     tests.value[r] = {
       state: data.ok ? 'ok' : 'fail',
       latency: data.latency_ms ?? null,
@@ -244,7 +271,10 @@ function configPayload() {
   }
   const rolesOut = {}
   for (const r of roleNames) {
-    if (roles.value[r].provider) rolesOut[r] = { provider: roles.value[r].provider, model: roles.value[r].model }
+    if (roles.value[r].provider) {
+      rolesOut[r] = { provider: roles.value[r].provider, model: roles.value[r].model }
+      if (roles.value[r].reasoning_effort) rolesOut[r].reasoning_effort = roles.value[r].reasoning_effort
+    }
   }
   return { provider, roles: rolesOut }
 }
@@ -258,7 +288,10 @@ function routingSignature(config) {
   const bindings = {}
   for (const r of roleNames) {
     const bind = config.roles?.[r]
-    if (bind) bindings[r] = { provider: bind.provider, model: bind.model }
+    if (bind) {
+      bindings[r] = { provider: bind.provider, model: bind.model }
+      if (bind.reasoning_effort) bindings[r].reasoning_effort = bind.reasoning_effort
+    }
   }
   return JSON.stringify({ provider, roles: bindings })
 }

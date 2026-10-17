@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use yuantuan_plugin_api::ArtifactRetention;
+use yuantuan_plugin_api::{ArtifactRetention, DeliveryPolicy};
 
 // ---------- 发送抽象（core 不依赖适配层：由装配侧注入闭包） ----------
 
@@ -45,7 +45,29 @@ pub struct SendRequest {
     pub target: u64,
     /// OneBot 段数组
     pub segments: Value,
+    pub operation: SendOperation,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SendOperation {
+    #[default]
+    Message,
+    Forward,
+    RecallSource {
+        message_id: i64,
+        sender_qq: u64,
+    },
+}
+
+/// The adapter accepted a send, but delivery is unknown. Retrying can duplicate it.
+#[derive(Debug)]
+pub struct DeliveryUnconfirmed(pub String);
+impl std::fmt::Display for DeliveryUnconfirmed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for DeliveryUnconfirmed {}
 
 pub type SendFn = Arc<
     dyn Fn(SendRequest) -> Pin<Box<dyn std::future::Future<Output = Result<Value>> + Send>>
@@ -346,7 +368,16 @@ pub enum JobKind {
     Image(PathBuf),
     Video(PathBuf),
     /// Plugin-owned temporary media; cleanup is tied to its delivery receipt.
-    TemporaryAttachment { path: PathBuf, video: bool },
+    TemporaryAttachment {
+        path: PathBuf,
+        video: bool,
+    },
+    PluginResult {
+        text: String,
+        artifacts: Vec<PathBuf>,
+        retention: ArtifactRetention,
+        policy: DeliveryPolicy,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -408,6 +439,65 @@ enum EngineCommand {
 }
 
 impl EngineHandle {
+    pub fn enqueue_plugin_result(
+        &self,
+        chat_id: String,
+        chat_type: ChatType,
+        target: u64,
+        anchor_msg_id: i64,
+        text: String,
+        artifacts: Vec<String>,
+        retention: ArtifactRetention,
+        policy: DeliveryPolicy,
+    ) -> Result<()> {
+        self.enqueue_plugin_result_with_mention(
+            chat_id,
+            chat_type,
+            target,
+            anchor_msg_id,
+            text,
+            artifacts,
+            retention,
+            policy,
+            None,
+        )
+    }
+
+    /// The caller resolves the requester from the incoming message, never plugin slots.
+    pub fn enqueue_plugin_result_with_mention(
+        &self,
+        chat_id: String,
+        chat_type: ChatType,
+        target: u64,
+        anchor_msg_id: i64,
+        text: String,
+        artifacts: Vec<String>,
+        retention: ArtifactRetention,
+        policy: DeliveryPolicy,
+        mention_qq: Option<u64>,
+    ) -> Result<()> {
+        anyhow::ensure!(artifacts.len() <= 30, "附件数量超过 30");
+        let artifacts: Vec<PathBuf> = artifacts.into_iter().map(PathBuf::from).collect();
+        for path in &artifacts {
+            media_kind(path)?;
+        }
+        self.tx
+            .send(EngineCommand::Enqueue(ReplyJob {
+                chat_id,
+                chat_type,
+                target,
+                anchor_msg_id,
+                mention: mention_qq.is_some(),
+                mention_qq,
+                kind: JobKind::PluginResult {
+                    text,
+                    artifacts,
+                    retention,
+                    policy,
+                },
+            }))
+            .map_err(|_| anyhow!("回复队列已停止"))
+    }
     pub fn enqueue(&self, job: ReplyJob) {
         if self.tx.send(EngineCommand::Enqueue(job)).is_err() {
             warn!("回复引擎已停止，任务丢弃");
@@ -429,12 +519,28 @@ impl EngineHandle {
     }
 
     /// Validated plugin output; actual success is recorded only after the adapter replies.
-    pub fn enqueue_attachment(&self, chat_id: String, chat_type: ChatType, target: u64, path: PathBuf) -> Result<()> {
-        self.enqueue_attachment_with_retention(chat_id, chat_type, target, path, ArtifactRetention::Keep)
+    pub fn enqueue_attachment(
+        &self,
+        chat_id: String,
+        chat_type: ChatType,
+        target: u64,
+        path: PathBuf,
+    ) -> Result<()> {
+        self.enqueue_attachment_with_retention(
+            chat_id,
+            chat_type,
+            target,
+            path,
+            ArtifactRetention::Keep,
+        )
     }
 
     pub fn enqueue_attachment_with_retention(
-        &self, chat_id: String, chat_type: ChatType, target: u64, path: PathBuf,
+        &self,
+        chat_id: String,
+        chat_type: ChatType,
+        target: u64,
+        path: PathBuf,
         retention: ArtifactRetention,
     ) -> Result<()> {
         let video = match path.extension().and_then(|s| s.to_str()) {
@@ -449,9 +555,17 @@ impl EngineHandle {
         } else {
             JobKind::Image(path)
         };
-        self.tx.send(EngineCommand::Enqueue(ReplyJob {
-            chat_id, chat_type, target, anchor_msg_id: 0, mention: false, mention_qq: None, kind,
-        })).map_err(|_| anyhow::anyhow!("回复队列已停止"))
+        self.tx
+            .send(EngineCommand::Enqueue(ReplyJob {
+                chat_id,
+                chat_type,
+                target,
+                anchor_msg_id: 0,
+                mention: false,
+                mention_qq: None,
+                kind,
+            }))
+            .map_err(|_| anyhow::anyhow!("回复队列已停止"))
     }
 
     /// 直接发图（meme）：入 per-chat 串行队列，与普通回复同队列保序（稳定六条②）
@@ -548,11 +662,223 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
     match job.kind.clone() {
         JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
         JobKind::Image(path) => process_image(eng, &job, &path, "meme").await,
-        JobKind::Video(path) => process_media(eng, &job, &path, "video", "视频", ArtifactRetention::Keep).await,
-        JobKind::TemporaryAttachment { path, video } => process_media(
-            eng, &job, &path, if video { "video" } else { "image" }, "插件附件",
-            ArtifactRetention::DeleteAfterSend,
-        ).await,
+        JobKind::Video(path) => {
+            process_media(eng, &job, &path, "video", "视频", ArtifactRetention::Keep).await
+        }
+        JobKind::TemporaryAttachment { path, video } => {
+            process_media(
+                eng,
+                &job,
+                &path,
+                if video { "video" } else { "image" },
+                "插件附件",
+                ArtifactRetention::DeleteAfterSend,
+            )
+            .await
+        }
+        JobKind::PluginResult {
+            text,
+            artifacts,
+            retention,
+            policy,
+        } => {
+            process_plugin_result(eng, &job, &text, &artifacts, retention, policy).await;
+        }
+    }
+}
+
+fn media_kind(path: &Path) -> Result<&'static str> {
+    match path.extension().and_then(|s| s.to_str()) {
+        Some("mp4") => Ok("video"),
+        Some("jpg" | "png" | "gif" | "webp") => Ok("image"),
+        _ => anyhow::bail!("不支持的附件格式"),
+    }
+}
+
+async fn recall_source(eng: &ReplyEngine, job: &ReplyJob) -> Result<()> {
+    use sqlx::Row;
+    anyhow::ensure!(
+        job.chat_type == ChatType::Group && job.chat_id.parse::<u64>().ok() == Some(job.target),
+        "原消息会话与发送目标不一致"
+    );
+    let mut conn = crate::db::connect(&eng.db_path).await?;
+    let (external_id, sender): (Option<i64>, String) = conn.query_row(
+        "SELECT external_msg_id, sender_pid FROM messages WHERE msg_id=?1 AND chat_id=?2 AND chat_type='group' AND sender_pid!='self'",
+        params![job.anchor_msg_id, job.chat_id], |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+    ).await?;
+    drop(conn);
+    let message_id = external_id
+        .filter(|id| *id != 0)
+        .context("原消息没有有效的 OneBot ID")?;
+    let sender_qq = sender
+        .strip_prefix("p_")
+        .and_then(|s| s.parse().ok())
+        .filter(|id| *id > 0)
+        .context("原消息发送者无效")?;
+    // IDs come only from the recorded source in this chat, never from model/plugin slots.
+    (eng.send)(SendRequest {
+        chat_type: job.chat_type,
+        target: job.target,
+        segments: json!([]),
+        operation: SendOperation::RecallSource {
+            message_id,
+            sender_qq,
+        },
+    })
+    .await?;
+    Ok(())
+}
+
+async fn process_plugin_result(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    text: &str,
+    artifacts: &[PathBuf],
+    retention: ArtifactRetention,
+    policy: DeliveryPolicy,
+) {
+    // Do not recall the source if files disappeared while waiting in the queue.
+    for path in artifacts {
+        if !tokio::fs::metadata(path).await.is_ok_and(|m| m.is_file()) {
+            eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                chat_id: job.chat_id.clone(),
+                bubble_index: 0,
+                total: artifacts.len(),
+                ok: false,
+                note: Some("下载附件不存在，保留原分享消息".into()),
+            }));
+            return;
+        }
+    }
+    if policy.recall_source && !artifacts.is_empty() && job.chat_type == ChatType::Group {
+        if let Err(error) = recall_source(eng, job).await {
+            warn!(chat_id=%job.chat_id, %error, "原分享消息撤回失败，继续发送下载结果");
+            eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                chat_id: job.chat_id.clone(),
+                bubble_index: 0,
+                total: artifacts.len(),
+                ok: false,
+                note: Some(format!("原分享消息撤回失败：{error}；继续交付附件")),
+            }));
+        }
+    }
+    if !artifacts.is_empty()
+        && policy
+            .forward_threshold
+            .is_some_and(|n| artifacts.len() >= n.max(1))
+    {
+        let mut nodes = vec![];
+        if !text.trim().is_empty() {
+            nodes.push(
+                json!({"type":"node","data":{"content":[{"type":"text","data":{"text":text}}]}}),
+            );
+        }
+        for path in artifacts {
+            let kind = media_kind(path).expect("validated attachment extension");
+            nodes.push(json!({"type":"node","data":{"content":[{"type":kind,"data":{"file":meme::file_url(path)}}]}}));
+        }
+        let req = SendRequest {
+            chat_type: job.chat_type,
+            target: job.target,
+            operation: SendOperation::Forward,
+            segments: json!(nodes),
+        };
+        let result = send_with_retry(&eng.send, &req).await;
+        let (ok, note) = match result {
+            Ok(data) => {
+                let message_id = data
+                    .get("message_id")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_str()?.parse().ok()));
+                if let Some(id) = message_id {
+                    eng.self_ids.record(id);
+                }
+                insert_self_message_ex(
+                    &eng.db_path,
+                    job,
+                    &format!(
+                        "[下载结果：{} 个附件的合并聊天记录] {text}",
+                        artifacts.len()
+                    ),
+                    true,
+                    message_id,
+                )
+                .await;
+                let mut note = "下载结果已合并为聊天记录".to_owned();
+                if retention == ArtifactRetention::DeleteAfterSend {
+                    if message_id.is_some() {
+                        let mut removed = 0;
+                        for path in artifacts {
+                            match remove_delivered_artifact(&eng.db_path, path).await {
+                                Ok(()) => removed += 1,
+                                Err(error) => {
+                                    warn!(%error, "合并聊天记录附件清理失败");
+                                    note.push_str(&format!("；清理失败：{error}"));
+                                }
+                            }
+                        }
+                        note.push_str(&format!("；已删除 {removed} 个临时文件"));
+                    } else {
+                        note.push_str("；回执缺少消息 ID，保留临时文件");
+                    }
+                }
+                (true, note)
+            }
+            Err(error) => (
+                false,
+                format!("合并聊天记录发送失败：{error}；保留临时文件"),
+            ),
+        };
+        eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+            chat_id: job.chat_id.clone(),
+            bubble_index: 0,
+            total: artifacts.len(),
+            ok,
+            note: Some(note.chars().take(2048).collect()),
+        }));
+        return;
+    }
+    // A generated image and its caption are one QQ message. Never announce
+    // success in a separate text message before attempting delivery.
+    if artifacts.len() == 1 && media_kind(&artifacts[0]).ok() == Some("image") {
+        let delivery = process_media_caption(
+            eng,
+            job,
+            &artifacts[0],
+            "image",
+            "插件附件",
+            retention,
+            Some(text),
+        )
+        .await;
+        if delivery == MediaDelivery::Failed {
+            process_bubbles(
+                eng,
+                job,
+                &[Bubble {
+                    text: "QQ 图片发送失败，图片文件已保留，请稍后重试。".into(),
+                    at: false,
+                    meme: None,
+                }],
+            )
+            .await;
+        }
+        return;
+    }
+    if !text.trim().is_empty() {
+        process_bubbles(
+            eng,
+            job,
+            &[Bubble {
+                text: text.into(),
+                at: false,
+                meme: None,
+            }],
+        )
+        .await;
+    }
+    for path in artifacts {
+        let kind = media_kind(path).expect("validated attachment extension");
+        process_media(eng, job, path, kind, "插件附件", retention).await;
     }
 }
 
@@ -561,11 +887,47 @@ async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note
     process_media(eng, job, path, "image", note, ArtifactRetention::Keep).await
 }
 
-async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind: &str, note: &str, retention: ArtifactRetention) {
+async fn process_media(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    path: &Path,
+    kind: &str,
+    note: &str,
+    retention: ArtifactRetention,
+) {
+    process_media_caption(eng, job, path, kind, note, retention, None).await;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MediaDelivery {
+    Sent,
+    Unconfirmed,
+    Failed,
+}
+
+async fn process_media_caption(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    path: &Path,
+    kind: &str,
+    note: &str,
+    retention: ArtifactRetention,
+    caption: Option<&str>,
+) -> MediaDelivery {
+    let mut segments = vec![json!({"type":kind,"data":{"file":meme::file_url(path)}})];
+    if job.chat_type == ChatType::Group && job.mention {
+        if let Some(qq) = job.mention_qq.filter(|qq| *qq > 0) {
+            segments.push(json!({"type":"at","data":{"qq":qq.to_string()}}));
+        }
+    }
+    if let Some(text) = caption.filter(|text| !text.trim().is_empty()) {
+        segments.push(json!({"type":"text","data":{"text":text}}));
+    }
     let req = SendRequest {
+        operation: SendOperation::Message,
         chat_type: job.chat_type,
         target: job.target,
-        segments: json!([{"type": kind, "data": {"file": meme::file_url(path)}}]),
+        segments: json!(segments),
     };
     match send_with_retry(&eng.send, &req).await {
         Ok(data) => {
@@ -576,7 +938,13 @@ async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind
             insert_self_message_ex(
                 &eng.db_path,
                 job,
-                if kind == "video" { "（视频）" } else { "（图片）" },
+                if let Some(text) = caption.filter(|text| !text.trim().is_empty()) {
+                    text
+                } else if kind == "video" {
+                    "（视频）"
+                } else {
+                    "（图片）"
+                },
                 kind == "image",
                 message_id,
             )
@@ -594,7 +962,9 @@ async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind
                     warn!(chat_id = %job.chat_id, "发送回执缺少 message_id，保留临时附件");
                     format!("{note}；回执缺少消息 ID，临时文件已保留")
                 }
-            } else { note.to_owned() };
+            } else {
+                note.to_owned()
+            };
             eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
                 chat_id: job.chat_id.clone(),
                 bubble_index: 0,
@@ -602,6 +972,18 @@ async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind
                 ok: true,
                 note: Some(note),
             }));
+            MediaDelivery::Sent
+        }
+        Err(e) if e.downcast_ref::<DeliveryUnconfirmed>().is_some() => {
+            warn!(chat_id=%job.chat_id, error=%e, "媒体送达仍待确认，保留附件且不向会话误报失败");
+            eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+                chat_id: job.chat_id.clone(),
+                bubble_index: 0,
+                total: 1,
+                ok: false,
+                note: Some("QQ 送达状态待确认，附件已保留，未自动重复发送".into()),
+            }));
+            MediaDelivery::Unconfirmed
         }
         Err(e) => {
             warn!(chat_id = %job.chat_id, error = %e, "媒体附件发送失败");
@@ -612,6 +994,7 @@ async fn process_media(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, kind
                 ok: false,
                 note: Some(format!("{kind} 发送失败: {e}")),
             }));
+            MediaDelivery::Failed
         }
     }
 }
@@ -623,11 +1006,21 @@ async fn remove_delivered_artifact(db_path: &Path, path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
-    let root = tokio::fs::canonicalize(db_path.parent().context("数据库缺少父目录")?.join("plugins")).await?;
-    let relative = canonical.strip_prefix(&root).context("拒绝清理插件目录外的文件")?;
+    let root = tokio::fs::canonicalize(
+        db_path
+            .parent()
+            .context("数据库缺少父目录")?
+            .join("plugins"),
+    )
+    .await?;
+    let relative = canonical
+        .strip_prefix(&root)
+        .context("拒绝清理插件目录外的文件")?;
     let parts: Vec<_> = relative.components().collect();
     if parts.len() != 3
-        || !parts.iter().all(|p| matches!(p, std::path::Component::Normal(_)))
+        || !parts
+            .iter()
+            .all(|p| matches!(p, std::path::Component::Normal(_)))
         || parts[1].as_os_str() != "artifacts"
         || !tokio::fs::metadata(&canonical).await?.is_file()
     {
@@ -726,6 +1119,7 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
             continue;
         }
         let req = SendRequest {
+            operation: SendOperation::Message,
             chat_type: job.chat_type,
             target: job.target,
             segments: json!(segs),
@@ -770,6 +1164,7 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
 async fn send_with_retry(send: &SendFn, req: &SendRequest) -> Result<Value> {
     match (send)(req.clone()).await {
         Ok(v) => Ok(v),
+        Err(e1) if e1.downcast_ref::<DeliveryUnconfirmed>().is_some() => Err(e1),
         Err(e1) => {
             tokio::time::sleep(Duration::from_millis(300)).await;
             (send)(req.clone())
@@ -829,16 +1224,17 @@ pub async fn prepare_and_enqueue(
     out: &DecisionOutput,
     ctx_cfg: &context_builder::ContextCfg,
     reply_cfg: &ReplyCfg,
+    skill_catalog: &[(String, String)],
 ) -> Result<()> {
     let length_hint = match out.reply_len {
         crate::decision::ReplyLen::Short => {
-            "本次回复长度：short。优先一句到两句，约80字以内，一泡能说明就不分泡。"
+            "本次回复长度：short（建议）。普通聊天与简单问题优先1至3句，一句能说明就不展开。用户明确要求详解，或技术推导、代码、排障、重要风险需要时，保留必要步骤，不为简短牺牲正确性。一泡能说明就不分泡。"
         }
         crate::decision::ReplyLen::Medium => {
-            "本次回复长度：medium。先直接回答，再补必要说明，通常200字以内。"
+            "本次回复长度：medium（建议）。先直接回答，再补必要说明，通常200字以内；复杂技术问题和用户明确要求展开时，保留必要推导、代码与步骤。"
         }
         crate::decision::ReplyLen::Long => {
-            "本次回复长度：long。按问题需要展开，避免重复和无依据扩写。"
+            "本次回复长度：long（建议）。先给结论，再按步骤解释；数学问题保留必要推导，调试给出可执行检查与最小修复。按问题需要展开，避免重复和无依据扩写。"
         }
     };
     let mode_hint = out.reply_mode.instruction();
@@ -847,11 +1243,17 @@ pub async fn prepare_and_enqueue(
         budget_chars: ctx_cfg.budget_chars.saturating_sub(reserve),
         ..*ctx_cfg
     };
-    let mut ctx = context_builder::render_bot_context(snapshot, mood.get(), &budget)?;
+    let mut ctx = context_builder::render_bot_context_with_skills(
+        snapshot,
+        mood.get(),
+        &budget,
+        skill_catalog,
+    )?;
     ctx.system.push('\n');
     ctx.system.push_str(length_hint);
     ctx.system.push('\n');
     ctx.system.push_str(mode_hint);
+    ctx.system.push_str("\n直接输出给用户的聊天正文，不调用 send_message，不输出工具协议或工具调用标记。工具和插件已由宿主分流处理。");
     let started = Instant::now();
     let mut raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)

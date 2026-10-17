@@ -27,17 +27,26 @@ pub struct ToggleBody {
 pub async fn toggle(
     State(state): State<AppState>,
     Json(body): Json<ToggleBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let manager = state
         .extras
         .plugin_manager
         .as_ref()
         .ok_or_else(|| err("插件宿主未启动"))?;
-    manager
-        .toggle(&body.name, body.enabled)
+    let applying = manager
+        .toggle_deferred(&body.name, body.enabled)
         .await
         .map_err(err)?;
-    Ok(Json(json!({"ok":true,"message":"插件状态已即时生效"})))
+    Ok((
+        if applying {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(
+            json!({"ok":true,"applying":applying,"message":if applying { "正在等待当前调用完成后应用" } else { "插件状态已生效" }}),
+        ),
+    ))
 }
 #[derive(Deserialize)]
 pub struct ConfigBody {
@@ -47,12 +56,24 @@ pub struct ConfigBody {
 pub async fn save_config(
     State(state): State<AppState>,
     Json(body): Json<ConfigBody>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<(StatusCode, Json<Value>), ApiError> {
     let manager = state
         .extras
         .plugin_manager
         .as_ref()
         .ok_or_else(|| err("插件宿主未启动"))?;
-    manager.save(&body.name, body.settings).await.map_err(err)?;
-    Ok(Json(json!({"ok":true,"message":"配置已保存并热重载"})))
+    let applying = manager
+        .save_deferred(&body.name, body.settings)
+        .await
+        .map_err(err)?;
+    Ok((
+        if applying {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(
+            json!({"ok":true,"applying":applying,"message":if applying { "配置已提交，正在等待当前调用完成" } else { "配置已保存并生效" }}),
+        ),
+    ))
 }

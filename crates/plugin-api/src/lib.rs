@@ -21,6 +21,15 @@ pub struct PluginMeta {
     pub api_version: u32,
 }
 
+/// Optional product copy; capability IDs and persisted settings remain stable.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PluginPresentation {
+    pub purpose: &'static str,
+    pub poem: &'static str,
+    pub verse: &'static str,
+    pub examples: Vec<&'static str>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigKind {
@@ -137,6 +146,9 @@ pub struct PluginEvent {
 #[async_trait]
 pub trait Plugin: Send + Sync {
     fn metadata(&self) -> PluginMeta;
+    fn presentation(&self) -> PluginPresentation {
+        PluginPresentation::default()
+    }
     /// Opt in to the restricted host service; adapter authorization still applies.
     fn uses_group_moderation(&self) -> bool {
         false
@@ -150,7 +162,7 @@ pub trait Plugin: Send + Sync {
     fn validate_config(&self, config: &Value) -> Result<()> {
         validate_config(&self.config_fields(), config)
     }
-    /// Called once at startup, after configuration validation.
+    /// Called at startup or after a configuration reload, following validation and stop.
     async fn start(&self, ctx: PluginContext, config: Value) -> Result<Capabilities>;
     /// Stop accepting work before this hook; cancel owned tasks here.
     async fn stop(&self) -> Result<()> {

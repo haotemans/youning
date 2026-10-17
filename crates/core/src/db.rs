@@ -255,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 7] = [
+const MIGRATIONS: [(&str, &str); 8] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
@@ -293,6 +293,7 @@ const MIGRATIONS: [(&str, &str); 7] = [
         "V0.7 Bot 回复归属",
         "CREATE INDEX IF NOT EXISTS idx_msg_reply_anchor ON messages(reply_anchor_id,msg_id);",
     ),
+    ("V0.8 人设版本保存一问一答回复示例", "SELECT 1;"),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -333,6 +334,15 @@ pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
         }
         if version == 7 {
             add_column_if_missing(&mut tx, "messages", "reply_anchor_id", "INTEGER").await?;
+        }
+        if version == 8 {
+            add_column_if_missing(
+                &mut tx,
+                "personality_versions",
+                "reply_examples",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            .await?;
         }
         tx.execute_batch(sql)
             .await
@@ -384,6 +394,35 @@ pub async fn list_tables(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn v8_preserves_legacy_personas_and_defaults_examples_to_empty() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
+        conn.execute_batch("INSERT INTO personality_versions(version_no,content,note,created_by,created_at,active) VALUES (4,'管理员旧人设','保留','admin',123,1)").await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        let row: (i64, String, String, i64, String) = conn
+            .query_row(
+                "SELECT version_no,content,note,active,reply_examples FROM personality_versions",
+                params![],
+                |r| {
+                    Ok((
+                        r.try_get(0)?,
+                        r.try_get(1)?,
+                        r.try_get(2)?,
+                        r.try_get(3)?,
+                        r.try_get(4)?,
+                    ))
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            row,
+            (4, "管理员旧人设".into(), "保留".into(), 1, "[]".into())
+        );
+    }
 
     #[tokio::test]
     async fn v7_does_not_guess_old_reply_ownership_and_rolls_back_on_failure() {

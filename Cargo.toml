@@ -6,7 +6,6 @@ members = [
     "crates/adapter-qq",
     "crates/webui",
     "crates/yuantuan",
-    "plugins/hello",
     "plugins/anysearch",
     "plugins/social-media",
     "plugins/moderator",

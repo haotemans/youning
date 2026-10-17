@@ -10,10 +10,22 @@ pub fn plugin() -> Arc<dyn Plugin> {
 pub struct ModeratorPlugin;
 #[async_trait]
 impl Plugin for ModeratorPlugin {
+    fn presentation(&self) -> PluginPresentation {
+        PluginPresentation {
+            purpose: "撤回、禁言与群聊管理",
+            poem: "周颂·敬之",
+            verse: "敬之敬之，天维显思。",
+            examples: vec![
+                "引用目标消息后发送 /撤回",
+                "/禁言 @成员 10",
+                "/解除禁言 @成员",
+            ],
+        }
+    }
     fn metadata(&self) -> PluginMeta {
         PluginMeta {
             id: "moderator",
-            name: "主理人",
+            name: "敬之",
             version: env!("CARGO_PKG_VERSION"),
             description: "群管理员撤回消息、禁言和解除禁言，实时核验权限",
             api_version: API_VERSION,
@@ -116,7 +128,7 @@ impl Handler {
     }
     async fn execute(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
         if ctx.chat_type != "group" {
-            bail!("主理人仅支持群聊");
+            bail!("敬之仅支持群聊");
         }
         let sender = ctx
             .sender_pid
@@ -125,7 +137,7 @@ impl Handler {
             .filter(|n| *n > 0)
             .context("无法识别操作员 QQ")?;
         if !self.operators.is_empty() && !self.operators.contains(&sender) {
-            bail!("你不在主理人的操作员列表中");
+            bail!("你不在敬之的操作员列表中");
         }
         let (action, text) = match self.op {
             Op::Recall => {

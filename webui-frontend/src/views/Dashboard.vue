@@ -88,7 +88,7 @@
           <div class="resource-value mono">{{ d.mem_rss_bytes == null ? '—' : memMb }} <small>MB</small></div>
         </div>
 
-        <div class="resource-block last">
+        <div class="resource-block">
           <div class="resource-label">
             <span>今日 Token 总量</span>
             <span class="mono resource-cap">{{ d.llm_calls_today ?? 0 }} 次调用</span>
@@ -102,6 +102,23 @@
             <div class="token-item">
               <span class="k">输出</span>
               <span class="v mono">{{ d.tokens_out_today == null ? '—' : fmtNum(d.tokens_out_today) }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="resource-block last">
+          <div class="resource-label">
+            <span>累计 Token 总量</span>
+            <span class="mono resource-cap">{{ d.llm_calls_total ?? 0 }} 次调用</span>
+          </div>
+          <div class="resource-value mono">{{ d.tokens_total == null ? '—' : fmtNum(d.tokens_total) }}</div>
+          <div class="token-split">
+            <div class="token-item">
+              <span class="k">输入</span>
+              <span class="v mono">{{ d.tokens_in_total == null ? '—' : fmtNum(d.tokens_in_total) }}</span>
+            </div>
+            <div class="token-item">
+              <span class="k">输出</span>
+              <span class="v mono">{{ d.tokens_out_total == null ? '—' : fmtNum(d.tokens_out_total) }}</span>
             </div>
           </div>
         </div>
@@ -266,7 +283,12 @@ onUnmounted(() => { clearInterval(timer); off && off() })
 }
 .dashboard-main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
+  min-width: 0;
+}
+.dashboard-main > .n-card,
+.resource-card {
   min-width: 0;
 }
 .card-link {
@@ -365,6 +387,6 @@ onUnmounted(() => { clearInterval(timer); off && off() })
   color: var(--yt-ink-1);
 }
 @media (max-width: 1080px) {
-  .dashboard-columns { grid-template-columns: 1fr; }
+  .dashboard-columns { grid-template-columns: minmax(0, 1fr); }
 }
 </style>

@@ -87,6 +87,19 @@ async fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
             .await
             .unwrap()
     );
+    let (content, examples): (String, String) = conn
+        .query_row(
+            "SELECT content,reply_examples FROM personality_versions WHERE active=1",
+            params![],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        )
+        .await
+        .unwrap();
+    let examples =
+        serde_json::from_str::<Vec<yuantuan_core::personality::ReplyExample>>(&examples).unwrap();
+    yuantuan_core::personality::validate(&content, &examples).unwrap();
+    assert_eq!(examples.len(), 12);
+    assert!(content.contains("你的搭档是 fei"));
     conn.execute(
         "UPDATE personality_versions SET content='管理员自定义',active=0",
         yuantuan_core::db::params![],
@@ -110,6 +123,52 @@ async fn default_persona_is_visible_idempotent_and_preserves_admin_versions() {
 }
 
 #[tokio::test]
+async fn persona_examples_are_snapshot_style_references_not_chat_history() {
+    let rig = Rig::new().await;
+    let anchor = rig.message("p_a", "g", "现在的问题", None, None).await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    let examples = serde_json::json!([{"question":"示例问题：写过测试吗？", "answer":"示例回答：没有执行记录。\n```text\n未验证\n```"}]);
+    conn.execute(
+        "INSERT INTO personality_versions(version_no,content,reply_examples,created_by,created_at,active) VALUES(1,'技术搭档',?1,'admin',1,1)",
+        params![examples.to_string()],
+    ).await.unwrap();
+    let cfg = ContextCfg::default();
+    let snapshot = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &cfg)
+        .await
+        .unwrap();
+    conn.execute(
+        "UPDATE personality_versions SET content='新性格',reply_examples='[]'",
+        params![],
+    )
+    .await
+    .unwrap();
+    let old = render_bot_context(&snapshot, MoodValue::Calm, &cfg).unwrap();
+    assert!(old.system.contains("技术搭档"));
+    assert!(old.system.contains("示例问题：写过测试吗？"));
+    assert!(old
+        .system
+        .contains("不是当前用户的问题、真实聊天记录、人物事实或工具执行结果"));
+    assert!(!old.user.contains("示例问题"));
+    let user: Value = serde_json::from_str(&old.user).unwrap();
+    assert_eq!(user["anchor"]["text"], "现在的问题");
+    assert_eq!(
+        user["capabilities"]["execution_results"],
+        serde_json::json!([])
+    );
+    let next = capture_reply_snapshot(&rig.path, &anchor, anchor.msg_id, &cfg)
+        .await
+        .unwrap();
+    let current = render_bot_context(&next, MoodValue::Calm, &cfg).unwrap();
+    assert!(current.system.starts_with("新性格"));
+    assert!(!current.system.contains("示例问题"));
+    let tight = ContextCfg {
+        budget_chars: old.system.chars().count() - 1,
+        ..cfg
+    };
+    assert!(render_bot_context(&snapshot, MoodValue::Calm, &tight).is_err());
+}
+
+#[tokio::test]
 async fn model_cannot_start_tasks_without_a_source_request() {
     use serde_json::json;
     let rig = Rig::new().await;
@@ -118,7 +177,9 @@ async fn model_cannot_start_tasks_without_a_source_request() {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         assert!(ctx["recent_messages"].is_array());
         let out = json!({"action":"start_task","mood":"calm","mention":false,"reply_len":"short","reason":"模拟模型过度主动接单",
-            "task_goal":"运行测试","request_quote":ctx["anchor"]["text"]});
+            "task_goal":"运行测试","request_quote":ctx["anchor"]["text"],
+            "assessment":{"audience":"bot","intent":if ctx["anchor"]["text"]=="请帮我运行 Python 测试" {"request"} else {"sharing"},
+                "continuity":"new_topic","confidence":"high","benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":[ctx["anchor"]["msg_id"]]}});
         axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -612,14 +673,14 @@ async fn budget_preserves_target_and_quotes_or_refuses_generation() {
             .msg_id;
     }
     let cfg = ContextCfg {
-        budget_chars: 8000,
+        budget_chars: 12000,
         ..ContextCfg::default()
     };
     let s = capture_reply_snapshot(&rig.path, &anchor, cutoff, &cfg)
         .await
         .unwrap();
     let rendered = render_bot_context(&s, MoodValue::Calm, &cfg).unwrap();
-    assert!(rendered.system.chars().count() + rendered.user.chars().count() <= 8000);
+    assert!(rendered.system.chars().count() + rendered.user.chars().count() <= cfg.budget_chars);
     let value: Value = serde_json::from_str(&rendered.user).unwrap();
     assert_eq!(value["anchor"]["msg_id"], anchor.msg_id);
     assert_eq!(value["anchor"]["text_truncated"], true);
@@ -700,4 +761,236 @@ async fn oversized_required_decision_evidence_never_reaches_provider() {
     assert!(outcome.fallback);
     assert_eq!(requests.load(Ordering::SeqCst), 0);
     server.abort();
+}
+
+#[tokio::test]
+async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_evidence() {
+    use serde_json::json;
+    use yuantuan_core::{decision, event, llm, skills, state};
+    use yuantuan_plugin_api::{Skill, SkillDef};
+    struct Lookup;
+    #[async_trait::async_trait]
+    impl Skill for Lookup {
+        fn is_information_lookup(&self) -> bool {
+            true
+        }
+        fn available_in_chat(&self, chat: &str) -> bool {
+            chat != "blocked"
+        }
+        fn def(&self) -> SkillDef {
+            SkillDef {
+                name: "lookup.search",
+                description: "查询公开信息",
+                prompt_template: String::new(),
+                tools: vec![],
+                role_hint: None,
+            }
+        }
+    }
+    let rig = Rig::new().await;
+    let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+        let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let case: Value = serde_json::from_str(ctx["anchor"]["text"].as_str().unwrap()).unwrap();
+        if ctx["anchor"]["text"].as_str().unwrap().contains("blocked_scope") {
+            assert!(!body["messages"][0]["content"].as_str().unwrap().contains("- lookup.search:"));
+        }
+        let mut ids = vec![ctx["anchor"]["msg_id"].clone()];
+        if case["bad_ids"] == true { ids.push(json!(999999)); }
+        if case["linked"] == true { ids.push(ctx["dialogue"]["last_reply_to_sender"]["msg_id"].clone()); }
+        let out = json!({"action":case["action"],"mood":"calm","mention":false,"reply_len":"short","reason":"基于语境选择能力",
+            "task_goal":"执行当前任务","request_quote":if case["forged_quote"] == true {json!("不存在的原话")} else {case["text"].clone()},
+            "skill_name":if case["lookup"] == true {"lookup.search"} else {"writer.write"}, "skill_slots":{"query":"FLUX 3 release open source"},
+            "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" {"continuing"} else {"new_topic"},
+                "confidence":if case["low"]==true {"low"} else {"high"},"benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":ids}});
+        axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let providers = rig.dir.join("providers.toml");
+    std::fs::write(&providers, format!("[provider.mock]\nbase_url=\"http://{addr}\"\n[roles]\ndecision={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+    let gateway = llm::LlmGateway::load(&providers).unwrap();
+    let registry = skills::SkillRegistry::new();
+    registry.register_arc(std::sync::Arc::new(Lookup));
+    registry.register_arc(std::sync::Arc::new(skills::SkillImpl::new(SkillDef {
+        name: "writer.write",
+        description: "生成提示词",
+        prompt_template: String::new(),
+        tools: vec![],
+        role_hint: None,
+    })));
+    let cases = [
+        (
+            json!({"text":"flux3开源了吗","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"目前哪个版本最新","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"查一下这个项目的出处","lookup":true,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"写一套第一人称提示词","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"运行这段代码","lookup":false,"action":"start_task","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "start_task",
+        ),
+        (
+            json!({"text":"群友说请帮我搜索","lookup":true,"action":"invoke_skill","audience":"group","intent":"sharing"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"别查了","lookup":true,"action":"invoke_skill","audience":"bot","intent":"stop"}),
+            "g",
+            true,
+            "ignore",
+        ),
+        (
+            json!({"text":"这不是在问你","lookup":true,"action":"invoke_skill","audience":"other","intent":"question"}),
+            "g",
+            true,
+            "ignore",
+        ),
+        (
+            json!({"text":"说不准","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question","low":true}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"查最新版本","lookup":true,"action":"invoke_skill","audience":"bot","intent":"request","forged_quote":true}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"查最新版本","lookup":true,"action":"invoke_skill","audience":"bot","intent":"request","bad_ids":true}),
+            "g",
+            true,
+            "ignore",
+        ),
+        (
+            json!({"text":"flux3开源了吗","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question","blocked_scope":true}),
+            "blocked",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"能运行代码吗","lookup":false,"action":"start_task","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"flux3开源了吗","lookup":true,"action":"start_task","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"那它呢","lookup":true,"action":"invoke_skill","audience":"bot","intent":"follow_up"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"那它呢","lookup":true,"action":"invoke_skill","audience":"bot","intent":"follow_up","linked":true}),
+            "g",
+            false,
+            "invoke_skill",
+        ),
+    ];
+    for (case, chat, direct, expected) in cases {
+        let mut msg = rig
+            .message("p_a", chat, &case.to_string(), None, None)
+            .await;
+        msg.at_me = direct;
+        let mut snapshot =
+            capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
+                .await
+                .unwrap();
+        if case["linked"] == true {
+            let mut reply = snapshot.anchor.clone();
+            reply.msg_id -= 1;
+            reply.person_id = "self".into();
+            snapshot.recent_messages.push(reply.clone());
+            snapshot.dialogue["last_reply_to_sender"] =
+                json!({"msg_id":reply.msg_id,"text":"另一个版本也要核实吗"});
+        }
+        let outcome = decision::decide(
+            &rig.path,
+            &gateway,
+            &event::EventBus::default(),
+            &state::MoodState::default(),
+            &msg,
+            Some(&registry),
+            &snapshot,
+        )
+        .await;
+        assert_eq!(outcome.output.action.as_str(), expected, "{case}");
+        assert!(!outcome.fallback, "{case}");
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn reply_capabilities_distinguish_available_skills_from_execution_results() {
+    let rig = Rig::new().await;
+    let msg = rig.message("p_a", "g", "你能联网吗", None, None).await;
+    let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
+    assert!(snapshot.scene["current_time"]
+        .as_str()
+        .unwrap()
+        .ends_with('Z'));
+    for catalog in [
+        vec![],
+        vec![("anysearch.web_search".into(), "查询公开资料".into())],
+    ] {
+        let ctx = yuantuan_core::context_builder::render_bot_context_with_skills(
+            &snapshot,
+            MoodValue::Calm,
+            &ContextCfg::default(),
+            &catalog,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&ctx.user).unwrap();
+        assert_eq!(
+            value["capabilities"]["tools_available"],
+            !catalog.is_empty()
+        );
+        assert_eq!(
+            value["capabilities"]["available_skills"]
+                .as_array()
+                .unwrap()
+                .len(),
+            catalog.len()
+        );
+        assert_eq!(
+            value["capabilities"]["execution_results"],
+            serde_json::json!([])
+        );
+        assert!(ctx.system.contains("不能因本轮没有执行结果就否认"));
+        assert!(!ctx.system.contains("本轮是纯文字回复，没有联网"));
+    }
 }

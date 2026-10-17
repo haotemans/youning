@@ -49,7 +49,8 @@ const cols = computed(() => Array.from({ length: 24 }, (_, i) => {
 </script>
 
 <style scoped>
-.hourbars-svg { width: 100%; height: auto; min-height: 160px; display: block; }
+.hourbars { min-width: 0; }
+.hourbars-svg { width: 100%; max-width: 100%; height: auto; min-height: 160px; display: block; }
 .hb-grid { stroke: var(--yt-tl-line); stroke-width: 1; stroke-dasharray: 3 3; }
 .hb-in { fill: var(--yt-chart-in); }
 .hb-out { fill: var(--yt-chart-out); }

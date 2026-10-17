@@ -57,6 +57,24 @@ impl Transport for Fake {
     }
 }
 struct Db(PathBuf);
+#[tokio::test]
+async fn automatic_source_recall_allows_member_authors_but_requires_bot_permission() {
+    let mut client = Fake::new();
+    recall_source_checked(&client, 42, -321, 456).await.unwrap();
+    assert_eq!(
+        client.writes(),
+        vec![("delete_msg".into(), json!({"message_id":-321}))]
+    );
+    client.calls.lock().unwrap().clear();
+    client.roles.insert(100, "member");
+    assert!(recall_source_checked(&client, 42, -321, 456).await.is_err());
+    assert!(client.writes().is_empty());
+    client.roles.insert(100, "admin");
+    assert!(recall_source_checked(&client, 42, -321, 789).await.is_err());
+    assert!(client.writes().is_empty());
+    client.fail = true;
+    assert!(recall_source_checked(&client, 42, -321, 456).await.is_err());
+}
 impl Drop for Db {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(self.0.parent().unwrap());

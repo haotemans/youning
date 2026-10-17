@@ -11,6 +11,14 @@ use sqlx::Row;
 use std::time::{SystemTime, UNIX_EPOCH};
 use yuantuan_core::db::params;
 use yuantuan_core::db::SqliteExt;
+use yuantuan_core::personality::{self, ReplyExample};
+
+pub async fn defaults() -> Json<Value> {
+    Json(json!({
+        "content": personality::DEFAULT_PERSONA,
+        "reply_examples": personality::default_reply_examples(),
+    }))
+}
 
 pub async fn list(State(state): State<AppState>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let mut conn = state
@@ -18,7 +26,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Value>, (StatusC
         .await
         .map_err(|e| err(&format!("数据库打开失败: {e}")))?;
     let mut stmt = conn
-        .prepare("SELECT version_no, note, created_by, created_at, active, length(content) FROM personality_versions ORDER BY version_no DESC").await
+        .prepare("SELECT version_no, note, created_by, created_at, active, length(content), json_array_length(reply_examples) FROM personality_versions ORDER BY version_no DESC").await
         .map_err(|e| err(&format!("查询失败: {e}")))?;
     let rows = stmt
         .query_map(yuantuan_core::db::params![], |r| {
@@ -29,6 +37,7 @@ pub async fn list(State(state): State<AppState>) -> Result<Json<Value>, (StatusC
                 "created_at": r.try_get::<i64, _>(3)?,
                 "active": r.try_get::<i64, _>(4)? == 1,
                 "content_len": r.try_get::<i64, _>(5)?,
+                "reply_examples_count": r.try_get::<i64, _>(6)?,
             }))
         })
         .await
@@ -46,7 +55,7 @@ pub async fn get_one(
         .await
         .map_err(|e| err(&format!("数据库打开失败: {e}")))?;
     match conn.query_row(
-        "SELECT version_no, content, note, created_by, created_at, active FROM personality_versions WHERE version_no = ?1",
+        "SELECT version_no, content, note, created_by, created_at, active, reply_examples FROM personality_versions WHERE version_no = ?1",
         params![no],
         |r| {
             Ok(json!({
@@ -56,11 +65,13 @@ pub async fn get_one(
                 "created_by": r.try_get::<String, _>(3)?,
                 "created_at": r.try_get::<i64, _>(4)?,
                 "active": r.try_get::<i64, _>(5)? == 1,
+                "reply_examples": decode_examples(r.try_get::<String, _>(6)?)?,
             }))
         },
     ).await {
         Ok(v) => Ok(Json(v)),
-        Err(_) => Err((StatusCode::NOT_FOUND, Json(json!({ "error": format!("版本 {no} 不存在") })))),
+        Err(sqlx::Error::RowNotFound) => Err((StatusCode::NOT_FOUND, Json(json!({ "error": format!("版本 {no} 不存在") })))),
+        Err(e) => Err(err(&format!("查询失败: {e}"))),
     }
 }
 
@@ -68,21 +79,24 @@ pub async fn get_one(
 pub struct CreateBody {
     content: String,
     note: Option<String>,
+    #[serde(default)]
+    reply_examples: Vec<ReplyExample>,
 }
 
 pub async fn create(
     State(state): State<AppState>,
     Json(body): Json<CreateBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if body.content.trim().is_empty() {
-        return Err((
+    personality::validate(&body.content, &body.reply_examples).map_err(|e| {
+        (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "content 不能为空" })),
-        ));
-    }
+            Json(json!({ "error": e.to_string() })),
+        )
+    })?;
     let v = insert_version(
         &state,
         &body.content,
+        &body.reply_examples,
         body.note.as_deref().unwrap_or("WebUI 新建"),
     )
     .await?;
@@ -97,22 +111,25 @@ pub async fn rollback(
         .open_db()
         .await
         .map_err(|e| err(&format!("数据库打开失败: {e}")))?;
-    let content: Option<String> = conn
+    let version = conn
         .query_row(
-            "SELECT content FROM personality_versions WHERE version_no = ?1",
+            "SELECT content,reply_examples FROM personality_versions WHERE version_no = ?1",
             params![no],
-            |r| r.try_get(0),
+            |r| Ok((r.try_get::<String, _>(0)?, decode_examples(r.try_get(1)?)?)),
         )
-        .await
-        .ok();
-    let Some(content) = content else {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("版本 {no} 不存在") })),
-        ));
+        .await;
+    let (content, examples) = match version {
+        Ok(version) => version,
+        Err(sqlx::Error::RowNotFound) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": format!("版本 {no} 不存在") })),
+            ))
+        }
+        Err(e) => return Err(err(&format!("查询失败: {e}"))),
     };
     drop(conn);
-    let v = insert_version(&state, &content, &format!("回滚自 v{no}")).await?;
+    let v = insert_version(&state, &content, &examples, &format!("回滚自 v{no}")).await?;
     Ok(Json(
         json!({ "ok": true, "version_no": v, "rolled_back_from": no }),
     ))
@@ -122,8 +139,11 @@ pub async fn rollback(
 async fn insert_version(
     state: &AppState,
     content: &str,
+    examples: &[ReplyExample],
     note: &str,
 ) -> Result<i64, (StatusCode, Json<Value>)> {
+    let examples_json =
+        serde_json::to_string(examples).map_err(|e| err(&format!("回复示例序列化失败: {e}")))?;
     let mut conn = state
         .open_db()
         .await
@@ -133,7 +153,7 @@ async fn insert_version(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let mut tx = conn
-        .transaction()
+        .begin_immediate()
         .await
         .map_err(|e| err(&format!("事务失败: {e}")))?;
     let next: i64 = tx
@@ -151,8 +171,8 @@ async fn insert_version(
     .await
     .map_err(|e| err(&format!("更新失败: {e}")))?;
     tx.execute(
-        "INSERT INTO personality_versions(version_no, content, note, created_by, created_at, active) VALUES (?1, ?2, ?3, 'admin', ?4, 1)",
-        params![next, content, note, now],
+        "INSERT INTO personality_versions(version_no, content, reply_examples, note, created_by, created_at, active) VALUES (?1, ?2, ?3, ?4, 'admin', ?5, 1)",
+        params![next, content, examples_json, note, now],
     ).await
     .map_err(|e| err(&format!("写入失败: {e}")))?;
     tx.commit()
@@ -167,4 +187,8 @@ fn err(msg: &str) -> (StatusCode, Json<Value>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({ "error": msg })),
     )
+}
+
+fn decode_examples(raw: String) -> sqlx::Result<Vec<ReplyExample>> {
+    serde_json::from_str(&raw).map_err(|e| sqlx::Error::Decode(Box::new(e)))
 }

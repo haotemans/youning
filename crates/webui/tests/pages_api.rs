@@ -25,6 +25,128 @@ fn temp_dir(prefix: &str) -> PathBuf {
     dir
 }
 
+#[tokio::test]
+async fn personality_examples_save_read_rollback_and_apply_to_bot_context() {
+    let rig = start().await;
+    let (status, defaults) = rig.get("/api/personality/defaults").await;
+    assert_eq!(status, 200);
+    assert!(defaults["content"]
+        .as_str()
+        .unwrap()
+        .contains("你的搭档是 fei"));
+    assert_eq!(defaults["reply_examples"].as_array().unwrap().len(), 12);
+    let (_, legacy) = rig.get("/api/personality/versions/1").await;
+    assert_eq!(legacy["reply_examples"], json!([]));
+    let examples = json!([{"question":"列表怎么排序？", "answer":"使用 sorted() 得到新列表。"}]);
+    let response = rig
+        .http
+        .post(format!("{}/api/personality/versions", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"content":"专业猫型助手", "reply_examples":examples, "note":"示例版"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(response.json::<Value>().await.unwrap()["version_no"], 2);
+    let (_, full) = rig.get("/api/personality/versions/2").await;
+    assert_eq!(full["reply_examples"], examples);
+    let (_, list) = rig.get("/api/personality/versions").await;
+    assert_eq!(list["versions"][0]["reply_examples_count"], 1);
+
+    // 使用实际 API 写入的数据生成回复上下文，证明配置会在下一次回复生效。
+    let anchor = yuantuan_core::event::MessageReceivedPayload {
+        msg_id: 1,
+        chat_id: "555666".into(),
+        chat_type: "group".into(),
+        sender_pid: "p_2001".into(),
+        text: "早".into(),
+        at_me: true,
+        has_image: false,
+        reply_to: None,
+        sender_bot: false,
+        image_urls: vec![],
+        ts: 1,
+    };
+    let context = yuantuan_core::context_builder::build_bot_context(
+        &rig.db_path,
+        yuantuan_core::state::MoodValue::Calm,
+        &anchor,
+        &yuantuan_core::context_builder::ContextCfg::default(),
+    )
+    .await
+    .unwrap();
+    assert!(context.system.contains("专业猫型助手"));
+    assert!(context.system.contains("使用 sorted() 得到新列表。"));
+    assert!(!context.user.contains("使用 sorted() 得到新列表。"));
+
+    for (source, version, expected) in [(1, 3, json!([])), (2, 4, examples.clone())] {
+        let response = rig
+            .http
+            .post(format!("{}/api/personality/rollback/{source}", rig.base))
+            .bearer_auth(&rig.token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+        let (_, rolled) = rig
+            .get(&format!("/api/personality/versions/{version}"))
+            .await;
+        assert_eq!(rolled["reply_examples"], expected);
+        assert_eq!(rolled["active"], true);
+    }
+    // 旧客户端只传 content 的请求仍然有效。
+    let response = rig
+        .http
+        .post(format!("{}/api/personality/versions", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"content":"旧客户端"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let (_, old_client) = rig.get("/api/personality/versions/5").await;
+    assert_eq!(old_client["reply_examples"], json!([]));
+    let (_, preserved) = rig.get("/api/personality/versions/2").await;
+    assert_eq!(preserved["reply_examples"], examples);
+    assert_eq!(preserved["active"], false);
+}
+
+#[tokio::test]
+async fn personality_rejects_incomplete_or_oversized_examples_without_activating() {
+    let rig = start().await;
+    for body in [
+        json!({"content":" ", "reply_examples":[]}),
+        json!({"content":"性格", "reply_examples":[{"question":"问题", "answer":" \n"}]}),
+        json!({"content":"性格", "reply_examples":[{"question":" ", "answer":"回答"}]}),
+        json!({"content":"性格", "reply_examples":vec![json!({"question":"问题","answer":"回答"});21]}),
+        json!({"content":"性格", "reply_examples":[{"question":"长".repeat(1001), "answer":"回答"}]}),
+        json!({"content":"性格", "reply_examples":[{"question":"问题", "answer":"长".repeat(4001)}]}),
+        json!({"content":"性格", "reply_examples":vec![json!({"question":"问题","answer":"长".repeat(4000)});3]}),
+    ] {
+        let response = rig
+            .http
+            .post(format!("{}/api/personality/versions", rig.base))
+            .bearer_auth(&rig.token)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+    }
+    let malformed = rig
+        .http
+        .post(format!("{}/api/personality/versions", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"content":"性格","reply_examples":[{"question":"缺回答"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(malformed.status().as_u16(), 422);
+    let (_, versions) = rig.get("/api/personality/versions").await;
+    assert_eq!(versions["versions"].as_array().unwrap().len(), 1);
+    assert_eq!(versions["versions"][0]["active"], true);
+}
+
 async fn seed(db_path: &PathBuf) {
     let mut conn = db::connect(db_path).await.unwrap();
     let now = SystemTime::now()
@@ -112,7 +234,7 @@ async fn start() -> Rig {
     let mut extras = Extras::for_test(cfg_path, prov_path);
     extras.plugin_manager = Some(
         yuantuan_core::plugins::PluginManager::load(
-            vec![yuantuan_plugin_hello::plugin()],
+            vec![yuantuan_plugin_moderator::plugin()],
             dir.clone(),
             dir.join("plugin-sources"),
             extras.tools_registry.clone(),
@@ -259,6 +381,16 @@ async fn pages_api_full_pass() {
         .unwrap();
     assert_eq!(r.status().as_u16(), 401);
 
+    // Cross-day usage must contribute to all-time totals without inflating today.
+    let mut conn = db::connect(&rig.db_path).await.unwrap();
+    conn.execute_batch(
+        "INSERT INTO llm_usage(ts,role,model,prompt_tokens,completion_tokens,total_tokens) VALUES
+        (1,'decision','mock',100,20,120),
+        (CAST(strftime('%s','now') AS INTEGER),'bot_chat','mock',10,5,15);",
+    )
+    .await
+    .unwrap();
+    drop(conn);
     // 仪表盘
     let (s, d) = rig.get("/api/dashboard").await;
     assert_eq!(s, 200);
@@ -267,6 +399,11 @@ async fn pages_api_full_pass() {
     assert_eq!(d["active_tasks"], 1);
     assert_eq!(d["adapter_connected"], false);
     assert_eq!(d["mood"], "calm");
+    assert_eq!(d["tokens_today"], 15);
+    assert_eq!(d["tokens_total"], 135);
+    assert_eq!(d["tokens_in_total"], 110);
+    assert_eq!(d["tokens_out_total"], 25);
+    assert_eq!(d["llm_calls_total"], 2);
     assert!(d["uptime_secs"].is_u64());
 
     // events 过滤（kind 命中 + chat_id 命中 + 倒序分页）
@@ -376,34 +513,34 @@ async fn pages_api_full_pass() {
 
     // 插件目录来自运行时，配置校验失败不能覆盖旧配置。
     let (_, plugins) = rig.get("/api/plugins/list").await;
-    assert_eq!(plugins["plugins"][0]["name"], "hello");
+    assert_eq!(plugins["plugins"][0]["name"], "moderator");
     assert_eq!(plugins["plugins"][0]["loaded"], false);
     let mut settings = plugins["plugins"][0]["settings"].clone();
-    settings["config"]["greeting"] = json!("欢迎");
+    settings["config"]["operator_qqs"] = json!("123456");
     settings["enabled"] = json!(true);
     let response = rig
         .http
         .post(format!("{}/api/plugins/config", rig.base))
         .bearer_auth(&rig.token)
-        .json(&json!({"name":"hello", "settings":settings}))
+        .json(&json!({"name":"moderator", "settings":settings}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status().as_u16(), 200);
-    settings["config"]["greeting"] = json!(12);
+    settings["config"]["operator_qqs"] = json!(12);
     let response = rig
         .http
         .post(format!("{}/api/plugins/config", rig.base))
         .bearer_auth(&rig.token)
-        .json(&json!({"name":"hello", "settings":settings}))
+        .json(&json!({"name":"moderator", "settings":settings}))
         .send()
         .await
         .unwrap();
     assert_eq!(response.status().as_u16(), 400);
     let (_, plugins) = rig.get("/api/plugins/list").await;
     assert_eq!(
-        plugins["plugins"][0]["settings"]["config"]["greeting"],
-        "欢迎"
+        plugins["plugins"][0]["settings"]["config"]["operator_qqs"],
+        "123456"
     );
     assert_eq!(plugins["plugins"][0]["pending_reload"], false);
     assert_eq!(plugins["plugins"][0]["loaded"], true);

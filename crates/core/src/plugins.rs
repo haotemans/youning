@@ -15,6 +15,8 @@ use std::{
 };
 use tokio::sync::{Mutex, Semaphore};
 use yuantuan_plugin_api::*;
+mod invocation;
+use invocation::Invocations;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -71,8 +73,31 @@ struct Gate {
     policy: PluginSettings,
     permits: Arc<Semaphore>,
     artifact_root: PathBuf,
+    invocations: Arc<Invocations>,
+    secrets: Vec<String>,
 }
 impl Gate {
+    async fn invoke(
+        &self,
+        chat: &str,
+        future: impl std::future::Future<Output = Result<ToolOutput>>,
+    ) -> Result<ToolOutput> {
+        let _permit = match self.enter(Some(chat)).await {
+            Ok(permit) => permit,
+            Err(error) => {
+                self.invocations.reject();
+                return Err(error);
+            }
+        };
+        let call = self.invocations.begin();
+        let result = self
+            .run(future)
+            .await
+            .and_then(|out| self.check_output(out))
+            .map_err(|error| anyhow::anyhow!(redact_error(&error.to_string(), &self.secrets)));
+        call.finish(result.as_ref().err().map(ToString::to_string));
+        result
+    }
     async fn enter(&self, chat: Option<&str>) -> Result<tokio::sync::OwnedSemaphorePermit> {
         if !self.active.load(Ordering::Acquire) {
             bail!("插件已停止");
@@ -157,12 +182,10 @@ impl Tool for HostedTool {
         self.inner.artifact_retention()
     }
     async fn call(&self, ctx: &ToolCtx, args: Value) -> Result<ToolOutput> {
-        let _permit = self.gate.enter(Some(&ctx.chat_id)).await?;
         let result = self
             .gate
-            .run(self.inner.call(ctx, args))
-            .await
-            .and_then(|o| self.gate.check_output(o));
+            .invoke(&ctx.chat_id, self.inner.call(ctx, args))
+            .await;
         tracing::info!(
             tool = self.name(),
             success = result.is_ok(),
@@ -177,6 +200,35 @@ struct HostedSkill {
 }
 #[async_trait]
 impl Skill for HostedSkill {
+    fn is_information_lookup(&self) -> bool {
+        self.inner.is_information_lookup()
+    }
+    fn available_in_chat(&self, chat_id: &str) -> bool {
+        self.gate.active.load(Ordering::Acquire)
+            && self
+                .gate
+                .policy
+                .allowed_chats
+                .as_ref()
+                .is_none_or(|allowed| allowed.iter().any(|chat| chat == chat_id))
+            && self.inner.available_in_chat(chat_id)
+    }
+    fn match_message(&self, ctx: &ToolCtx, text: &str) -> Option<Value> {
+        if !self.gate.active.load(Ordering::Acquire)
+            || self
+                .gate
+                .policy
+                .allowed_chats
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&ctx.chat_id))
+        {
+            return None;
+        }
+        self.inner.match_message(ctx, text)
+    }
+    fn delivery_policy(&self) -> DeliveryPolicy {
+        self.inner.delivery_policy()
+    }
     fn def(&self) -> SkillDef {
         self.inner.def()
     }
@@ -187,12 +239,10 @@ impl Skill for HostedSkill {
         self.inner.artifact_retention()
     }
     async fn invoke(&self, ctx: &ToolCtx, slots: Value) -> Result<ToolOutput> {
-        let _permit = self.gate.enter(Some(&ctx.chat_id)).await?;
         let result = self
             .gate
-            .run(self.inner.invoke(ctx, slots))
-            .await
-            .and_then(|o| self.gate.check_output(o));
+            .invoke(&ctx.chat_id, self.inner.invoke(ctx, slots))
+            .await;
         tracing::info!(
             skill = self.def().name,
             success = result.is_ok(),
@@ -301,6 +351,30 @@ async fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn secret_values(plugin: &dyn Plugin, settings: &PluginSettings) -> Vec<String> {
+    let mut values: Vec<_> = plugin
+        .config_fields()
+        .iter()
+        .filter(|field| field.secret)
+        .filter_map(|field| {
+            settings.config[field.key]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+        .collect();
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values
+}
+
+fn redact_error(message: &str, secrets: &[String]) -> String {
+    let mut message = message.to_owned();
+    for secret in secrets {
+        message = message.replace(secret, "[已隐藏]");
+    }
+    message.chars().take(600).collect()
+}
+
 struct Entry {
     plugin: Arc<dyn Plugin>,
     meta: PluginMeta,
@@ -309,6 +383,8 @@ struct Entry {
     error: RwLock<Option<String>>,
     directory: PathBuf,
     restart_required: AtomicBool,
+    updating: AtomicBool,
+    invocations: Arc<Invocations>,
 }
 #[derive(Clone)]
 struct Runtime {
@@ -322,10 +398,36 @@ pub struct PluginManager {
     tools: crate::tools::Registry,
     skills: crate::skills::SkillRegistry,
     events: Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    lifecycle: Mutex<()>,
+    lifecycle: tokio::sync::RwLock<()>,
     stopped: AtomicBool,
     llm: crate::bot::SharedLlm,
     moderation: Option<Arc<dyn GroupModeration>>,
+}
+
+enum Change {
+    Settings(PluginSettings),
+    Toggle(bool),
+}
+struct UpdateGuard {
+    manager: Arc<PluginManager>,
+    id: String,
+}
+impl Drop for UpdateGuard {
+    fn drop(&mut self) {
+        self.manager.entries[self.id.as_str()]
+            .updating
+            .store(false, Ordering::Release);
+    }
+}
+
+async fn update_response(handle: tokio::task::JoinHandle<Result<()>>) -> Result<bool> {
+    match tokio::time::timeout(Duration::from_millis(200), handle).await {
+        Ok(result) => {
+            result??;
+            Ok(false)
+        }
+        Err(_) => Ok(true), // Dropping a JoinHandle detaches; the accepted change continues.
+    }
 }
 impl PluginManager {
     pub async fn load(
@@ -352,7 +454,7 @@ impl PluginManager {
             tools,
             skills,
             events: Mutex::new(vec![]),
-            lifecycle: Mutex::new(()),
+            lifecycle: tokio::sync::RwLock::new(()),
             stopped: AtomicBool::new(false),
             llm: llm.clone(),
             moderation: moderation.clone(),
@@ -398,11 +500,14 @@ impl PluginManager {
                     error = Some(e.to_string());
                 }
             }
+            let invocations = Arc::new(Invocations::default());
             let gate = Arc::new(Gate {
                 active: AtomicBool::new(false),
                 permits: Arc::new(Semaphore::new(settings.max_concurrency.min(16))),
                 policy: settings.clone(),
                 artifact_root: directory.join("artifacts"),
+                invocations: invocations.clone(),
+                secrets: secret_values(plugin.as_ref(), &settings),
             });
             let mut tool_names = vec![];
             let mut skill_defs = vec![];
@@ -488,6 +593,8 @@ impl PluginManager {
                     error: RwLock::new(error),
                     directory,
                     restart_required: AtomicBool::new(false),
+                    updating: AtomicBool::new(false),
+                    invocations,
                 },
             );
         }
@@ -499,35 +606,119 @@ impl PluginManager {
             let runtime = e.runtime.read().unwrap();
             let loaded = runtime.gate.active.load(Ordering::Acquire);
             let fields = e.plugin.config_fields();
+            let secrets = secret_values(e.plugin.as_ref(), &desired);
             let mut config = desired.config.clone();
-            for field in &fields { if field.secret { config.as_object_mut().map(|c| c.remove(field.key)); } }
-            let mut settings = serde_json::to_value(&*desired).unwrap(); settings["config"] = config;
-            json!({ "name": e.meta.id, "display_name": e.meta.name, "version": e.meta.version,
-                "description": e.meta.description, "api_version": e.meta.api_version,
-                "enabled": desired.enabled, "loaded": loaded, "pending_restart": e.restart_required.load(Ordering::Acquire),
-                "pending_reload": *desired != runtime.applied || (desired.enabled && !loaded),
-                "code_update_requires_restart": true,
-                "error": *e.error.read().unwrap(), "data_dir": e.directory.to_string_lossy(),
-                "tools": runtime.tools.iter().map(|n| json!({"name": n})).collect::<Vec<_>>(),
-                "skills": runtime.skills.iter().map(|s| json!({"name": s.name, "description": s.description})).collect::<Vec<_>>(),
-                "config_fields": fields.iter().map(|f| { let mut v = serde_json::to_value(f).unwrap(); if f.secret { v["default"] = Value::Null; } v }).collect::<Vec<_>>(),
-                "settings": settings })
+            for field in &fields {
+                if field.secret { config.as_object_mut().map(|c| c.remove(field.key)); }
+            }
+            let mut settings = serde_json::to_value(&*desired).unwrap();
+            settings["config"] = config;
+            let skills = runtime.skills.iter().map(|s| {
+                let commands = self.skills.get(s.name).map(|skill| skill.commands().to_vec()).unwrap_or_default();
+                json!({"name":s.name, "description":s.description, "commands":commands})
+            }).collect::<Vec<_>>();
+            json!({
+                "name":e.meta.id, "display_name":e.meta.name, "version":e.meta.version,
+                "description":e.meta.description, "presentation":e.plugin.presentation(),
+                "api_version":e.meta.api_version, "enabled":desired.enabled, "loaded":loaded,
+                "updating":e.updating.load(Ordering::Acquire),
+                "pending_restart":e.restart_required.load(Ordering::Acquire),
+                "pending_reload":*desired != runtime.applied || (desired.enabled && !loaded),
+                "code_update_requires_restart":true,
+                "error":e.error.read().unwrap().as_ref().map(|error| redact_error(error, &secrets)),
+                "data_dir":e.directory.to_string_lossy(),
+                "tools":runtime.tools.iter().map(|n| json!({"name":n})).collect::<Vec<_>>(),
+                "skills":skills, "invocations":e.invocations.snapshot(),
+                "config_fields":fields.iter().map(|field| {
+                    let mut value = serde_json::to_value(field).unwrap();
+                    if field.secret {
+                        value["default"] = Value::Null;
+                        value["has_value"] = json!(desired.config[field.key].as_str().is_some_and(|value| !value.is_empty()));
+                    }
+                    value
+                }).collect::<Vec<_>>(),
+                "settings":settings,
+            })
         }).collect()
     }
+
+    fn start_change(
+        self: &Arc<Self>,
+        id: &str,
+        change: Change,
+    ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+        anyhow::ensure!(!self.stopped.load(Ordering::Acquire), "插件宿主已停止");
+        let entry = self.entries.get(id).context("插件未编译进当前程序")?;
+        anyhow::ensure!(
+            !entry.restart_required.load(Ordering::Acquire),
+            "插件未能安全停止，需要重启服务后再加载"
+        );
+        anyhow::ensure!(
+            entry
+                .updating
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
+            "插件正在应用配置，请稍候"
+        );
+        let guard = UpdateGuard {
+            manager: self.clone(),
+            id: id.to_owned(),
+        };
+        let old = entry.desired.read().unwrap().clone();
+        let mut settings = match change {
+            Change::Settings(settings) => settings,
+            Change::Toggle(enabled) => PluginSettings {
+                enabled,
+                ..old.clone()
+            },
+        };
+        if let Some(config) = settings.config.as_object_mut() {
+            for field in entry.plugin.config_fields() {
+                config
+                    .entry(field.key)
+                    .or_insert_with(|| old.config.get(field.key).cloned().unwrap_or(field.default));
+            }
+        }
+        let mut secrets = secret_values(entry.plugin.as_ref(), &old);
+        secrets.extend(secret_values(entry.plugin.as_ref(), &settings));
+        secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        secrets.dedup();
+        settings
+            .validate()
+            .and_then(|_| entry.plugin.validate_config(&settings.config))
+            .map_err(|error| anyhow::anyhow!(redact_error(&error.to_string(), &secrets)))?;
+        anyhow::ensure!(
+            serde_json::to_vec(&settings)?.len() <= 65_536,
+            "插件配置超过 64 KiB"
+        );
+        Ok(tokio::spawn(async move {
+            let _lifecycle = guard.manager.lifecycle.read().await;
+            anyhow::ensure!(
+                !guard.manager.stopped.load(Ordering::Acquire),
+                "插件宿主已停止"
+            );
+            let entry = &guard.manager.entries[guard.id.as_str()];
+            let result = guard.manager.save_locked(entry, settings).await;
+            if let Err(error) = &result {
+                *entry.error.write().unwrap() = Some(redact_error(&error.to_string(), &secrets));
+            }
+            result.map_err(|error| anyhow::anyhow!(redact_error(&error.to_string(), &secrets)))
+        }))
+    }
+
     pub async fn save(self: &Arc<Self>, id: &str, settings: PluginSettings) -> Result<()> {
-        let manager = self.clone();
-        let id = id.to_owned();
-        // Finish the lifecycle transition even if the HTTP client disconnects.
-        tokio::spawn(async move {
-            let _guard = manager.lifecycle.lock().await;
-            anyhow::ensure!(!manager.stopped.load(Ordering::Acquire), "插件宿主已停止");
-            let entry = manager
-                .entries
-                .get(id.as_str())
-                .context("插件未编译进当前程序")?;
-            manager.save_locked(entry, settings).await
-        })
-        .await?
+        self.start_change(id, Change::Settings(settings))?.await?
+    }
+    /// Return promptly for long drains. The catalog exposes progress and the final error.
+    pub async fn save_deferred(
+        self: &Arc<Self>,
+        id: &str,
+        settings: PluginSettings,
+    ) -> Result<bool> {
+        update_response(self.start_change(id, Change::Settings(settings))?).await
+    }
+    pub async fn toggle_deferred(self: &Arc<Self>, id: &str, enabled: bool) -> Result<bool> {
+        update_response(self.start_change(id, Change::Toggle(enabled))?).await
     }
     async fn save_locked(&self, entry: &Entry, mut settings: PluginSettings) -> Result<()> {
         anyhow::ensure!(
@@ -557,6 +748,7 @@ impl PluginManager {
         let old = entry.runtime.read().unwrap().clone();
         if old.applied == settings && (old.gate.active.load(Ordering::Acquire) || !settings.enabled)
         {
+            *entry.error.write().unwrap() = None;
             return Ok(());
         }
         if let Err(error) = self.deactivate(entry, &old).await {
@@ -592,23 +784,10 @@ impl PluginManager {
         }
     }
     pub async fn toggle(self: &Arc<Self>, id: &str, enabled: bool) -> Result<()> {
-        let manager = self.clone();
-        let id = id.to_owned();
-        tokio::spawn(async move {
-            let _guard = manager.lifecycle.lock().await;
-            anyhow::ensure!(!manager.stopped.load(Ordering::Acquire), "插件宿主已停止");
-            let entry = manager
-                .entries
-                .get(id.as_str())
-                .context("插件未编译进当前程序")?;
-            let mut settings = entry.desired.read().unwrap().clone();
-            settings.enabled = enabled;
-            manager.save_locked(entry, settings).await
-        })
-        .await?
+        self.start_change(id, Change::Toggle(enabled))?.await?
     }
     pub async fn subscribe(self: &Arc<Self>, bus: &crate::event::EventBus) {
-        let _guard = self.lifecycle.lock().await;
+        let _guard = self.lifecycle.write().await;
         let mut handles = self.events.lock().await;
         if !handles.is_empty() || self.stopped.load(Ordering::Acquire) {
             return;
@@ -686,6 +865,8 @@ impl PluginManager {
             permits: Arc::new(Semaphore::new(settings.max_concurrency)),
             policy: settings.clone(),
             artifact_root: entry.directory.join("artifacts"),
+            invocations: entry.invocations.clone(),
+            secrets: secret_values(entry.plugin.as_ref(), &settings),
         });
         let mut runtime = Runtime {
             applied: settings.clone(),
@@ -765,7 +946,7 @@ impl PluginManager {
     }
 
     pub async fn shutdown(&self) {
-        let _guard = self.lifecycle.lock().await;
+        let _guard = self.lifecycle.write().await;
         if self.stopped.swap(true, Ordering::AcqRel) {
             return;
         }

@@ -86,6 +86,21 @@ impl SkillRegistry {
         Ok(found)
     }
 
+    pub fn match_message(
+        &self,
+        ctx: &crate::tools::ToolCtx,
+        text: &str,
+    ) -> anyhow::Result<Option<(Arc<dyn Skill>, serde_json::Value)>> {
+        let mut found = None;
+        for skill in self.inner.read().unwrap().values() {
+            if let Some(slots) = skill.match_message(ctx, text) {
+                anyhow::ensure!(found.is_none(), "多个插件匹配同一条消息");
+                found = Some((skill.clone(), slots));
+            }
+        }
+        Ok(found)
+    }
+
     pub fn unregister(&self, names: &[&str]) {
         let mut registry = self.inner.write().unwrap();
         for name in names {
@@ -121,6 +136,22 @@ impl SkillRegistry {
                 (d.name.to_string(), d.description.to_string())
             })
             .collect()
+    }
+
+    pub fn describe_for_chat(&self, chat_id: &str) -> Vec<(String, String)> {
+        let mut catalog: Vec<_> = self
+            .inner
+            .read()
+            .expect("skills registry poisoned")
+            .values()
+            .filter(|skill| skill.available_in_chat(chat_id))
+            .map(|skill| {
+                let def = skill.def();
+                (def.name.to_string(), def.description.to_string())
+            })
+            .collect();
+        catalog.sort_by(|a, b| a.0.cmp(&b.0));
+        catalog
     }
 
     pub fn len(&self) -> usize {

@@ -55,6 +55,10 @@ services:
     volumes:
       - napcat-qq:/app/napcat/config
       - napcat-cache:/app/.config/QQ
+      # OneBot file:/// attachments must exist at the same absolute path in NapCat.
+      # Mount only generated media; plugin settings and API credentials stay outside.
+      - ./data/plugins/social-media/artifacts:/app/data/plugins/social-media/artifacts:ro
+      - ./data/plugins/nai-image/artifacts:/app/data/plugins/nai-image/artifacts:ro
     ports:
       - "127.0.0.1:6099:6099"    # NapCat WebUI(/webui)+ HTTP API,仅 SSH 隧道
       # 注:NapCat 的 WebUI 实际监听 6099 不是 3001;3001 是模板文档里的旧默认

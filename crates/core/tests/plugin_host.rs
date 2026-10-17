@@ -80,6 +80,9 @@ impl Tool for TestTool {
         "test"
     }
     async fn call(&self, _: &ToolCtx, args: Value) -> Result<ToolOutput> {
+        if args["fail"] == true {
+            anyhow::bail!("provider rejected key {}", self.greeting);
+        }
         if args["panic"] == true {
             panic!("test plugin panic")
         }
@@ -403,6 +406,108 @@ async fn scope_timeout_concurrency_panic_and_output_limits() {
 }
 
 #[tokio::test]
+async fn deferred_reload_reports_progress_does_not_block_other_plugins_and_releases_cancelled_calls(
+) {
+    let fixture = Fixture::new();
+    fixture.settings("one", enabled());
+    fixture.settings("two", enabled());
+    let tools = Registry::new();
+    let host = fixture
+        .load(
+            vec![plugin("one", "one.echo"), plugin("two", "two.echo")],
+            tools.clone(),
+            SkillRegistry::new(),
+        )
+        .await;
+    let tool = tools.get("one.echo").unwrap();
+    let call = tokio::spawn(async move { tool.call(&context("g1"), json!({"wait":true})).await });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while host.list()[0]["invocations"]["active"] != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), host.toggle_deferred("one", false))
+            .await
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(host.list()[0]["updating"], true);
+    assert!(host
+        .toggle_deferred("one", true)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("正在应用"));
+    tokio::time::timeout(Duration::from_millis(500), host.toggle("two", false))
+        .await
+        .expect("other plugins must remain operable")
+        .unwrap();
+    assert_eq!(host.list()[1]["loaded"], false);
+    call.abort();
+    let _ = call.await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while host.list()[0]["updating"] == true {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let entry = &host.list()[0];
+    assert_eq!(entry["invocations"]["active"], 0);
+    assert_eq!(entry["invocations"]["cancelled"], 1);
+    assert_eq!(entry["pending_reload"], false);
+    assert_eq!(entry["loaded"], false);
+    host.shutdown().await;
+}
+
+#[tokio::test]
+async fn invocation_counts_and_safe_failure_details_survive_hot_reload() {
+    let fixture = Fixture::new();
+    fixture.settings("one", enabled());
+    let tools = Registry::new();
+    let host = fixture
+        .load(
+            vec![plugin("one", "one.echo")],
+            tools.clone(),
+            SkillRegistry::new(),
+        )
+        .await;
+    let tool = tools.get("one.echo").unwrap();
+    tool.call(&context("g1"), json!({})).await.unwrap();
+    let error = tool
+        .call(&context("g1"), json!({"fail":true}))
+        .await
+        .unwrap_err();
+    assert!(!error.to_string().contains("test-secret"));
+    let before = host.list()[0]["invocations"].clone();
+    assert_eq!(before["succeeded"], 1);
+    assert_eq!(before["failed"], 1);
+    assert_eq!(before["active"], 0);
+    assert_eq!(before["last_status"], "failed");
+    assert!(before["last_error"].as_str().unwrap().contains("[已隐藏]"));
+    let mut settings: PluginSettings =
+        serde_json::from_value(host.list()[0]["settings"].clone()).unwrap();
+    settings.max_concurrency = 2;
+    host.save("one", settings).await.unwrap();
+    assert_eq!(host.list()[0]["invocations"], before);
+    tools
+        .get("one.echo")
+        .unwrap()
+        .call(&context("g1"), json!({}))
+        .await
+        .unwrap();
+    assert_eq!(host.list()[0]["invocations"]["succeeded"], 2);
+    assert!(host.list()[0]["invocations"]["last_error"].is_null());
+    assert!(!serde_json::to_string(&host.list())
+        .unwrap()
+        .contains("test-secret"));
+    host.shutdown().await;
+}
+
+#[tokio::test]
 async fn rejects_incompatible_and_colliding_plugins_without_overwrite() {
     let f = Fixture::new();
     f.settings("one", enabled());
@@ -675,4 +780,66 @@ async fn subscriptions_are_scoped_and_stop_with_host() {
     bus.publish(yuantuan_core::event::Event::ConfigReloaded);
     tokio::task::yield_now().await;
     assert_eq!(one.events.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn skill_catalog_tracks_chat_scope_and_plugin_lifecycle() {
+    struct LookupPlugin;
+    struct LookupSkill;
+    #[async_trait]
+    impl Skill for LookupSkill {
+        fn is_information_lookup(&self) -> bool {
+            true
+        }
+        fn def(&self) -> SkillDef {
+            SkillDef {
+                name: "lookup.search",
+                description: "公开查询",
+                prompt_template: String::new(),
+                tools: vec![],
+                role_hint: None,
+            }
+        }
+    }
+    #[async_trait]
+    impl Plugin for LookupPlugin {
+        fn metadata(&self) -> PluginMeta {
+            PluginMeta {
+                id: "lookup",
+                name: "lookup",
+                version: "1",
+                description: "test",
+                api_version: API_VERSION,
+            }
+        }
+        async fn start(&self, _: PluginContext, _: Value) -> Result<Capabilities> {
+            Ok(Capabilities {
+                tools: vec![],
+                skills: vec![Arc::new(LookupSkill)],
+            })
+        }
+    }
+    let fixture = Fixture::new();
+    fixture.settings(
+        "lookup",
+        PluginSettings {
+            allowed_chats: Some(vec!["allowed".into()]),
+            ..enabled()
+        },
+    );
+    let registry = SkillRegistry::new();
+    let manager = fixture
+        .load(
+            vec![Arc::new(LookupPlugin)],
+            Registry::new(),
+            registry.clone(),
+        )
+        .await;
+    let skill = registry.get("lookup.search").unwrap();
+    assert!(skill.is_information_lookup());
+    assert_eq!(registry.describe_for_chat("allowed").len(), 1);
+    assert!(registry.describe_for_chat("blocked").is_empty());
+    manager.shutdown().await;
+    assert!(!skill.available_in_chat("allowed"));
+    assert!(registry.describe_for_chat("allowed").is_empty());
 }

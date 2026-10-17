@@ -13,7 +13,6 @@ COPY crates/plugin-api/Cargo.toml crates/plugin-api/
 COPY crates/adapter-qq/Cargo.toml crates/adapter-qq/
 COPY crates/webui/Cargo.toml crates/webui/
 COPY crates/yuantuan/Cargo.toml crates/yuantuan/
-COPY plugins/hello/Cargo.toml plugins/hello/
 COPY plugins/anysearch/Cargo.toml plugins/anysearch/
 COPY plugins/social-media/Cargo.toml plugins/social-media/
 COPY plugins/moderator/Cargo.toml plugins/moderator/
@@ -21,7 +20,7 @@ COPY plugins/nai-image/Cargo.toml plugins/nai-image/
 
 # 占位的 dummy src,让 cargo fetch 只拉依赖
 RUN for d in crates/core crates/plugin-api crates/adapter-qq crates/webui crates/yuantuan \
-        plugins/hello plugins/anysearch plugins/social-media plugins/moderator plugins/nai-image; do \
+        plugins/anysearch plugins/social-media plugins/moderator plugins/nai-image; do \
         mkdir -p "$d/src" && echo "fn main(){}" > "$d/src/lib.rs"; \
     done && \
     echo "fn main(){}" > crates/yuantuan/src/main.rs && \

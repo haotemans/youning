@@ -1,0 +1,90 @@
+{
+  "source": "https://novelai.quicktagcloud.com/",
+  "release": "r-fdbb31af4a0a57642fb1",
+  "models": {
+    "nai4.5": [
+      {
+        "source_entry": "mengshen_pack-0266",
+        "source_title": "亚丝娜·挥剑斩怪",
+        "prompt": "0.6::artist:chigusa minori::, 0.77::artist:toosaka asagi, artist:rurudo::, 1.3::artist:mika pikazo, artist:yoneyama mai ::"
+      },
+      {
+        "source_entry": "mengshen_pack-0267",
+        "source_title": "克里斯塔·制服卫衣",
+        "prompt": "0.6::artist:chigusa minori::, 0.77::artist:toosaka asagi, artist:rurudo::, 0.7::artist:mika pikazo, artist:yoneyama mai ::"
+      },
+      {
+        "source_entry": "mengshen_pack-0270",
+        "source_title": "常规 0012",
+        "prompt": "0.7::artist:chigusa minori::, 1.3::artist:rurudo::, 0.76::artist:turisasu, artist:danimaru ::, 1.3::artist:mika pikazo, artist:yoneyama mai ::, 0.8::artist:toosaka asagi ::"
+      },
+      {
+        "source_entry": "mengshen_pack-0290",
+        "source_title": "常规 0032",
+        "prompt": "1.5::artist:ohisashiburi, artist:momisan ::, 0.8::artist:zantyarz, artist:yunsang::, 0.5::artist:mika pikazo, artist:modare, artist:shinjiro::"
+      },
+      {
+        "source_entry": "mengshen_pack-0295",
+        "source_title": "卡莉奥斯特罗·写实风",
+        "prompt": "0.8::artist:qiandaiyiyu ::, 0.8::artist:rei (sanbonzakura) ::, 0.5::artist:wagashi (dagashiya) ::, 0.8::artist:mika pikazo ::"
+      },
+      {
+        "source_entry": "mengshen_pack-0297",
+        "source_title": "灰原哀·玫瑰花园",
+        "prompt": "0.8::artist:onono imoko::, 1.1::artist:mika pikazo::, 0.8::artist:torino aqua::, 0.85::artist:watanabe tomari::, 0.9::artist:mira hidume::, 0.99::artist:noyu (noyu23386566)::, 0.95::artist:yoneyama mai::"
+      },
+      {
+        "source_entry": "mengshen_pack-0303",
+        "source_title": "克鲁鲁·粉彩水彩",
+        "prompt": "2.0::artist:ningen mame::, 2.0::artist:mechafrshrimp::, 1.0::artist:akiyama enma::, 1.0::artist:freng::, 0.7::artist:gorgeous mushroom::, 0.4::artist:qiandaiyiyu::"
+      },
+      {
+        "source_entry": "mengshen_pack-0306",
+        "source_title": "圣园未花·碇真嗣椅子梗",
+        "prompt": "1.2::artist:ratatatat74 ::, 0.7::artist:tokiame::, 0.5::artist:nyong nyong::, 0.3::artist:usa37107692 ::"
+      }
+    ],
+    "nai5": [
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0001",
+        "source_title": "远坂凛与Archer·夜空公主抱",
+        "prompt": "0.6::artist:nyong nyong::, 0.8::artist:hiro (dismaless)::, 0.5::artist:morino hon::, 0.4::artist:kingin::, 0.6::artist:ebora::, 0.6::artist:ramanda::, 0.7::artist:modare::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0036",
+        "source_title": "心·丰腴身姿",
+        "prompt": "artist:fymrie, 0.6::artist:chela77, artist:hinaki::, 1.5::artist:myung yi, artist:shigure s ::, 0.7::artist:bm94199, artist:channel (caststation) ::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0029",
+        "source_title": "陆八魔爱露·惊讶表情",
+        "prompt": "0.8::artist:gogalking ::, 0.8::artist:onono_imoko ::, 0.1::artist:channel_(caststation) ::, 0.9::artist:xipa ::, 3.1::artist:mx2j ::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0030",
+        "source_title": "韩网精选 0030",
+        "prompt": "0.8::artist:shinjiro ::, artist:imamura ryou, 1.2::artist:lunch (shin new) ::, 0.4::artist:hiro (dismaless) ::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0301",
+        "source_title": "金发红眼·低马尾娇小",
+        "prompt": "0.4::artist:deyui ::, 0.2::artist:cynical_(llcbluckg_c004) ::, 0.4::artist:hiroyama_hiroshi ::, 0.5::artist:mafuyu (chibi21) ::, 0.6::artist:BUNBUN ::, 0.6::artist:mojo_(mojoawa) ::, 0.6::artist:Tsunako ::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0303",
+        "source_title": "小栗帽·癫狂瞪眼特写",
+        "prompt": "0.85::artist:liduke::, 2::artist:quuni::, artist:krenz, artist:bm94199, 0.65::artist:yue (memento1113)::, 0.4::artist:sohn woohyoung::, 0.6::artist:ohisashiburi::, 0.3::artist:modare::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0308",
+        "source_title": "阿尔托莉雅·俏皮眨眼平涂",
+        "prompt": "0.3::artist:sen (sen42724788)::, 0.5::artist:60mai::, 0.6::artist:tottotonero::, 0.9::artist:oomura karasu::, 0.6::artist:horosuke::, 0.9::artist:tsunako::, 0.9::artist:takeuchi takashi::, 0.75::artist:wada arco::"
+      },
+      {
+        "source_entry": "nai5_community_pack_mengshen_korean_0314",
+        "source_title": "戌神沁音·街头潮装",
+        "prompt": "0.45::artist:mika pikazo::, 0.5::artist:henriku (ahemaru)::, 0.8::artist:marushin (denwa0214)::, 0.55::artist:cutesexyrobutts::, 0.4::artist:cocoballking::, 0.55::artist:teshima nari::, 1.6::artist:inoue kiyoshirou::"
+      }
+    ]
+  }
+}

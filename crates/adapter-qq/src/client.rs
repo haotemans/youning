@@ -14,7 +14,32 @@ use tracing::debug;
 use yuantuan_core::event::EventBus;
 use yuantuan_core::prefilter::SelfMsgIds;
 
+#[path = "delivery.rs"]
+mod delivery;
+
 pub const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
+
+const MEDIA_ECHO_TIMEOUT: Duration = Duration::from_secs(90);
+
+fn action_timeout(action: &str, params: &Value) -> Duration {
+    fn contains_media(value: &Value) -> bool {
+        match value {
+            Value::Array(items) => items.iter().any(contains_media),
+            Value::Object(fields) => {
+                matches!(
+                    fields.get("type").and_then(Value::as_str),
+                    Some("image" | "video" | "file")
+                ) || fields.values().any(contains_media)
+            }
+            _ => false,
+        }
+    }
+    if action.starts_with("send_") && contains_media(params) {
+        MEDIA_ECHO_TIMEOUT
+    } else {
+        ECHO_TIMEOUT
+    }
+}
 
 pub type Pending = Arc<Mutex<HashMap<String, oneshot::Sender<Value>>>>;
 
@@ -112,7 +137,7 @@ impl AdapterHandle {
 
 /// 装配助手：把句柄包成 core 回复引擎的 SendFn（断线期调用返回错误，由引擎退避重试）
 pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
-    use yuantuan_core::reply_engine::ChatType;
+    use yuantuan_core::reply_engine::{ChatType, SendOperation};
     std::sync::Arc::new(move |req| {
         let h = handle.clone();
         Box::pin(async move {
@@ -120,15 +145,113 @@ pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
                 .sender()
                 .await
                 .ok_or_else(|| anyhow::anyhow!("adapter 当前未连接 NapCat"))?;
-            match req.chat_type {
+            match req.operation {
+                SendOperation::RecallSource {
+                    message_id,
+                    sender_qq,
+                } => {
+                    anyhow::ensure!(req.chat_type == ChatType::Group, "分享消息撤回仅支持群聊");
+                    crate::moderation::recall_source(
+                        s,
+                        h.self_qq(),
+                        req.target,
+                        message_id,
+                        sender_qq,
+                    )
+                    .await?;
+                    return Ok(serde_json::Value::Null);
+                }
+                SendOperation::Forward => {
+                    let (action, params) =
+                        forward_request(req.chat_type, req.target, h.self_qq(), req.segments)?;
+                    return s.action(action, params).await;
+                }
+                SendOperation::Message => {}
+            }
+            let expected = delivery::ExpectedDelivery::from_request(&req, h.self_qq()).await;
+            let result = match req.chat_type {
                 ChatType::Group => s.send_group_msg(req.target, req.segments).await,
                 ChatType::Private => s.send_private_msg(req.target, req.segments).await,
+            };
+            if let (Err(error), Some(expected)) = (&result, expected) {
+                if error
+                    .downcast_ref::<yuantuan_core::reply_engine::DeliveryUnconfirmed>()
+                    .is_some()
+                {
+                    tracing::info!(
+                        target = req.target,
+                        "QQ 媒体回执超时，核对历史记录等待延迟送达"
+                    );
+                    if let Some(receipt) = delivery::confirm_from_history(
+                        &expected,
+                        || s.action("get_group_msg_history", json!({"group_id":req.target,"count":50,"disable_get_url":true,"parse_mult_msg":false})),
+                        Duration::from_secs(150), Duration::from_secs(5),
+                    ).await {
+                        tracing::info!(target=req.target, "QQ 延迟图片已通过历史记录确认送达");
+                        return Ok(receipt);
+                    }
+                }
             }
+            result
         })
             as std::pin::Pin<
                 Box<dyn std::future::Future<Output = anyhow::Result<serde_json::Value>> + Send>,
             >
     })
+}
+
+fn forward_request(
+    chat_type: yuantuan_core::reply_engine::ChatType,
+    target: u64,
+    bot_qq: u64,
+    mut nodes: Value,
+) -> Result<(&'static str, Value)> {
+    use yuantuan_core::reply_engine::ChatType;
+    anyhow::ensure!(bot_qq > 0 && target > 0, "机器人身份或发送目标未就绪");
+    let items = nodes.as_array_mut().context("合并聊天记录节点格式无效")?;
+    anyhow::ensure!(
+        !items.is_empty() && items.len() <= 31,
+        "合并聊天记录节点数量无效"
+    );
+    for node in items {
+        anyhow::ensure!(
+            node["type"] == "node" && node["data"]["content"].is_array(),
+            "合并聊天记录节点格式无效"
+        );
+        node["data"]["uin"] = json!(bot_qq.to_string());
+        node["data"]["name"] = json!("云团");
+    }
+    Ok(match chat_type {
+        ChatType::Group => (
+            "send_group_forward_msg",
+            json!({"group_id":target,"messages":nodes}),
+        ),
+        ChatType::Private => (
+            "send_private_forward_msg",
+            json!({"user_id":target,"messages":nodes}),
+        ),
+    })
+}
+
+#[cfg(test)]
+mod forward_tests {
+    use super::*;
+    use yuantuan_core::reply_engine::ChatType;
+    #[test]
+    fn forward_actions_use_real_bot_identity_and_the_correct_chat_target() {
+        let nodes = json!([{"type":"node","data":{"uin":"spoof","name":"spoof","content":[{"type":"video","data":{"file":"file:///video.mp4"}}]}}]);
+        let (action, params) = forward_request(ChatType::Group, 42, 100, nodes.clone()).unwrap();
+        assert_eq!(action, "send_group_forward_msg");
+        assert_eq!(params["group_id"], 42);
+        assert_eq!(params["messages"][0]["data"]["uin"], "100");
+        assert_eq!(params["messages"][0]["data"]["name"], "云团");
+        assert_eq!(params["messages"][0]["data"]["content"][0]["type"], "video");
+        let (action, params) = forward_request(ChatType::Private, 456, 100, nodes).unwrap();
+        assert_eq!(action, "send_private_forward_msg");
+        assert_eq!(params["user_id"], 456);
+        assert!(forward_request(ChatType::Group, 42, 0, json!([])).is_err());
+        assert!(forward_request(ChatType::Group, 42, 100, json!([])).is_err());
+    }
 }
 
 /// 帧分发（传输无关）：action 回执优先路由，meta_event 跳过，message/message_sent 走 ingest
@@ -166,7 +289,7 @@ pub(crate) fn next_echo(counter: &AtomicU64) -> String {
     format!("yt-{}", counter.fetch_add(1, Ordering::Relaxed))
 }
 
-/// 发送端：action + echo，10s 回执超时（回执路由见 handle_frame）。
+/// 发送端：action + echo，普通操作 10s、媒体发送 90s 回执超时（回执路由见 handle_frame）。
 /// 写端类型只在 server.rs 装配时确定，这里保留具体类型（axum 的 SplitSink<WebSocket>）。
 #[derive(Clone)]
 pub struct NapcatSender {
@@ -203,22 +326,41 @@ impl NapcatSender {
     }
 
     pub(crate) async fn action(&self, action: &str, params: Value) -> Result<Value> {
+        use yuantuan_core::reply_engine::DeliveryUnconfirmed;
+        let timeout = action_timeout(action, &params);
         let echo = next_echo(&self.counter);
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(echo.clone(), tx);
         {
             let mut w = self.write.lock().await;
             let frame = json!({ "action": action, "params": params, "echo": echo }).to_string();
-            w.send(axum::extract::ws::Message::Text(frame.into()))
-                .await
-                .with_context(|| format!("发送 action 失败: {action}"))?;
+            if let Err(error) = w.send(axum::extract::ws::Message::Text(frame.into())).await {
+                self.pending.lock().unwrap().remove(&echo);
+                return Err(error).with_context(|| format!("发送 action 失败: {action}"));
+            }
         }
-        let resp = tokio::time::timeout(ECHO_TIMEOUT, rx)
-            .await
-            .with_context(|| format!("action {action} 回执超时（10s）"))?
-            .context("action 回执通道被丢弃")?;
+        let received = tokio::time::timeout(timeout, rx).await;
+        self.pending.lock().unwrap().remove(&echo);
+        let resp = match received {
+            Ok(Ok(resp)) => resp,
+            _ => {
+                return Err(DeliveryUnconfirmed(format!(
+                    "action {action} 未确认送达（回执等待 {}s），保留附件，不自动重复发送",
+                    timeout.as_secs()
+                ))
+                .into())
+            }
+        };
         let retcode = resp.get("retcode").and_then(|c| c.as_i64()).unwrap_or(-1);
         if retcode != 0 {
+            if action.starts_with("send_")
+                && resp.to_string().to_ascii_lowercase().contains("timeout")
+            {
+                return Err(DeliveryUnconfirmed(format!(
+                    "action {action} QQ 发送超时，未确认送达：{resp}"
+                ))
+                .into());
+            }
             bail!("action {action} 被 NapCat 拒绝: {resp}");
         }
         Ok(resp.get("data").cloned().unwrap_or(Value::Null))
@@ -240,5 +382,34 @@ impl NapcatSender {
             json!({ "user_id": user_id, "message": message }),
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+    #[test]
+    fn media_receipts_allow_upload_time_including_forward_nodes() {
+        assert_eq!(
+            action_timeout(
+                "send_group_msg",
+                &json!({"message":[{"type":"text","data":{"text":"image"}}]})
+            ),
+            ECHO_TIMEOUT
+        );
+        assert_eq!(
+            action_timeout(
+                "send_private_msg",
+                &json!({"message":[{"type":"image","data":{"file":"file:///app/image.png"}}]})
+            ),
+            MEDIA_ECHO_TIMEOUT
+        );
+        assert_eq!(
+            action_timeout(
+                "send_group_forward_msg",
+                &json!({"messages":[{"type":"node","data":{"content":[{"type":"video"}]}}]})
+            ),
+            MEDIA_ECHO_TIMEOUT
+        );
     }
 }

@@ -4,7 +4,7 @@
 //! 成本闸：全局滑动窗口 30 次/分，超限排队延迟不丢弃（架构十三章节流数值）。
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -77,6 +77,17 @@ struct RolesCfg {
 struct RoleBind {
     provider: String,
     model: String,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Optional Chat Completions reasoning control; omission preserves provider defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
 }
 
 /// 解析后的角色绑定（可直接发请求）
@@ -84,6 +95,7 @@ struct RoleBind {
 pub struct ResolvedRole {
     pub provider: String,
     pub model: String,
+    pub reasoning_effort: Option<ReasoningEffort>,
     base_url: String,
     api_key: Option<String>,
 }
@@ -96,9 +108,15 @@ impl ResolvedRole {
             Some(k) => format!("configured len={}", k.len()),
         };
         format!(
-            "provider={} model={} base_url={} api_key={}",
-            self.provider, self.model, self.base_url, key_info
+            "provider={} model={} reasoning_effort={:?} base_url={} api_key={}",
+            self.provider, self.model, self.reasoning_effort, self.base_url, key_info
         )
+    }
+
+    fn apply_reasoning(&self, body: &mut Value) {
+        if let Some(effort) = self.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
+        }
     }
 }
 
@@ -245,6 +263,7 @@ impl LlmGateway {
                         ResolvedRole {
                             provider: bind.provider.clone(),
                             model: bind.model,
+                            reasoning_effort: bind.reasoning_effort,
                             base_url: p.base_url.trim_end_matches('/').to_string(),
                             api_key,
                         },
@@ -326,11 +345,14 @@ impl LlmGateway {
             .acquire()
             .await
             .map_err(|_| anyhow!("LLM 并发信号量已关闭"))?;
-        let body = json!({
+        let mut body = json!({
             "model": r.model,
             "messages": [{"role": "user", "content": "ping"}],
-            "max_tokens": 8,
+            // Reasoning models count thought tokens against the output allowance.
+            "max_tokens": if r.reasoning_effort.is_some() { 512 } else { 8 },
+            "tool_choice": "none",
         });
+        r.apply_reasoning(&mut body);
         let mut req = self
             .http
             .post(format!("{}/chat/completions", r.base_url))
@@ -349,10 +371,43 @@ impl LlmGateway {
             );
         }
         let v: Value = serde_json::from_str(&text).context("provider 响应非 JSON")?;
+        self.record_usage(role, &r.model, &v);
         v.pointer("/choices/0/message/content")
             .and_then(|c| c.as_str())
             .ok_or_else(|| anyhow!("provider 响应缺 choices[0].message.content"))?;
         Ok((r.model.clone(), started.elapsed().as_millis() as u64))
+    }
+
+    fn record_usage(&self, role: Role, model: &str, v: &Value) {
+        if let Some(sink) = &self.usage_sink {
+            let usage = v
+                .get("usage")
+                .map(|u| LlmUsage {
+                    prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
+                    completion_tokens: u
+                        .get("completion_tokens")
+                        .and_then(|x| x.as_u64())
+                        .unwrap_or(0),
+                    total_tokens: u
+                        .get("total_tokens")
+                        .and_then(|x| x.as_u64())
+                        .filter(|n| *n > 0)
+                        .unwrap_or_else(|| {
+                            u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0)
+                                + u.get("completion_tokens")
+                                    .and_then(Value::as_u64)
+                                    .unwrap_or(0)
+                        }),
+                })
+                .unwrap_or_default();
+            if usage.total_tokens > 0 {
+                sink(LlmUsageRecord {
+                    role,
+                    model: model.to_owned(),
+                    usage,
+                });
+            }
+        }
     }
 
     /// 拉取指定 provider 的可用模型列表（调 `GET {base_url}/models`，OpenAI 兼容）。
@@ -426,6 +481,7 @@ impl LlmGateway {
         if json_mode {
             body["response_format"] = json!({"type": "json_object"});
         }
+        r.apply_reasoning(&mut body);
         let mut req = self
             .http
             .post(format!("{}/chat/completions", r.base_url))
@@ -446,28 +502,12 @@ impl LlmGateway {
             );
         }
         let v: Value = serde_json::from_str(&text).context("LLM 响应非 JSON")?;
-        // 用量统计：有 sink 就上报；没 sink 或响应不带 usage 都静默
-        if let Some(sink) = &self.usage_sink {
-            let usage = v
-                .get("usage")
-                .map(|u| LlmUsage {
-                    prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                    completion_tokens: u
-                        .get("completion_tokens")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0),
-                    total_tokens: u.get("total_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
-                })
-                .unwrap_or_default();
-            if usage.total_tokens > 0 {
-                sink(LlmUsageRecord {
-                    role,
-                    model: r.model.clone(),
-                    usage,
-                });
-            }
+        self.record_usage(role, &r.model, &v);
+        if role == Role::BotChat && !json_mode {
+            chat_response_text(&v)
+        } else {
+            response_text(&v)
         }
-        response_text(&v)
     }
 }
 
@@ -493,10 +533,118 @@ fn response_text(v: &Value) -> Result<String> {
     {
         bail!("provider 拒绝生成本次回答");
     }
-    message["content"]
+    let text = message["content"]
         .as_str()
-        .map(str::to_owned)
-        .context("LLM 响应缺 choices[0].message.content")
+        .context("LLM 响应缺 choices[0].message.content")?;
+    ensure_plain_text(text)?;
+    Ok(text.to_owned())
+}
+
+// Some compatible providers serialize a send_message envelope despite tool_choice=none.
+// Treat that one envelope as reply text only. Routing and all real tools stay in the host.
+fn chat_response_text(v: &Value) -> Result<String> {
+    let choice = v.pointer("/choices/0").context("LLM 响应缺 choices[0]")?;
+    let message = &choice["message"];
+    if matches!(
+        choice["finish_reason"].as_str(),
+        Some("length" | "content_filter")
+    ) || message["refusal"]
+        .as_str()
+        .is_some_and(|s| !s.trim().is_empty())
+    {
+        return response_text(v);
+    }
+    if let Some(calls) = message["tool_calls"].as_array().filter(|a| !a.is_empty()) {
+        if calls.len() != 1
+            || !message["function_call"].is_null()
+            || message["content"]
+                .as_str()
+                .is_some_and(|s| !s.trim().is_empty())
+        {
+            bail!("provider 返回了混合或多个工具调用，无法转换为聊天正文");
+        }
+        return send_message_text(&calls[0]["function"]);
+    }
+    if !message["function_call"].is_null() {
+        if message["content"]
+            .as_str()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            bail!("provider 返回了混合工具调用");
+        }
+        return send_message_text(&message["function_call"]);
+    }
+    let text = message["content"].as_str().unwrap_or("").trim();
+    if let Some(rest) =
+        text.strip_prefix("<|open|>tools<|sep|><|open|>call tool=\"send_message\" index=\"")
+    {
+        let (index, rest) = rest
+            .split_once("\"<|sep|>")
+            .context("工具协议调用头不完整")?;
+        if index.is_empty() || !index.bytes().all(|c| c.is_ascii_digit()) {
+            bail!("工具协议调用序号无效");
+        }
+        let rest = rest
+            .strip_prefix("<|open|>argument key=\"message\" type=\"string\"<|sep|>")
+            .context("工具协议不包含唯一 message 参数")?;
+        let (body, tail) = rest
+            .split_once("<|close|>argument<|sep|>")
+            .context("工具协议参数不完整")?;
+        let tail = tail
+            .strip_prefix("<|close|>call<|sep|><|close|>tools<|sep|>")
+            .context("工具协议调用不完整")?;
+        if !matches!(tail.trim(), "" | "<|close|>message<|sep|>") {
+            bail!("工具协议含额外调用或内容");
+        }
+        ensure_plain_text(body)?;
+        if body.trim().is_empty() {
+            bail!("工具协议正文为空");
+        }
+        return Ok(body.trim().to_owned());
+    }
+    response_text(v)
+}
+
+fn send_message_text(function: &Value) -> Result<String> {
+    if function["name"] != "send_message" {
+        bail!("provider 返回了未授权的工具调用");
+    }
+    let args: Value = serde_json::from_str(
+        function["arguments"]
+            .as_str()
+            .context("工具参数不是 JSON 字符串")?,
+    )
+    .context("工具参数 JSON 无效")?;
+    let args = args.as_object().context("工具参数不是对象")?;
+    if args.len() != 1 {
+        bail!("send_message 只允许 message 正文，不能指定目标或其他操作");
+    }
+    let body = args
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .context("send_message 缺少正文")?;
+    ensure_plain_text(body)?;
+    Ok(body.to_owned())
+}
+
+fn ensure_plain_text(text: &str) -> Result<()> {
+    if [
+        "<|open|>",
+        "<|close|>",
+        "<|sep|>",
+        "<|tool_call",
+        "<tool_call>",
+        "<function=",
+        "[TOOL_CALLS]",
+        "<|im_start|>",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+    {
+        bail!("provider 正文包含未适配或不完整的工具协议");
+    }
+    Ok(())
 }
 
 /// providers.toml 默认模板（配置缺失时写出，key 从环境变量读，永不上库）
@@ -510,14 +658,170 @@ pub const DEFAULT_PROVIDERS_TEMPLATE: &str = r#"# 云团 LLM Provider 配置（�
 # models = ["some-model"]
 
 [roles]
-# decision   = { provider = "example", model = "便宜快速模型" }
-# bot_chat   = { provider = "example", model = "中高档模型" }
+# reasoning_effort 可选 low/medium/high；不填使用服务商默认，需要上游模型支持。
+# decision   = { provider = "example", model = "便宜快速模型", reasoning_effort = "low" }
+# bot_chat   = { provider = "example", model = "中高档模型", reasoning_effort = "high" }
 # agent_exec = { provider = "example", model = "强模型" }
 "#;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn reasoning_is_role_specific_in_runtime_and_connection_test_and_optional_for_legacy() {
+        use axum::{routing::post, Json, Router};
+        let seen = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let capture = seen.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let capture = capture.clone();
+                async move {
+                    capture.lock().unwrap().push(body);
+                    Json(reply("ok"))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let path =
+            std::env::temp_dir().join(format!("yt-reasoning-{}.toml", rand::random::<u64>()));
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[provider.mock]
+base_url = "{url}"
+[roles]
+decision = {{provider="mock", model="same-model", reasoning_effort="low"}}
+bot_chat = {{provider="mock", model="same-model", reasoning_effort="high"}}
+agent_exec = {{provider="mock", model="same-model"}}
+"#
+            ),
+        )
+        .unwrap();
+        let gateway = LlmGateway::load(&path).unwrap();
+        for (role, effort) in [
+            (Role::Decision, Some("low")),
+            (Role::BotChat, Some("high")),
+            (Role::AgentExec, None),
+        ] {
+            gateway
+                .chat(role, "system", "user", role != Role::BotChat)
+                .await
+                .unwrap();
+            gateway.test_chat(role).await.unwrap();
+            let seen = seen.lock().unwrap();
+            let pair = &seen[seen.len() - 2..];
+            for request in pair {
+                assert_eq!(request["reasoning_effort"].as_str(), effort);
+                assert_eq!(request["model"], "same-model");
+                assert_eq!(request["tool_choice"], "none");
+                if effort.is_none() {
+                    assert!(request.get("reasoning_effort").is_none());
+                }
+            }
+            assert_eq!(
+                pair[1]["max_tokens"],
+                if effort.is_some() { 512 } else { 8 }
+            );
+        }
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            original.replace(
+                "reasoning_effort=\"low\"",
+                "reasoning_effort=\"unsupported\"",
+            ),
+        )
+        .unwrap();
+        assert!(LlmGateway::load(&path).is_err());
+        std::fs::remove_file(path).unwrap();
+        server.abort();
+    }
+
+    fn reply(content: &str) -> Value {
+        json!({"choices":[{"finish_reason":"stop","message":{"content":content}}]})
+    }
+
+    #[test]
+    fn serialized_send_message_becomes_only_reply_text() {
+        let raw = "<|open|>tools<|sep|><|open|>call tool=\"send_message\" index=\"1\"<|sep|><|open|>argument key=\"message\" type=\"string\"<|sep|>你好\n第二行<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|><|close|>message<|sep|>";
+        assert_eq!(chat_response_text(&reply(raw)).unwrap(), "你好\n第二行");
+        assert!(response_text(&reply(raw)).is_err()); // decision/agent JSON stays strict
+        for bad in [
+            raw.replace("send_message", "bash"),
+            raw.replace("key=\"message\"", "key=\"command\""),
+            raw.replace("<|close|>call<|sep|>", ""),
+            format!("{raw}{raw}"),
+            format!("解释：{raw}"),
+        ] {
+            assert!(chat_response_text(&reply(&bad)).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn native_send_message_cannot_change_target_or_execute_other_tools() {
+        let mut response = json!({"choices":[{"finish_reason":"tool_calls","message":{"content":null,"tool_calls":[{"type":"function","function":{"name":"send_message","arguments":"{\"message\":\"你好\"}"}}]}}]});
+        assert_eq!(chat_response_text(&response).unwrap(), "你好");
+        assert!(response_text(&response).is_err());
+        response["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] =
+            json!("{\"message\":\"你好\",\"chat_id\":\"other\"}");
+        assert!(chat_response_text(&response).is_err());
+        response["choices"][0]["message"]["tool_calls"][0]["function"]["name"] = json!("bash");
+        assert!(chat_response_text(&response).is_err());
+        for raw in [
+            "<tool_call>bad</tool_call>",
+            "<|tool_call_begin|>send_message",
+            "[TOOL_CALLS]bad",
+        ] {
+            assert!(chat_response_text(&reply(raw)).is_err());
+        }
+        assert_eq!(chat_response_text(&reply("普通回复")).unwrap(), "普通回复");
+    }
+
+    #[tokio::test]
+    async fn gateway_adapts_chat_and_accounts_for_diagnostic_and_rejected_outputs() {
+        use axum::{routing::post, Json, Router};
+        let raw = "<|open|>tools<|sep|><|open|>call tool=\"send_message\" index=\"0\"<|sep|><|open|>argument key=\"message\" type=\"string\"<|sep|>你好<|close|>argument<|sep|><|close|>call<|sep|><|close|>tools<|sep|>";
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || async move {
+                let mut v = reply(raw);
+                // Several compatible providers omit total_tokens.
+                v["usage"] = json!({"prompt_tokens":11,"completion_tokens":7});
+                Json(v)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let path = std::env::temp_dir().join(format!("yt-llm-chat-{}.toml", rand::random::<u64>()));
+        std::fs::write(&path, format!("[provider.mock]\nbase_url=\"{url}\"\n[roles]\nbot_chat={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+        let mut gateway = LlmGateway::load(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let capture = records.clone();
+        gateway.set_usage_sink(Arc::new(move |record| capture.lock().unwrap().push(record)));
+        assert_eq!(
+            gateway
+                .chat(Role::BotChat, "system", "user", false)
+                .await
+                .unwrap(),
+            "你好"
+        );
+        gateway.test_chat(Role::BotChat).await.unwrap();
+        assert!(gateway
+            .chat(Role::BotChat, "system", "json", true)
+            .await
+            .is_err());
+        let records = records.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(records.iter().all(|record| record.usage.total_tokens == 18));
+        server.abort();
+    }
 
     #[test]
     fn unexpected_tools_and_incomplete_answers_never_become_text() {
@@ -547,6 +851,7 @@ mod tests {
             let role = ResolvedRole {
                 provider: "mock".into(),
                 model: "mock".into(),
+                reasoning_effort: None,
                 base_url: "http://localhost".into(),
                 api_key: Some(key.into()),
             };

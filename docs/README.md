@@ -31,7 +31,7 @@
 | `webui`：管理 API 与事件推送 | [crate](../crates/webui)、[路由入口](../crates/webui/src/lib.rs) | [运行时设计第四章](design/runtime-design.md)、[信息流参考](reference/message-flow-rules.md) |
 | `yuantuan`：配置、装配与进程生命周期 | [main.rs](../crates/yuantuan/src/main.rs)、[config.rs](../crates/yuantuan/src/config.rs) | [运行时设计](design/runtime-design.md)、[后端加固工作记录](changes/backend-hardening-workbench.md) |
 | `webui-frontend`：页面、主题与交互 | [前端目录](../webui-frontend)、[路由](../webui-frontend/src/router/index.js) | [前端工作记录](changes/frontend-design-workbench.md)、[主题历史](archive/changes/webui-theme-workbench.md) |
-| `plugins/hello`：示例插件 | [插件目录](../plugins/hello)、[Skill 契约](../crates/core/src/skills.rs)、[MCP 客户端](../crates/core/src/mcp.rs) | [插件工作记录](changes/plugins-layer-workbench.md) |
+| `plugins`：搜索、生图、解析与群管理 | [插件目录](../plugins)、[Skill 契约](../crates/core/src/skills.rs)、[MCP 客户端](../crates/core/src/mcp.rs) | [插件工作记录](changes/plugins-layer-workbench.md) |
 | 部署与运行配置 | [Compose](../deploy/compose.yml)、[部署脚本](../deploy/deploy.sh) | [项目运行入口](../README.md)、[后端部署记录](changes/backend-hardening-workbench.md)、[401 故障复盘](archive/incidents/new-api-401-report.md) |
 
 ## 目录与资料归属

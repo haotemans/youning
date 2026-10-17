@@ -140,6 +140,11 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
             image_urls: Vec::new(), // 不回放偷图流程（image_urls 不落 messages）
             ts,
         };
+        // Downloads and moderation must not be repeated after a process restart.
+        if matches!(match_plugin_message(deps, &payload), Ok(Some(_))) {
+            mark_processed(&deps.db_path, msg_id).await;
+            continue;
+        }
         handle(deps, &payload).await;
         count += 1;
     }
@@ -152,8 +157,8 @@ pub async fn replay_pending(deps: &PipelineDeps) -> anyhow::Result<usize> {
 pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
     type ChatLanes =
         std::collections::HashMap<String, tokio::sync::mpsc::Sender<(MessageReceivedPayload, i64)>>;
+    let mut rx = deps.bus.subscribe();
     tokio::spawn(async move {
-        let mut rx = deps.bus.subscribe();
         if !decision_ready(&deps.llm) {
             warn!("Decision 角色未配置（providers.toml）：配置前消息过 Prefilter 后直接 ignore，管线照常运行");
         }
@@ -210,7 +215,8 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
                     // 生图命令走 dispatcher→worker 直派，不进消息聚合窗口。
-                    let is_media_cmd = is_image_command(&m.text);
+                    let is_media_cmd = is_image_command(&m.text)
+                        || matches!(match_plugin_message(&deps, &m), Ok(Some(_)));
 
                     if is_media_cmd {
                         let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
@@ -370,6 +376,12 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
     {
         Verdict::Drop(rule) => debug!(rule, chat_id = %m.chat_id, "Prefilter 丢弃"),
         Verdict::Pass => {
+            // A bare mention is a greeting, not an expensive model request. Keep
+            // self/bot filtering above and preserve image/quoted-message context.
+            if is_bare_mention(m) {
+                enqueue_direct_reply(deps, m, "在呢，想让我帮你做什么？");
+                return;
+            }
             let gw = match deps.llm.read().unwrap().clone() {
                 Some(g) if g.role(Role::Decision).is_some() => g,
                 _ => {
@@ -478,30 +490,19 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| out.summary.clone());
-                        // Skill 输出包成单 Bubble（无 at/无 meme），走 Bubbles 路径享受打字延时与作废核对
-                        engine.enqueue(reply_engine::ReplyJob {
-                            chat_id: m.chat_id.clone(),
+                        let mention_qq = plugin_result_mention(m, &out);
+                        if let Err(e) = engine.enqueue_plugin_result_with_mention(
+                            m.chat_id.clone(),
                             chat_type,
                             target,
-                            anchor_msg_id: m.msg_id,
-                            mention: false,
-                            mention_qq: None,
-                            kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
-                                text: rendered,
-                                at: false,
-                                meme: None,
-                            }]),
-                        });
-                        for path in out.artifacts {
-                            if let Err(e) = engine.enqueue_attachment_with_retention(
-                                m.chat_id.clone(),
-                                chat_type,
-                                target,
-                                path.into(),
-                                skill.artifact_retention(),
-                            ) {
-                                warn!(error=%e, "插件附件入队失败");
-                            }
+                            m.msg_id,
+                            rendered,
+                            out.artifacts,
+                            skill.artifact_retention(),
+                            skill.delivery_policy(),
+                            mention_qq,
+                        ) {
+                            warn!(error=%e, "插件结果入队失败");
                         }
                     }
                     Err(e) => {
@@ -601,6 +602,11 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             match (&deps.reply, bot_chat_ready) {
                 (Some(engine), true) => {
                     let reply_cfg = *deps.reply_cfg.read().unwrap();
+                    let catalog = deps
+                        .skill_registry
+                        .as_ref()
+                        .map(|registry| registry.describe_for_chat(&m.chat_id))
+                        .unwrap_or_default();
                     if let Err(e) = reply_engine::prepare_and_enqueue(
                         engine,
                         &snapshot,
@@ -610,17 +616,21 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                         &outcome.output,
                         &ctx_cfg,
                         &reply_cfg,
+                        &catalog,
                     )
                     .await
                     {
-                        warn!(chat_id = %m.chat_id, error = %e, "bot_chat 回复准备失败，跳过");
+                        warn!(chat_id = %m.chat_id, error = %format!("{e:#}"), "bot_chat 回复准备失败");
                         deps.bus.publish(Event::BubbleSent(BubbleSentPayload {
                             chat_id: m.chat_id.clone(),
                             bubble_index: 0,
                             total: 0,
                             ok: false,
-                            note: Some(format!("bot_chat 调用失败: {e}")),
+                            note: Some(format!("bot_chat 调用失败: {e:#}")),
                         }));
+                        if m.at_me || m.chat_type == "private" {
+                            enqueue_direct_reply(deps, m, "刚才没能生成回复，请稍后再试一次。");
+                        }
                     }
                 }
                 _ => {
@@ -636,6 +646,32 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             }
         }
     }
+}
+
+fn is_bare_mention(m: &MessageReceivedPayload) -> bool {
+    m.at_me && m.text.trim().is_empty() && !m.has_image && m.reply_to.is_none()
+}
+
+fn enqueue_direct_reply(deps: &PipelineDeps, m: &MessageReceivedPayload, text: &str) {
+    let Some(engine) = deps.reply.as_ref() else {
+        return;
+    };
+    let Ok((chat_type, target, mention_qq)) = reply_engine::route_of(m) else {
+        return;
+    };
+    engine.enqueue(reply_engine::ReplyJob {
+        chat_id: m.chat_id.clone(),
+        chat_type,
+        target,
+        anchor_msg_id: m.msg_id,
+        mention: m.chat_type == "group",
+        mention_qq,
+        kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
+            text: text.to_owned(),
+            at: false,
+            meme: None,
+        }]),
+    });
 }
 
 /// Explicit plugin commands use registered, permission-checked skills even without LLM roles.
@@ -670,19 +706,61 @@ async fn add_message_slots(
     slots["mentioned_qqs"] = serde_json::json!(targets);
 }
 
-async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) -> bool {
+fn match_plugin_message(
+    deps: &PipelineDeps,
+    m: &MessageReceivedPayload,
+) -> anyhow::Result<Option<(Arc<dyn crate::skills::Skill>, serde_json::Value)>> {
     let own_qq = deps.self_qq.load(Ordering::Relaxed);
-    if m.sender_pid == "self" || (own_qq != 0 && m.sender_pid == format!("p_{own_qq}")) {
-        return false;
+    if m.sender_bot
+        || m.sender_pid == "self"
+        || (own_qq != 0 && m.sender_pid == format!("p_{own_qq}"))
+    {
+        return Ok(None);
     }
     let Some(registry) = deps.skill_registry.as_ref() else {
-        return false;
+        return Ok(None);
     };
-    let command = match registry.command(&m.text) {
-        Ok(Some(command)) => command,
+    if let Some((skill, body)) = registry.command(&m.text)? {
+        return Ok(Some((
+            skill,
+            serde_json::json!({"query":body,"user_text":body,"explicit_command":true}),
+        )));
+    }
+    let ctx = crate::tools::ToolCtx {
+        task_id: None,
+        chat_id: m.chat_id.clone(),
+        chat_type: m.chat_type.clone(),
+        sender_pid: m.sender_pid.clone(),
+        locale: Some("zh-CN".into()),
+    };
+    registry.match_message(&ctx, &m.text)
+}
+
+/// Plugins can request an @, but its target always comes from the actual sender.
+fn plugin_result_mention(
+    message: &MessageReceivedPayload,
+    output: &crate::tools::ToolOutput,
+) -> Option<u64> {
+    if message.chat_type != "group"
+        || output.artifacts.is_empty()
+        || output.data["mention_sender"] != true
+    {
+        return None;
+    }
+    message
+        .sender_pid
+        .strip_prefix("p_")?
+        .parse()
+        .ok()
+        .filter(|qq| *qq > 0)
+}
+
+async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) -> bool {
+    let (skill, mut slots) = match match_plugin_message(deps, m) {
+        Ok(Some(matched)) => matched,
         Ok(None) => return false,
         Err(e) => {
-            warn!(error=%e, "插件命令匹配失败");
+            warn!(error=%e, "插件消息匹配失败");
             return true;
         }
     };
@@ -692,7 +770,6 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
     let Ok((chat_type, target)) = reply_engine_route(m) else {
         return true;
     };
-    let (skill, body) = command;
     let ctx = crate::tools::ToolCtx {
         task_id: None,
         chat_id: m.chat_id.clone(),
@@ -700,9 +777,10 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
         sender_pid: m.sender_pid.clone(),
         locale: Some("zh-CN".into()),
     };
-    let mut slots = serde_json::json!({"query":body,"user_text":body,"explicit_command":true});
     add_message_slots(deps, m, &mut slots).await;
-    let result = if body.is_empty()
+    let automatic = slots["automatic"].as_bool().unwrap_or(false);
+    let result = if slots["explicit_command"] == true
+        && slots["user_text"].as_str().is_some_and(str::is_empty)
         && m.reply_to.is_none()
         && slots["mentioned_qqs"]
             .as_array()
@@ -714,39 +792,37 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
     } else {
         skill.invoke(&ctx, slots).await
     };
+    let mut policy = yuantuan_plugin_api::DeliveryPolicy::default();
+    let mut mention_qq = None;
     let (text, artifacts) = match result {
-        Ok(out) => (
-            out.data["rendered"]
-                .as_str()
-                .unwrap_or(&out.summary)
-                .to_string(),
-            out.artifacts,
+        Ok(out) => {
+            policy = skill.delivery_policy();
+            mention_qq = plugin_result_mention(m, &out);
+            (
+                out.data["rendered"]
+                    .as_str()
+                    .unwrap_or(&out.summary)
+                    .to_string(),
+                out.artifacts,
+            )
+        }
+        Err(e) => (
+            format!("{}未完成：{e}", if automatic { "解析下载" } else { "命令" }),
+            vec![],
         ),
-        Err(e) => (format!("命令未完成：{e}"), vec![]),
     };
-    engine.enqueue(reply_engine::ReplyJob {
-        chat_id: m.chat_id.clone(),
+    if let Err(e) = engine.enqueue_plugin_result_with_mention(
+        m.chat_id.clone(),
         chat_type,
         target,
-        anchor_msg_id: m.msg_id,
-        mention: false,
-        mention_qq: None,
-        kind: reply_engine::JobKind::Bubbles(vec![reply_engine::Bubble {
-            text,
-            at: false,
-            meme: None,
-        }]),
-    });
-    for path in artifacts {
-        if let Err(e) = engine.enqueue_attachment_with_retention(
-            m.chat_id.clone(),
-            chat_type,
-            target,
-            path.into(),
-            skill.artifact_retention(),
-        ) {
-            warn!(error=%e, "插件命令附件入队失败");
-        }
+        m.msg_id,
+        text,
+        artifacts,
+        skill.artifact_retention(),
+        policy,
+        mention_qq,
+    ) {
+        warn!(error=%e, "插件结果入队失败");
     }
     true
 }
@@ -754,10 +830,47 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_image_mention_uses_incoming_sender_and_requires_explicit_opt_in() {
+        let mut message = MessageReceivedPayload {
+            msg_id: 0,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_456".into(),
+            text: "/image adult reading".into(),
+            at_me: false,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1,
+        };
+        let mut output = crate::tools::ToolOutput {
+            summary: "internal metadata".into(),
+            artifacts: vec!["generated.png".into()],
+            data: serde_json::json!({"rendered":"", "mention_sender":true, "sender_qq":999}),
+        };
+        assert_eq!(plugin_result_mention(&message, &output), Some(456));
+        message.chat_type = "private".into();
+        assert_eq!(plugin_result_mention(&message, &output), None);
+        message.chat_type = "group".into();
+        message.sender_pid = "self".into();
+        assert_eq!(plugin_result_mention(&message, &output), None);
+        message.sender_pid = "p_0".into();
+        assert_eq!(plugin_result_mention(&message, &output), None);
+        message.sender_pid = "p_456".into();
+        output.data["mention_sender"] = serde_json::json!(false);
+        assert_eq!(plugin_result_mention(&message, &output), None);
+        output.data["mention_sender"] = serde_json::json!(true);
+        output.artifacts.clear();
+        assert_eq!(plugin_result_mention(&message, &output), None);
+    }
+
     #[tokio::test]
     async fn plugin_command_works_without_models_and_keeps_output_as_text() {
         struct Search {
             artifact: String,
+            automatic: Arc<tokio::sync::Notify>,
         }
         #[async_trait::async_trait]
         impl crate::skills::Skill for Search {
@@ -773,11 +886,27 @@ mod tests {
             fn commands(&self) -> &'static [&'static str] {
                 &["/搜索", "/下载", "/撤回"]
             }
+            fn match_message(
+                &self,
+                _: &crate::tools::ToolCtx,
+                text: &str,
+            ) -> Option<serde_json::Value> {
+                text.contains("https://xhslink.cn/o/123")
+                    .then(|| serde_json::json!({"user_text":text,"automatic":true}))
+            }
             async fn invoke(
                 &self,
                 _: &crate::tools::ToolCtx,
                 slots: serde_json::Value,
             ) -> anyhow::Result<crate::tools::ToolOutput> {
+                if slots["automatic"] == true {
+                    self.automatic.notify_one();
+                    return Ok(crate::tools::ToolOutput {
+                        summary: "自动解析".into(),
+                        artifacts: vec![],
+                        data: serde_json::json!({}),
+                    });
+                }
                 assert_eq!(slots["explicit_command"], true);
                 assert_eq!(slots["user_text"], slots["query"]);
                 if slots["user_text"] == "" {
@@ -832,8 +961,10 @@ mod tests {
         )
         .spawn();
         let skills = crate::skills::SkillRegistry::new();
+        let automatic = Arc::new(tokio::sync::Notify::new());
         skills.register_arc(Arc::new(Search {
             artifact: artifact.to_string_lossy().into_owned(),
+            automatic: automatic.clone(),
         }));
         let deps = PipelineDeps {
             bus,
@@ -883,9 +1014,45 @@ mod tests {
         assert!(!handle_plugin_command(&deps, &message).await);
         message.sender_pid = "p_100".into();
         assert!(!handle_plugin_command(&deps, &message).await);
+        message.sender_pid = "p_1".into();
+        message.text = "分享文案 https://xhslink.cn/o/123 查看原文".into();
+        message.reply_to = None;
+        let pipeline = spawn_pipeline(deps.clone());
+        deps.bus.publish(Event::MessageReceived(message));
+        // Automatic links bypass the ten-second aggregation window and require no model.
+        tokio::time::timeout(std::time::Duration::from_secs(2), automatic.notified())
+            .await
+            .unwrap();
+        pipeline.abort();
+        let _ = pipeline.await;
+        let mut mention = MessageReceivedPayload {
+            msg_id: 0,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_1".into(),
+            text: " \n".into(),
+            at_me: true,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1,
+        };
+        assert!(is_bare_mention(&mention));
+        handle_inner(&deps, &mention, 1).await; // No LLM configured; still sends a greeting.
+        mention.sender_pid = "self".into();
+        handle_inner(&deps, &mention, 1).await; // Self and other bots must never receive it.
+        mention.sender_pid = "p_2".into();
+        mention.sender_bot = true;
+        handle_inner(&deps, &mention, 1).await;
+        mention.has_image = true;
+        assert!(!is_bare_mention(&mention));
+        mention.has_image = false;
+        mention.reply_to = Some(123);
+        assert!(!is_bare_mention(&mention));
         assert!(engine.shutdown(std::time::Duration::from_secs(3)).await);
         let sent = sent.lock().unwrap();
-        assert_eq!(sent.len(), 4);
+        assert_eq!(sent.len(), 6);
         assert_eq!(sent[0].segments[0]["type"], "text");
         assert!(sent[0].segments[0]["data"]["text"]
             .as_str()
@@ -894,6 +1061,13 @@ mod tests {
         assert_eq!(sent[1].segments[0]["data"]["text"], "下载完成，开始交付");
         assert_eq!(sent[2].segments[0]["type"], "video");
         assert_eq!(sent[3].segments[0]["data"]["text"], "已撤回");
+        assert_eq!(sent[4].segments[0]["data"]["text"], "自动解析");
+        assert_eq!(sent[5].segments[0]["type"], "at");
+        assert_eq!(sent[5].segments[0]["data"]["qq"], "1");
+        assert_eq!(
+            sent[5].segments[1]["data"]["text"].as_str().unwrap().trim(),
+            "在呢，想让我帮你做什么？"
+        );
     }
     use crate::db::params;
 

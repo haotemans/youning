@@ -4,6 +4,17 @@ use async_trait::async_trait;
 use serde_json::Value;
 use std::sync::Arc;
 
+/// Prefer populated textual slots; a null/empty model slot must not hide user input.
+pub fn slot_text<'a>(slots: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter().find_map(|key| {
+        slots
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
+}
+
 /// Skill 元数据（编译期常量 + prompt_template 运行期持有）
 #[derive(Debug, Clone)]
 pub struct SkillDef {
@@ -26,6 +37,17 @@ pub trait Skill: Send + Sync {
     /// 返回 Skill 元数据
     fn def(&self) -> SkillDef;
 
+    /// Public information lookup may answer questions as well as execution requests.
+    /// Skills with other effects still require a request intent.
+    fn is_information_lookup(&self) -> bool {
+        false
+    }
+
+    /// Host wrappers apply the current plugin enablement and chat scope.
+    fn available_in_chat(&self, _chat_id: &str) -> bool {
+        true
+    }
+
     /// Explicit commands, matched only at the start and followed by whitespace/end.
     /// These invoke the same guarded skill without requiring a decision model.
     fn commands(&self) -> &'static [&'static str] {
@@ -34,6 +56,15 @@ pub trait Skill: Send + Sync {
 
     fn artifact_retention(&self) -> ArtifactRetention {
         ArtifactRetention::Keep
+    }
+
+    /// Deterministic message triggers, evaluated before the model/aggregation window.
+    fn match_message(&self, _ctx: &ToolCtx, _text: &str) -> Option<Value> {
+        None
+    }
+
+    fn delivery_policy(&self) -> DeliveryPolicy {
+        DeliveryPolicy::default()
     }
 
     /// 执行 Skill：Bot 已把 slots 塞进 prompt_template，这里专注调 chat LLM。
@@ -52,6 +83,14 @@ pub trait Skill: Send + Sync {
             }),
         })
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeliveryPolicy {
+    /// Recall only the recorded triggering message, after media is downloaded.
+    pub recall_source: bool,
+    /// Fold media into a single forward when this many files are present.
+    pub forward_threshold: Option<usize>,
 }
 
 /// 模板渲染：把 {key} 槽位替换成 slots[key] 的字符串值；缺失的槽保留原样

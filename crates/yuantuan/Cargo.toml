@@ -11,7 +11,6 @@ yuantuan-plugin-api = { path = "../plugin-api" }
 yuantuan-core = { path = "../core" }
 yuantuan-adapter-qq = { path = "../adapter-qq" }
 yuantuan-webui = { path = "../webui" }
-yuantuan-plugin-hello = { path = "../../plugins/hello", optional = true }
 yuantuan-plugin-social-media = { path = "../../plugins/social-media", optional = true }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,10 +23,9 @@ tracing-subscriber = "0.3"
 
 [features]
 plugin-anysearch = ["dep:yuantuan-plugin-anysearch"]
-default = ["plugin-hello", "plugin-social-media", "plugin-anysearch", "plugin-moderator", "plugin-nai-image"]
+default = ["plugin-social-media", "plugin-anysearch", "plugin-moderator", "plugin-nai-image"]
 plugin-moderator = ["dep:yuantuan-plugin-moderator"]
 plugin-nai-image = ["dep:yuantuan-plugin-nai-image"]
-plugin-hello = ["dep:yuantuan-plugin-hello"]
 plugin-social-media = ["dep:yuantuan-plugin-social-media"]
 
 [build-dependencies]
@@ -36,10 +34,6 @@ toml = "0.8"
 [[package.metadata.yuantuan.plugins]]
 dependency = "yuantuan-plugin-moderator"
 feature = "plugin-moderator"
-
-[[package.metadata.yuantuan.plugins]]
-dependency = "yuantuan-plugin-hello"
-feature = "plugin-hello"
 
 [[package.metadata.yuantuan.plugins]]
 dependency = "yuantuan-plugin-social-media"

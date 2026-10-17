@@ -1,0 +1,20 @@
+{
+  "source": {
+    "title": "NovelAI v5 社区精选图包",
+    "publisher": "法典图鉴 / NovelAI QuickTagCloud",
+    "url": "https://novelai.quicktagcloud.com/?c=nai5_community_pack",
+    "version": "2026.10.8",
+    "release": "r-fdbb31af4a0a57642fb1",
+    "note": "从公开社区图包精选通用标签与画师名；词条及配图权益归原作者。"
+  },
+  "artists": ["artist:nyong nyong", "artist:hiro (dismaless)", "artist:morino hon", "artist:kingin", "artist:ebora", "artist:ramanda", "artist:kaamin (mariarose753)", "artist:nia (nia4294)", "artist:konoshige (ryuun)", "artist:marushin (denwa0214)", "artist:mika pikazo", "artist:freng", "artist:ciloranko", "artist:ask (askzy)", "artist:onineko", "artist:honnryou_hanaru", "artist:dishwasher1910", "artist:mignon"],
+  "artist_aliases": {"米山舞": "artist:yoneyama mai", "米卡皮卡佐": "artist:mika pikazo"},
+  "categories": {
+    "人物与主体": ["1girl", "solo", "1boy", "2girls", "2boys", "4girls", "group", "no humans", "animal ears"],
+    "景别与构图": ["portrait", "upper body", "cowboy shot", "full body", "wide shot", "from above", "from below", "from side", "from behind", "dutch angle", "dynamic angle", "perspective", "depth of field", "looking at viewer", "symmetry", "multiple views", "2koma", "3panel manga"],
+    "动作与表情": ["standing", "sitting", "walking", "dynamic pose", "action", "smile", "blush", "open mouth", "closed mouth", "half-closed eyes", "expressionless", "cat claw pose", "peace sign"],
+    "画风与媒介": ["anime coloring", "cel shading", "cell rendering", "sketch", "rough sketch", "flat color", "pixel art", "simple illustration", "vector art", "ink (medium)", "game cg", "realistic", "3d", "high contrast", "thick outlines", "minimalism", "monochrome"],
+    "场景与物件": ["scenery", "location", "indoors", "outdoors", "park", "school", "classroom", "window", "flower", "cherry blossoms", "falling petals", "magic circle", "dust cloud", "speech bubble", "no text", "simple background", "simple white background", "white background", "transparent background"],
+    "光线与色彩": ["sunset", "night", "rim lighting", "depth of field", "vivid colors", "pale colors", "muted color", "soft color", "high dynamic range", "subsurface scattering", "chiaroscuro"]
+  }
+}

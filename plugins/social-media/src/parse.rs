@@ -30,7 +30,10 @@ pub fn platform(url: &Url) -> Result<Platform> {
         Ok(Platform::Bilibili)
     } else if domain(host, "douyin.com") || domain(host, "iesdouyin.com") {
         Ok(Platform::Douyin)
-    } else if domain(host, "xiaohongshu.com") || domain(host, "xhslink.com") {
+    } else if domain(host, "xiaohongshu.com")
+        || domain(host, "xhslink.com")
+        || domain(host, "xhslink.cn")
+    {
         Ok(Platform::Xiaohongshu)
     } else if domain(host, "x.com") || domain(host, "twitter.com") || host == "t.co" {
         Ok(Platform::X)
@@ -46,7 +49,7 @@ pub fn share_url(text: &str) -> Result<Url> {
             .unwrap_or("")
             .trim_end_matches(['。', '，', ',', '！', '!', '）', ')', '】', ']', ';', '；']);
         if let Ok(url) = Url::parse(part) {
-            if platform(&url).is_ok() {
+            if matches!(url.scheme(), "http" | "https") && platform(&url).is_ok() {
                 return Ok(url);
             }
         }
@@ -313,7 +316,9 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
     let mut url = share_url(input)?;
     let site = platform(&url)?;
     if matches!(url.host_str(), Some("b23.tv" | "v.douyin.com" | "t.co"))
-        || url.host_str().is_some_and(|h| domain(h, "xhslink.com"))
+        || url
+            .host_str()
+            .is_some_and(|h| domain(h, "xhslink.com") || domain(h, "xhslink.cn"))
     {
         let (resolved, _) = http
             .get(url.as_str(), &url.origin().ascii_serialization())
@@ -495,6 +500,12 @@ mod tests {
     }
     #[test]
     fn links_and_assignment_are_parsed_without_running_js() {
+        assert_eq!(
+            platform(&share_url("蓝玫瑰 https://xhslink.cn/o/38fDbOA9xCs 存好这段口令").unwrap())
+                .unwrap(),
+            Platform::Xiaohongshu
+        );
+        assert!(share_url("https://xhslink.cn.evil.test/o/123").is_err());
         assert_eq!(
             platform(&share_url("分享文案 https://v.douyin.com/abc/）。 复制打开").unwrap())
                 .unwrap(),

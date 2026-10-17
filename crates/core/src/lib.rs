@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod meme;
 pub mod memory;
 pub mod napcat_slot;
+pub mod personality;
 pub mod prefilter;
 pub mod reply_engine;
 pub mod skills;

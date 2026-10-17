@@ -229,7 +229,11 @@ pub fn file_url(path: &Path) -> String {
         .to_string_lossy()
         .replace('\\', "/");
     let abs = abs.strip_prefix("//?/").unwrap_or(&abs).to_string();
-    format!("file:///{abs}")
+    if abs.starts_with('/') {
+        format!("file://{abs}")
+    } else {
+        format!("file:///{abs}")
+    }
 }
 
 // ---------- 偷表情包 ----------

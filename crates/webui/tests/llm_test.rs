@@ -175,6 +175,69 @@ async fn saved_model_is_used_by_test_and_survives_gateway_reload() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reasoning_survives_save_reload_and_is_sent_by_both_chat_and_diagnostics() {
+    use yuantuan_core::llm::{LlmGateway, ReasoningEffort, Role};
+    let rig = start().await;
+    let config: Value = rig
+        .http
+        .get(format!("{}/api/config", rig.base))
+        .bearer_auth(&rig.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut providers = config["providers"].clone();
+    providers["roles"]["decision"]["reasoning_effort"] = json!("low");
+    providers["roles"]["bot_chat"] =
+        json!({"provider":"mock","model":"mock-7b","reasoning_effort":"high"});
+    let response = rig
+        .http
+        .post(format!("{}/api/config", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"providers":providers}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    let gateway = LlmGateway::load(&rig.providers_path).unwrap();
+    for (name, role, effort, effort_name) in [
+        ("decision", Role::Decision, ReasoningEffort::Low, "low"),
+        ("bot_chat", Role::BotChat, ReasoningEffort::High, "high"),
+    ] {
+        let (status, value) = rig.llm_test(name).await;
+        assert_eq!(status, 200, "{value}");
+        assert_eq!(value["reasoning_effort"], effort_name);
+        assert_eq!(
+            rig.llm_seen.lock().unwrap().last().unwrap()["reasoning_effort"],
+            effort_name
+        );
+        assert_eq!(gateway.role(role).unwrap().reasoning_effort, Some(effort));
+        gateway.chat(role, "system", "user", false).await.unwrap();
+        assert_eq!(
+            rig.llm_seen.lock().unwrap().last().unwrap()["reasoning_effort"],
+            effort_name
+        );
+    }
+    let before = std::fs::read_to_string(&rig.providers_path).unwrap();
+    providers["roles"]["decision"]["reasoning_effort"] = json!("invalid");
+    let response = rig
+        .http
+        .post(format!("{}/api/config", rig.base))
+        .bearer_auth(&rig.token)
+        .json(&json!({"providers":providers}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 400);
+    assert_eq!(
+        std::fs::read_to_string(&rig.providers_path).unwrap(),
+        before
+    );
+}
+
 impl Rig {
     async fn llm_test(&self, role: &str) -> (u16, Value) {
         let r = self

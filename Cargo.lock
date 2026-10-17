@@ -2799,7 +2799,6 @@ dependencies = [
  "yuantuan-core",
  "yuantuan-plugin-anysearch",
  "yuantuan-plugin-api",
- "yuantuan-plugin-hello",
  "yuantuan-plugin-moderator",
  "yuantuan-plugin-nai-image",
  "yuantuan-plugin-social-media",
@@ -2877,18 +2876,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "yuantuan-plugin-hello"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "serde_json",
- "tokio",
- "tracing",
- "yuantuan-plugin-api",
-]
-
-[[package]]
 name = "yuantuan-plugin-moderator"
 version = "0.1.0"
 dependencies = [
@@ -2949,7 +2936,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "yuantuan-core",
- "yuantuan-plugin-hello",
+ "yuantuan-plugin-moderator",
 ]
 
 [[package]]

@@ -13,10 +13,18 @@ pub fn plugin() -> Arc<dyn Plugin> {
 }
 #[async_trait]
 impl Plugin for SocialMedia {
+    fn presentation(&self) -> PluginPresentation {
+        PluginPresentation {
+            purpose: "视频与图文解析下载",
+            poem: "小雅·采薇",
+            verse: "采薇采薇，薇亦作止。",
+            examples: vec!["/下载 分享链接", "在群聊发送 B站、抖音、小红书或 X 链接"],
+        }
+    }
     fn metadata(&self) -> PluginMeta {
         PluginMeta {
             id: "social-media",
-            name: "解析视频下载",
+            name: "采薇",
             version: env!("CARGO_PKG_VERSION"),
             api_version: API_VERSION,
             description: "实验性解析 B站、抖音、小红书和 X 的视频、图文；平台可用性见插件文档",
@@ -27,6 +35,30 @@ impl Plugin for SocialMedia {
     }
     fn config_fields(&self) -> Vec<ConfigField> {
         let mut fields = vec![
+            ConfigField {
+                key: "auto_parse",
+                label: "自动解析群聊中的分享链接",
+                kind: ConfigKind::Boolean,
+                default: json!(true),
+                secret: false,
+                options: vec![],
+            },
+            ConfigField {
+                key: "recall_source",
+                label: "下载成功后撤回原分享消息（需机器人管理员权限）",
+                kind: ConfigKind::Boolean,
+                default: json!(true),
+                secret: false,
+                options: vec![],
+            },
+            ConfigField {
+                key: "forward_threshold",
+                label: "附件达到此数量时合并为聊天记录（1–30）",
+                kind: ConfigKind::Integer,
+                default: json!(4),
+                secret: false,
+                options: vec![],
+            },
             ConfigField {
                 key: "public_dns",
                 label: "代理 Fake-IP 兼容（必要时使用 Cloudflare 公共 DNS）",
@@ -82,6 +114,7 @@ impl Plugin for SocialMedia {
             ("max_file_mb", 100),
             ("max_total_mb", 200),
             ("max_items", 30),
+            ("forward_threshold", 30),
         ] {
             if config
                 .get(key)
@@ -119,6 +152,11 @@ impl Plugin for SocialMedia {
             file_limit: config["max_file_mb"].as_u64().unwrap_or(50) * 1048576,
             total_limit: config["max_total_mb"].as_u64().unwrap_or(100) * 1048576,
             max_items: config["max_items"].as_u64().unwrap_or(20) as usize,
+            auto_parse: config["auto_parse"].as_bool().unwrap_or(true),
+            delivery: DeliveryPolicy {
+                recall_source: config["recall_source"].as_bool().unwrap_or(true),
+                forward_threshold: Some(config["forward_threshold"].as_u64().unwrap_or(4) as usize),
+            },
         });
         Ok(Capabilities {
             tools: vec![downloader.clone()],
@@ -132,6 +170,8 @@ struct Downloader {
     file_limit: u64,
     total_limit: u64,
     max_items: usize,
+    auto_parse: bool,
+    delivery: DeliveryPolicy,
 }
 /// Remove partially completed collections on error or cancellation, retain only successful results.
 struct Outputs(Vec<PathBuf>);
@@ -228,6 +268,16 @@ impl Tool for Downloader {
 }
 #[async_trait]
 impl Skill for Downloader {
+    fn match_message(&self, ctx: &ToolCtx, text: &str) -> Option<Value> {
+        if !self.auto_parse || ctx.chat_type != "group" || text.len() > 8192 {
+            return None;
+        }
+        let url = parse::share_url(text).ok()?;
+        Some(json!({"url":url.as_str(),"user_text":text,"automatic":true}))
+    }
+    fn delivery_policy(&self) -> DeliveryPolicy {
+        self.delivery
+    }
     fn commands(&self) -> &'static [&'static str] {
         &["/下载", "/download"]
     }
@@ -238,10 +288,7 @@ impl Skill for Downloader {
         SkillDef{name:"social-media.download",description:"用户明确要求解析或下载 B站、抖音、小红书、X 的分享链接时，下载视频及图文并返回附件。",prompt_template:String::new(),tools:vec![],role_hint:None}
     }
     async fn invoke(&self, _ctx: &ToolCtx, slots: Value) -> Result<ToolOutput> {
-        let input = slots
-            .get("url")
-            .or_else(|| slots.get("user_text"))
-            .and_then(Value::as_str)
+        let input = slot_text(&slots, &["url", "user_text"])
             .filter(|s| s.len() <= 8192)
             .ok_or_else(|| anyhow::anyhow!("缺少有效分享链接"))?;
         self.execute(input).await
@@ -251,6 +298,75 @@ impl Skill for Downloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct TestHost;
+    #[async_trait]
+    impl HostServices for TestHost {
+        async fn chat(&self, _: &ToolCtx, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        async fn read_data(&self, _: &str) -> Result<Option<Value>> {
+            unreachable!()
+        }
+        async fn write_data(&self, _: &str, _: Value) -> Result<()> {
+            unreachable!()
+        }
+        fn log(&self, _: &str) {}
+    }
+    #[tokio::test]
+    async fn share_trigger_and_delivery_policy_follow_configuration() {
+        let ctx = ToolCtx {
+            task_id: None,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_456".into(),
+            locale: None,
+        };
+        let caps = SocialMedia
+            .start(
+                PluginContext {
+                    host: Arc::new(TestHost),
+                },
+                json!({"forward_threshold":2,"recall_source":false}),
+            )
+            .await
+            .unwrap();
+        let skill = &caps.skills[0];
+        let matched = skill
+            .match_message(&ctx, "分享文案 https://xhslink.cn/o/38fDbOA9xCs 查看原文")
+            .unwrap();
+        assert_eq!(matched["url"], "https://xhslink.cn/o/38fDbOA9xCs");
+        assert_eq!(
+            skill.delivery_policy(),
+            DeliveryPolicy {
+                recall_source: false,
+                forward_threshold: Some(2)
+            }
+        );
+        assert_eq!(
+            skill.artifact_retention(),
+            ArtifactRetention::DeleteAfterSend
+        );
+        let mut private = ctx.clone();
+        private.chat_type = "private".into();
+        assert!(skill
+            .match_message(&private, "https://xhslink.cn/o/123")
+            .is_none());
+        assert!(skill
+            .match_message(&ctx, "https://xhslink.cn.evil.test/o/123")
+            .is_none());
+        let disabled = SocialMedia
+            .start(
+                PluginContext {
+                    host: Arc::new(TestHost),
+                },
+                json!({"auto_parse":false}),
+            )
+            .await
+            .unwrap();
+        assert!(disabled.skills[0]
+            .match_message(&ctx, "https://xhslink.cn/o/123")
+            .is_none());
+    }
     #[test]
     fn rejects_unsafe_config() {
         assert!(SocialMedia
@@ -258,6 +374,12 @@ mod tests {
             .is_err());
         assert!(SocialMedia
             .validate_config(&json!({"douyin_cookie":"a\r\nb"}))
+            .is_err());
+        assert!(SocialMedia
+            .validate_config(&json!({"forward_threshold":0}))
+            .is_err());
+        assert!(SocialMedia
+            .validate_config(&json!({"forward_threshold":31}))
             .is_err());
     }
 }

@@ -6,7 +6,7 @@
       <n-layout v-else style="height: 100vh">
         <n-layout-header class="yt-header">
           <div class="yt-header-left">
-            <n-button quaternary size="small" @click="ui.toggleSider" class="yt-icon-btn" aria-label="切换导航栏">
+            <n-button quaternary size="small" @click="toggleNavigation" class="yt-icon-btn" aria-label="切换导航栏" :aria-expanded="compact ? mobileNavigation : !ui.collapsed">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                    stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <path d="M4 6h16M4 12h16M4 18h16" />
@@ -46,13 +46,13 @@
         </n-layout-header>
 
         <n-layout has-sider position="absolute" style="top: 56px">
-          <n-layout-sider class="yt-sider" :class="{ 'is-collapsed': ui.collapsed }" bordered collapse-mode="width"
+          <n-layout-sider v-if="!compact" class="yt-sider" :class="{ 'is-collapsed': ui.collapsed }" bordered collapse-mode="width"
                           :width="212" :collapsed-width="64" :collapsed="ui.collapsed" :native-scrollbar="false">
             <n-menu :options="menuOptions" :value="String($route.name)" :collapsed="ui.collapsed"
                     :collapsed-width="64" :collapsed-icon-size="18" :root-indent="16" :indent="14"
                     class="yt-nav-menu" @update:value="go" />
           </n-layout-sider>
-          <n-layout-content class="yt-main-content" :native-scrollbar="false" content-style="padding: 24px 28px;">
+          <n-layout-content class="yt-main-content" :native-scrollbar="false" :content-style="compact ? 'padding: 20px 16px;' : 'padding: 24px 28px;'">
             <router-view v-slot="{ Component }">
               <transition name="fade" mode="out-in">
                 <component :is="Component" />
@@ -61,12 +61,17 @@
           </n-layout-content>
         </n-layout>
       </n-layout>
+      <n-drawer v-if="$route.name !== 'login' && compact" v-model:show="mobileNavigation" :width="260" placement="left">
+        <n-drawer-content title="导航" closable :native-scrollbar="false" :body-content-style="{ padding: '8px' }">
+          <n-menu :options="menuOptions" :value="String($route.name)" :root-indent="16" :indent="14" @update:value="go" />
+        </n-drawer-content>
+      </n-drawer>
     </n-message-provider>
   </n-config-provider>
 </template>
 
 <script setup>
-import { computed, h, onMounted, watchEffect } from 'vue'
+import { computed, h, onMounted, onUnmounted, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { darkTheme } from 'naive-ui'
 import { useUiStore } from './store/ui'
@@ -79,6 +84,16 @@ import mascot from './assets/mascot.png'
 const ui = useUiStore()
 const route = useRoute()
 const router = useRouter()
+const compact = ref(window.innerWidth < 700)
+const mobileNavigation = ref(false)
+function resizeNavigation() {
+  compact.value = window.innerWidth < 700
+  if (!compact.value) mobileNavigation.value = false
+}
+function toggleNavigation() {
+  if (compact.value) mobileNavigation.value = !mobileNavigation.value
+  else ui.toggleSider()
+}
 
 /** @type {[string, [string, string, string][]][]} */
 const groups = [
@@ -95,7 +110,7 @@ const groups = [
   ]],
   ['模型与策略', [
     ['models', '模型服务', 'models'],
-    ['personality', '人设版本', 'personality'],
+    ['personality', '人设设置', 'personality'],
     ['params', '运行参数', 'tune'],
   ]],
   ['接入与扩展', [
@@ -110,7 +125,7 @@ const renderIcon = (icon) => () => h(YtIcon, { name: icon, size: 18 })
 
 // 折叠态下自动拍平菜单项，彻底移除分组文字标题，避免窄栏文字换行重叠
 const menuOptions = computed(() => {
-  if (ui.collapsed) {
+  if (ui.collapsed && !compact.value) {
     return groups.flatMap(([, children]) =>
       children.map(([key, l, icon]) => ({
         label: l,
@@ -133,6 +148,7 @@ const menuOptions = computed(() => {
 
 function go(key) {
   router.push({ name: key })
+  mobileNavigation.value = false
 }
 
 const adminOptions = [{ label: '退出登录', key: 'logout' }]
@@ -148,10 +164,12 @@ watchEffect(() => {
 })
 
 onMounted(async () => {
+  window.addEventListener('resize', resizeNavigation)
   ensureWs()
   try {
     const { data } = await api.get('/dashboard')
     ui.setMood(data.mood)
   } catch { /* ignore */ }
 })
+onUnmounted(() => window.removeEventListener('resize', resizeNavigation))
 </script>

@@ -34,18 +34,47 @@ async function openModels(page, { saveError = false, staleReadback = false, test
       return route.fulfill({ json: { ok: true, applied: ['LLM Provider 重建热应用'] } })
     }
     if (path === '/api/llm/test') {
-      const model = stored.roles[request.postDataJSON().role].model
+      const binding = stored.roles[request.postDataJSON().role]
+      const model = binding.model
       calls.push(`test:${model}`)
       if (testGate) await testGate
-      return route.fulfill({ json: { ok: true, model, latency_ms: 42 } })
+      return route.fulfill({ json: { ok: true, model, latency_ms: 42, reasoning_effort: binding.reasoning_effort ?? null } })
     }
     return route.fulfill({ json: {} })
   })
   await page.goto('/models')
   const card = page.locator('.role-card').filter({ has: page.getByText('bot_chat', { exact: true }) })
   await expect(card.getByRole('button', { name: '保存并测试' })).toBeEnabled()
-  return { card, calls }
+  return { card, calls, stored: () => stored }
 }
+
+test('recommended reasoning persists independently per role and is used by save and test', async ({ page }) => {
+  const { card, stored } = await openModels(page)
+  const decision = page.locator('.role-card').filter({ has: page.getByText('decision', { exact: true }) })
+  const agent = page.locator('.role-card').filter({ has: page.getByText('agent_exec', { exact: true }) })
+  await page.getByRole('button', { name: '决策 low / 回复 high' }).click()
+  await expect(decision.locator('.n-select').nth(2)).toContainText('low')
+  await expect(card.locator('.n-select').nth(2)).toContainText('high')
+  await expect(agent.locator('.n-select').nth(2)).toContainText('服务商默认')
+  await card.getByRole('button', { name: '保存并测试' }).click()
+  await expect(card.getByText('space-bunny-free · high · 42ms')).toBeVisible()
+  expect(stored().roles.decision.reasoning_effort).toBe('low')
+  expect(stored().roles.bot_chat.reasoning_effort).toBe('high')
+  expect(stored().roles.agent_exec.reasoning_effort).toBeUndefined()
+  await page.reload()
+  await expect(card.locator('.n-select').nth(2)).toContainText('high')
+  await expect(decision.locator('.n-select').nth(2)).toContainText('low')
+  await expect(page.getByText('有未保存更改')).toHaveCount(0)
+})
+
+test('reasoning-only readback mismatch prevents testing an outdated binding', async ({ page }) => {
+  const { card, calls } = await openModels(page, { staleReadback: true })
+  await page.getByRole('button', { name: '决策 low / 回复 high' }).click()
+  calls.length = 0
+  await card.getByRole('button', { name: '保存并测试' }).click()
+  await expect(card.getByText('保存后回读的模型配置不一致，请重试')).toBeVisible()
+  expect(calls).toEqual(['save', 'read'])
+})
 
 async function selectModel(page, card, model) {
   await card.locator('.n-select').nth(1).click()

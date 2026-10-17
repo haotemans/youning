@@ -66,6 +66,46 @@ async fn role(client: &dyn Transport, group: u64, user: u64) -> Result<String> {
         .map(str::to_owned)
         .context("无法核验群成员权限")
 }
+
+/// Automatic recall of a source already bound to this chat by the reply engine.
+/// The author need not be an administrator; the bot still needs live moderation rights.
+pub(crate) async fn recall_source(
+    sender: NapcatSender,
+    bot_qq: u64,
+    group: u64,
+    message_id: i64,
+    author: u64,
+) -> Result<()> {
+    recall_source_checked(&Client { sender, bot_qq }, group, message_id, author).await
+}
+
+async fn recall_source_checked(
+    client: &dyn Transport,
+    group: u64,
+    message_id: i64,
+    author: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        group > 0
+            && message_id != 0
+            && author > 0
+            && client.bot_qq() > 0
+            && author != client.bot_qq(),
+        "原消息身份无效"
+    );
+    anyhow::ensure!(
+        role(client, group, client.bot_qq()).await? != "member",
+        "机器人需要本群管理员权限才能撤回分享消息"
+    );
+    anyhow::ensure!(
+        role(client, group, author).await? == "member",
+        "不能自动撤回群主或管理员的分享消息"
+    );
+    client
+        .action("delete_msg", json!({"message_id":message_id}))
+        .await?;
+    Ok(())
+}
 async fn execute(
     client: &dyn Transport,
     db_path: &std::path::Path,

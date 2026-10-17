@@ -98,6 +98,7 @@ pub struct PolicyTrace {
 pub struct PolicyInput<'a> {
     pub is_group: bool,
     pub direct: bool,
+    pub information_lookup: bool,
     pub anchor_id: i64,
     pub visible_ids: &'a BTreeSet<i64>,
     pub linked_reply_id: Option<i64>,
@@ -112,7 +113,7 @@ fn suppress(out: &mut DecisionOutput, trace: &mut PolicyTrace, reason: &str) {
     trace.notes.push(reason.into());
 }
 
-/// 不从 ignore 强行生成 reply；语义判断也不能取代任务执行的原话入口。
+/// Validate source evidence and apply participation policy after semantic routing.
 pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut PolicyTrace) {
     let Some(a) = out.assessment.clone() else {
         return;
@@ -139,16 +140,6 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         suppress(out, trace, "当前发言面向其他成员");
         return;
     }
-    if matches!(
-        out.action,
-        DecisionAction::StartTask | DecisionAction::InvokeSkill
-    ) {
-        if a.intent != Intent::Request || a.confidence != Level::High || a.audience != Audience::Bot
-        {
-            suppress(out, trace, "参与判断不能确认这是对 Bot 的明确执行请求");
-        }
-        return;
-    }
     let linked_followup = input
         .linked_reply_id
         .is_some_and(|id| a.evidence_msg_ids.contains(&id))
@@ -159,6 +150,20 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         )
         && a.continuity == Continuity::Continuing
         && a.confidence == Level::High;
+    if matches!(
+        out.action,
+        DecisionAction::StartTask | DecisionAction::InvokeSkill
+    ) {
+        let intent_ok = a.intent == Intent::Request
+            || (input.information_lookup
+                && matches!(a.intent, Intent::Question | Intent::FollowUp));
+        if !intent_ok || a.confidence != Level::High || a.audience != Audience::Bot {
+            suppress(out, trace, "参与判断不能确认这是对 Bot 的明确执行请求");
+        } else if a.intent == Intent::FollowUp && !input.direct && !linked_followup {
+            suppress(out, trace, "技能承接缺少同一人的近期回复关联");
+        }
+        return;
+    }
     if !input.direct && a.intent == Intent::FollowUp && !linked_followup {
         suppress(out, trace, "隐式承接缺少同一人的近期回复关联");
         return;
@@ -229,6 +234,7 @@ mod tests {
         PolicyInput {
             is_group: true,
             direct: false,
+            information_lookup: false,
             anchor_id: 1,
             visible_ids: ids,
             linked_reply_id: Some(2),

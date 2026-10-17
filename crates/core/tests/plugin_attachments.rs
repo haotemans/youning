@@ -10,7 +10,7 @@ use yuantuan_core::{
     reply_engine::{ChatType, ReplyCfg, ReplyEngine, SendFn},
     state::MoodState,
 };
-use yuantuan_plugin_api::ArtifactRetention;
+use yuantuan_plugin_api::{ArtifactRetention, DeliveryPolicy};
 
 #[tokio::test]
 async fn plugin_media_uses_correct_segments_and_records_delivery_outcome() {
@@ -104,6 +104,19 @@ async fn plugin_media_uses_correct_segments_and_records_delivery_outcome() {
 
 struct TempFiles(std::path::PathBuf);
 impl TempFiles {
+    async fn source(&self, chat: &str) -> i64 {
+        use db::{params, SqliteExt};
+        let mut conn = db::connect(&self.0.join("db.sqlite")).await.unwrap();
+        db::migrate(&mut conn).await.unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO persons(person_id,first_seen,last_seen) VALUES ('p_456',1,1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,external_msg_id) VALUES (?1,'group','p_456','share link',1,-321)", params![chat]).await.unwrap();
+        conn.last_insert_rowid().await.unwrap()
+    }
     fn new() -> Self {
         // Windows clock resolution can give parallel tests the same timestamp.
         let root = std::env::temp_dir().join(format!(
@@ -130,6 +143,167 @@ impl TempFiles {
             MoodState::default(),
         )
         .spawn()
+    }
+}
+
+#[tokio::test]
+async fn media_collection_recalls_the_source_then_forwards_and_cleans_only_after_receipt() {
+    use yuantuan_core::reply_engine::SendOperation;
+    let files = TempFiles::new();
+    let anchor = files.source("42").await;
+    let paths = vec![
+        files.artifact("movie.mp4"),
+        files.artifact("one.jpg"),
+        files.artifact("two.jpg"),
+        files.artifact("three.jpg"),
+    ];
+    let requests = Arc::new(Mutex::new(vec![]));
+    let forward_started = Arc::new(tokio::sync::Notify::new());
+    let receipt = Arc::new(tokio::sync::Notify::new());
+    let send: SendFn = {
+        let requests = requests.clone();
+        let forward_started = forward_started.clone();
+        let receipt = receipt.clone();
+        let paths = paths.clone();
+        Arc::new(move |request| {
+            requests.lock().unwrap().push(request.clone());
+            let started = forward_started.clone();
+            let receipt = receipt.clone();
+            let paths = paths.clone();
+            Box::pin(async move {
+                assert!(paths.iter().all(|p| p.exists()));
+                match request.operation {
+                    SendOperation::RecallSource {
+                        message_id,
+                        sender_qq,
+                    } => {
+                        assert_eq!((message_id, sender_qq), (-321, 456));
+                        Ok(json!(null))
+                    }
+                    SendOperation::Forward => {
+                        assert_eq!(request.segments.as_array().unwrap().len(), 5);
+                        assert_eq!(request.segments[0]["data"]["content"][0]["type"], "text");
+                        assert_eq!(request.segments[1]["data"]["content"][0]["type"], "video");
+                        assert_eq!(request.segments[2]["data"]["content"][0]["type"], "image");
+                        started.notify_one();
+                        receipt.notified().await;
+                        Ok(json!({"message_id":"789","forward_id":"abc"}))
+                    }
+                    SendOperation::Message => {
+                        panic!("large collection must not send individual messages")
+                    }
+                }
+            })
+        })
+    };
+    let engine = files.engine(EventBus::new(16), send);
+    engine
+        .enqueue_plugin_result(
+            "42".into(),
+            ChatType::Group,
+            42,
+            anchor,
+            "作品标题".into(),
+            paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+            ArtifactRetention::DeleteAfterSend,
+            DeliveryPolicy {
+                recall_source: true,
+                forward_threshold: Some(4),
+            },
+        )
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), forward_started.notified())
+        .await
+        .unwrap();
+    assert!(paths.iter().all(|p| p.exists()));
+    receipt.notify_one();
+    assert!(engine.shutdown(Duration::from_secs(2)).await);
+    assert!(paths.iter().all(|p| !p.exists()));
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(matches!(
+        requests[0].operation,
+        SendOperation::RecallSource { .. }
+    ));
+    assert_eq!(requests[1].operation, SendOperation::Forward);
+}
+
+#[tokio::test]
+async fn failed_or_unconfirmed_forwards_keep_the_entire_collection() {
+    use yuantuan_core::reply_engine::SendOperation;
+    for reply in [None, Some(json!({"forward_id":"missing-message-id"}))] {
+        let files = TempFiles::new();
+        let path = files.artifact("keep.mp4");
+        let send: SendFn = Arc::new(move |request| {
+            assert_eq!(request.operation, SendOperation::Forward);
+            let reply = reply.clone();
+            Box::pin(async move { reply.ok_or_else(|| anyhow::anyhow!("forward failed")) })
+        });
+        let engine = files.engine(EventBus::new(8), send);
+        engine
+            .enqueue_plugin_result(
+                "42".into(),
+                ChatType::Group,
+                42,
+                0,
+                "title".into(),
+                vec![path.to_string_lossy().into_owned()],
+                ArtifactRetention::DeleteAfterSend,
+                DeliveryPolicy {
+                    recall_source: false,
+                    forward_threshold: Some(1),
+                },
+            )
+            .unwrap();
+        assert!(engine.shutdown(Duration::from_secs(2)).await);
+        assert!(path.exists());
+    }
+}
+
+#[tokio::test]
+async fn recall_failure_does_not_block_delivery_and_cross_chat_source_is_never_recalled() {
+    use yuantuan_core::reply_engine::SendOperation;
+    for source_chat in ["42", "43"] {
+        let files = TempFiles::new();
+        let anchor = files.source(source_chat).await;
+        let path = files.artifact("movie.mp4");
+        let operations = Arc::new(Mutex::new(vec![]));
+        let capture = operations.clone();
+        let send: SendFn = Arc::new(move |request| {
+            capture.lock().unwrap().push(request.operation);
+            Box::pin(async move {
+                if matches!(request.operation, SendOperation::RecallSource { .. }) {
+                    anyhow::bail!("no admin rights");
+                }
+                assert_eq!(request.operation, SendOperation::Message);
+                assert_eq!(request.segments[0]["type"], "video");
+                Ok(json!({"message_id":987}))
+            })
+        });
+        let engine = files.engine(EventBus::new(8), send);
+        engine
+            .enqueue_plugin_result(
+                "42".into(),
+                ChatType::Group,
+                42,
+                anchor,
+                "".into(),
+                vec![path.to_string_lossy().into_owned()],
+                ArtifactRetention::DeleteAfterSend,
+                DeliveryPolicy {
+                    recall_source: true,
+                    forward_threshold: Some(4),
+                },
+            )
+            .unwrap();
+        assert!(engine.shutdown(Duration::from_secs(2)).await);
+        assert!(!path.exists());
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), if source_chat == "42" { 2 } else { 1 });
+        assert_eq!(*ops.last().unwrap(), SendOperation::Message);
     }
 }
 impl Drop for TempFiles {
@@ -298,6 +472,111 @@ async fn cleanup_cannot_delete_files_outside_plugin_artifacts() {
                 assert!(p.note.unwrap().contains("清理失败"));
             }
             _ => panic!("missing delivery event"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn generated_image_caption_is_atomic_and_unknown_delivery_is_not_retried() {
+    use yuantuan_core::reply_engine::DeliveryUnconfirmed;
+    for outcome in [0, 1, 2] {
+        let files = TempFiles::new();
+        let anchor = files.source("42").await;
+        let path = files.artifact("generated.png");
+        let requests = Arc::new(Mutex::new(vec![]));
+        let capture = requests.clone();
+        let send: SendFn = Arc::new(move |request| {
+            let capture = capture.clone();
+            Box::pin(async move {
+                let image = request.segments[0]["type"] == "image";
+                capture.lock().unwrap().push(request.segments);
+                if image && outcome == 1 {
+                    return Err(DeliveryUnconfirmed("QQ timeout".into()).into());
+                }
+                if image && outcome == 2 {
+                    anyhow::bail!("definitive send rejection");
+                }
+                Ok(json!({"message_id":42}))
+            })
+        });
+        let engine = files.engine(EventBus::new(16), send);
+        engine
+            .enqueue_plugin_result(
+                "42".into(),
+                ChatType::Group,
+                42,
+                anchor,
+                "NAI 图片已生成 · 画师串".into(),
+                vec![path.to_string_lossy().into_owned()],
+                ArtifactRetention::Keep,
+                DeliveryPolicy::default(),
+            )
+            .unwrap();
+        assert!(engine.shutdown(Duration::from_secs(3)).await);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests[0][0]["type"], "image");
+        assert_eq!(requests[0][1]["data"]["text"], "NAI 图片已生成 · 画师串");
+        let uri = requests[0][0]["data"]["file"].as_str().unwrap();
+        assert!(uri.starts_with("file:///"));
+        assert!(
+            !uri.starts_with("file:////"),
+            "Linux file URI must have exactly three slashes"
+        );
+        assert_eq!(requests.len(), if outcome == 2 { 3 } else { 1 });
+        if outcome == 2 {
+            assert_eq!(requests[2][0]["type"], "text");
+            assert!(requests[2][0]["data"]["text"]
+                .as_str()
+                .unwrap()
+                .contains("发送失败"));
+        }
+        // Unknown delivery must not send any contradictory failure notice.
+
+        assert!(path.exists());
+    }
+}
+
+#[tokio::test]
+async fn generated_image_and_prompt_mention_requester_in_group_and_omit_private_mentions() {
+    for chat_type in [ChatType::Group, ChatType::Private] {
+        let files = TempFiles::new();
+        let path = files.artifact("generated.png");
+        let requests = Arc::new(Mutex::new(vec![]));
+        let capture = requests.clone();
+        let send: SendFn = Arc::new(move |request| {
+            capture.lock().unwrap().push(request);
+            Box::pin(async { Ok(json!({"message_id":42})) })
+        });
+        let engine = files.engine(EventBus::new(16), send);
+        engine
+            .enqueue_plugin_result_with_mention(
+                "42".into(),
+                chat_type,
+                42,
+                0,
+                "\n提示词：\nmasterpiece, adult reading, 1.2::artist:example::".into(),
+                vec![path.to_string_lossy().into_owned()],
+                ArtifactRetention::Keep,
+                DeliveryPolicy::default(),
+                Some(456),
+            )
+            .unwrap();
+        assert!(engine.shutdown(Duration::from_secs(3)).await);
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "图片和 @ 必须在同一条消息中发送");
+        let segments = requests[0].segments.as_array().unwrap();
+        assert_eq!(segments[0]["type"], "image");
+        let caption = segments.last().unwrap();
+        assert_eq!(caption["type"], "text");
+        assert_eq!(
+            caption["data"]["text"],
+            "\n提示词：\nmasterpiece, adult reading, 1.2::artist:example::"
+        );
+        if chat_type == ChatType::Group {
+            assert_eq!(segments.len(), 3);
+            assert_eq!(segments[1], json!({"type":"at","data":{"qq":"456"}}));
+        } else {
+            assert_eq!(segments.len(), 2);
         }
     }
 }

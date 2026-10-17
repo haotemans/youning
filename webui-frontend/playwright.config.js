@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests',
-  testMatch: 'models-flow.spec.js',
+  testMatch: ['models-flow.spec.js', 'plugins-flow.spec.js', 'dashboard-flow.spec.js', 'personality-flow.spec.js'],
   workers: 2,
   use: {
     baseURL: 'http://127.0.0.1:4176',

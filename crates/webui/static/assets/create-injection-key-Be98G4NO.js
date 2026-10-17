@@ -1,0 +1,1 @@
+var e=new Set;function t(t,n){let r=`[naive/${t}]: ${n}`;e.has(r)||(e.add(r),console.error(r))}function n(e,t){console.error(`[naive/${e}]: ${t}`)}function r(e,t,n){console.error(`[naive/${e}]: ${t}`,n)}function i(e,t){throw Error(`[naive/${e}]: ${t}`)}function a(e){return e}export{t as a,n as i,r as n,i as r,a as t};
