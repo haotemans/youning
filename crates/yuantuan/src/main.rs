@@ -181,7 +181,15 @@ async fn main() -> Result<()> {
     let plugins = yuantuan_core::plugins::PluginManager::load_with_moderation(
         compiled_plugins(), data_root.clone(), std::path::PathBuf::from("plugins"),
         tools_registry.clone(), skill_registry.clone(), llm_slot.clone(),
-        adapter.as_ref().map(|h| yuantuan_adapter_qq::moderation_service(h.clone(), db_path.clone())),
+        adapter.as_ref().map(|h| {
+            let super_admin = cfg.security.super_admin_qq;
+            if let Some(qq) = super_admin {
+                info!(super_admin_qq = qq, "已启用管理员分级：仅超级管理员可使用主理人");
+            } else {
+                info!("未配置超级管理员，群管理退回兼容模式（群主/管理员可用）");
+            }
+            yuantuan_adapter_qq::moderation_service(h.clone(), db_path.clone(), super_admin)
+        }),
     ).await?;
     plugins.subscribe(&bus).await;
 

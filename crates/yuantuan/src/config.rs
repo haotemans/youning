@@ -21,6 +21,8 @@ pub struct Config {
     pub mcp: yuantuan_core::mcp::McpConfig,
     pub pipeline: PipelineSection,
     pub sandbox: yuantuan_core::tools::sandbox::SandboxConfig,
+    /// 安全/权限分级
+    pub security: SecurityConfig,
 }
 
 /// [pipeline] 消息管线调优参数（G008 裁决：可调非设计裁决，走热应用）
@@ -92,6 +94,7 @@ impl Default for Config {
             mcp: yuantuan_core::mcp::McpConfig::default(),
             pipeline: PipelineSection::default(),
             sandbox: yuantuan_core::tools::sandbox::SandboxConfig::default(),
+            security: SecurityConfig::default(),
         }
     }
 }
@@ -268,6 +271,33 @@ impl Default for LogConfig {
     }
 }
 
+/// [security] 权限分级配置
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SecurityConfig {
+    /// 超级管理员 QQ（bot 主人）。配置后，只有该 QQ 号能执行群管理（主理人）操作；
+    /// 群主 / 群管理员不再拥有主理人权限。0 / 留空则退回原兼容模式（群主/管理员可用）。
+    #[serde(deserialize_with = "de_opt_u64_nonzero")]
+    pub super_admin_qq: Option<u64>,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            super_admin_qq: None,
+        }
+    }
+}
+
+/// 反序列化：0 / null 视为 None（未配置）；非零视为 Some(qq)
+fn de_opt_u64_nonzero<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<u64>::deserialize(deserializer)?;
+    Ok(opt.filter(|v| *v > 0))
+}
+
 const DEFAULT_TEMPLATE: &str = r#"# 云团主配置
 # 运行数据全部落在 [data].dir 下（见 docs/reference/data-model.md 第一章）
 
@@ -354,6 +384,12 @@ pat_env = "YUANTUAN_BACKUP_PAT"
 daily_time = "03:00"
 # 本地 backups/ 保留天数（>0；超期文件启动新备份时删除）
 keep_days = 7
+
+[security]
+# 超级管理员 QQ（bot 主人）：只有该 QQ 能执行群管理（主理人 / 撤回 / 禁言）操作；
+# 群主 / 群管理员不再拥有主理人权限，防止越权访问 / 信息泄露。
+# 去掉该行或留空则退回原兼容模式：群主 / 群管理员仍可使用主理人。
+super_admin_qq = 0
 
 [sandbox]
 # Linux Docker 开发沙箱；先按 docs/reference/agent-sandbox.md 构建镜像并接通 Docker。

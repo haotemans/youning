@@ -7,12 +7,22 @@ use std::{path::PathBuf, sync::Arc};
 use yuantuan_core::db::{self, params, OptionalExtension, SqliteExt};
 use yuantuan_plugin_api::{GroupModeration, ModerationAction, ToolCtx};
 
-pub fn moderation_service(handle: AdapterHandle, db: PathBuf) -> Arc<dyn GroupModeration> {
-    Arc::new(Service { handle, db })
+pub fn moderation_service(
+    handle: AdapterHandle,
+    db: PathBuf,
+    super_admin_qq: Option<u64>,
+) -> Arc<dyn GroupModeration> {
+    Arc::new(Service {
+        handle,
+        db,
+        super_admin_qq,
+    })
 }
 struct Service {
     handle: AdapterHandle,
     db: PathBuf,
+    /// 超级管理员 QQ（bot 主人），配置后仅可由此 QQ 发起管理操作
+    super_admin_qq: Option<u64>,
 }
 #[async_trait]
 impl GroupModeration for Service {
@@ -23,7 +33,14 @@ impl GroupModeration for Service {
             .await
             .context("QQ 适配器当前未连接 NapCat")?;
         let bot_qq = self.handle.self_qq();
-        let result = execute(&Client { sender, bot_qq }, &self.db, ctx, action.clone()).await;
+        let result = execute(
+            &Client { sender, bot_qq },
+            &self.db,
+            ctx,
+            action.clone(),
+            self.super_admin_qq,
+        )
+        .await;
         tracing::info!(chat_id=%ctx.chat_id, operator=%ctx.sender_pid, action=?action, success=result.is_ok(), "群管理操作");
         result
     }
@@ -111,6 +128,7 @@ async fn execute(
     db_path: &std::path::Path,
     ctx: &ToolCtx,
     action: ModerationAction,
+    super_admin_qq: Option<u64>,
 ) -> Result<()> {
     if ctx.chat_type != "group" {
         bail!("群管理仅支持当前群聊");
@@ -131,10 +149,22 @@ async fn execute(
     if bot == 0 || actor == bot {
         bail!("机器人身份未就绪或不能执行自身发出的管理命令");
     }
-    // Never trust model slots or a message claiming to be an administrator.
-    if role(client, group, actor).await? == "member" {
-        bail!("仅本群群主或管理员可以使用主理人");
+    // 管理员分级：配置了 super_admin_qq 后，只有该 QQ 能执行群管理操作；
+    // 群主 / 群管理员不再拥有主理人权限（防止信息泄露 / 越权管理）。
+    if let Some(super_admin) = super_admin_qq {
+        if actor != super_admin {
+            bail!("仅云团超级管理员可以使用主理人");
+        }
+    } else {
+        // 兼容模式：未配置超级管理员时，保留原有群管理员/群主权限
+        // Never trust model slots or a message claiming to be an administrator.
+        if role(client, group, actor).await? == "member" {
+            bail!("仅本群群主或管理员可以使用主理人");
+        }
     }
+
+    // 超级管理员自身不再要求其在群内拥有管理员身份；
+    // 但目标不能是群主 / 管理员（bot 本身的管理权限仍然受 QQ 角色限制）。
     let (target, message) = match action {
         ModerationAction::Ban {
             user_id,

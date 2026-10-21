@@ -26,6 +26,11 @@ self_msg_ids_cap = 512
 self_msg_cap = 12
 window_secs = 60
 
+[security]
+# 超级管理员 QQ（bot 主人）：只有该 QQ 能执行群管理（主理人 / 撤回 / 禁言）操作；
+# 群主 / 群管理员不再拥有主理人权限。0 或删除该行退回原兼容模式。
+super_admin_qq = 3827429173
+
 [webui]
 host = "127.0.0.1"
 port = 8085
