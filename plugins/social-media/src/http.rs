@@ -9,6 +9,11 @@ use tokio::io::AsyncWriteExt;
 use url::Url;
 
 pub const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 Version/16.6 Mobile/15E148 Safari/604.1";
+/// Douyin's anti-bot tier trusts desktop-browser head requests more than mobile ones.
+/// Empirically, `iesdouyin.com/share/...` returns the hydration payload instead of a
+/// login redirect when the call looks like a recent desktop Chrome. The bilibili UA
+/// stays untouched because B站 blocks mobile-looking callers on some endpoints.
+const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 pub struct Http {
     pub cookies: Vec<(String, String)>,
     pub public_dns: bool,
@@ -43,6 +48,19 @@ pub fn public_ip(ip: IpAddr) -> bool {
 }
 impl Http {
     pub async fn get(&self, url: &str, referer: &str) -> Result<(Url, Response)> {
+        let (trace, response) = self.get_trace(url, referer).await?;
+        let url = trace
+            .last()
+            .cloned()
+            .context("分享链接重定向链为空")?;
+        Ok((url, response))
+    }
+    /// Follow redirects like `get` but also return every URL visited, in order
+    /// (initial request first, final landing last). Needed when a share link is
+    /// bounced to a login landing page and the work id only survives on an
+    /// intermediate `Location` header.
+    pub async fn get_trace(&self, url: &str, referer: &str) -> Result<(Vec<Url>, Response)> {
+        let mut trace = Vec::new();
         let mut url = Url::parse(url).context("无效的链接")?;
         for _ in 0..8 {
             if !matches!(url.scheme(), "https" | "http")
@@ -55,6 +73,9 @@ impl Http {
             let port = url.port_or_known_default().context("链接端口无效")?;
             if port != 80 && port != 443 {
                 bail!("不支持该链接端口");
+            }
+            if trace.last() != Some(&url) {
+                trace.push(url.clone());
             }
             let mut addresses: Vec<_> = tokio::net::lookup_host((host, port))
                 .await
@@ -111,9 +132,20 @@ impl Http {
                 .resolve_to_addrs(host, &addresses)
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(90))
-                .user_agent(if domain(host, "bilibili.com") { "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36" } else { UA })
+                .user_agent(if domain(host, "bilibili.com") || domain(host, "douyin.com") || domain(host, "iesdouyin.com") { DESKTOP_UA } else { UA })
                 .build()?;
             let mut request = client.get(url.clone()).header(header::REFERER, referer);
+            if domain(host, "douyin.com") || domain(host, "iesdouyin.com") {
+                // Without these, Douyin's edge returns a 302 to /login even for public works.
+                request = request
+                    .header(header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                    .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+                    .header("sec-fetch-dest", "document")
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-site", "none")
+                    .header("sec-fetch-user", "?1")
+                    .header("upgrade-insecure-requests", "1");
+            }
             if let Some((_, cookie)) = self
                 .cookies
                 .iter()
@@ -140,7 +172,7 @@ impl Http {
                     response.status().as_u16()
                 );
             }
-            return Ok((url, response));
+            return Ok((trace, response));
         }
         bail!("分享链接重定向次数过多")
     }

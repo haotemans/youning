@@ -6,3 +6,5 @@ webui-frontend/dist/
 webui-frontend/test-results/
 webui-frontend/playwright-report/
 yuantuan.exe*
+
+.acl-recovery/

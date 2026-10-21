@@ -315,25 +315,46 @@ fn douyin_id(url: &Url) -> Result<String> {
 pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
     let mut url = share_url(input)?;
     let site = platform(&url)?;
+    let mut short_link_trace: Vec<Url> = Vec::new();
     if matches!(url.host_str(), Some("b23.tv" | "v.douyin.com" | "t.co"))
         || url
             .host_str()
             .is_some_and(|h| domain(h, "xhslink.com") || domain(h, "xhslink.cn"))
     {
-        let (resolved, _) = http
-            .get(url.as_str(), &url.origin().ascii_serialization())
+        let (trace, _) = http
+            .get_trace(url.as_str(), &url.origin().ascii_serialization())
             .await?;
+        let resolved = trace
+            .last()
+            .cloned()
+            .context("短链跳转失败")?;
         if platform(&resolved)? != site {
             bail!("分享链接跳转到了其他平台");
         }
+        short_link_trace = trace;
         url = resolved;
     }
     let source = url.to_string();
     let post = match site {
         Platform::Bilibili => bilibili(http, &url).await?,
         Platform::Douyin => {
-            let id = douyin_id(&url)?;
-            let kind = if url.path().contains("/note/") {
+            // When a short link is bounced to the login landing page, the final URL
+            // has no aweme_id but an intermediate redirect usually still carries one.
+            // Walk the whole trace instead of only the final hop.
+            let id = douyin_id(&url).or_else(|_| {
+                short_link_trace
+                    .iter()
+                    .rev()
+                    .find_map(|u| douyin_id(u).ok())
+                    .context(
+                        "抖音短链未带来作品 ID，可能已跳转登录；在插件设置中填入 douyin_cookie 后重试",
+                    )
+            })?;
+            let kind = if url.path().contains("/note/")
+                || short_link_trace
+                    .iter()
+                    .any(|u| u.path().contains("/note/"))
+            {
                 "note"
             } else {
                 "video"
@@ -519,6 +540,59 @@ mod tests {
         .unwrap();
         assert!(s["a"].is_null());
         assert!(s["s"].as_str().unwrap().contains("undefined"));
+    }
+    #[test]
+    fn douyin_short_link_trace_recovers_aweme_id_from_middle_hops() {
+        // Simulate: short link bounced to login landing page, but an intermediate
+        // redirect still carries the real aweme_id.
+        let middle =
+            Url::parse("https://www.iesdouyin.com/share/video/7562505066105449738/?region=CN")
+                .unwrap();
+        let login = Url::parse("https://www.douyin.com/login?enter_from=share").unwrap();
+        // Final hop carries nothing.
+        assert!(douyin_id(&login).is_err());
+        // Middle hop yields the id; that's the recovery path we want to exercise.
+        assert_eq!(douyin_id(&middle).unwrap(), "7562505066105449738");
+        // And the simulation of the trace scan used in resolve():
+        let trace = vec![middle.clone(), login.clone()];
+        let final_id = douyin_id(trace.last().unwrap());
+        let recovered = final_id.or_else(|_| {
+            trace
+                .iter()
+                .rev()
+                .find_map(|u| douyin_id(u).ok())
+                .context("抖音短链未带来作品 ID")
+        });
+        assert_eq!(recovered.unwrap(), "7562505066105449738");
+        // A clean trace with no usable id anywhere aborts loudly.
+        let clean: Vec<Url> = vec![login.clone()];
+        let recovered = douyin_id(clean.last().unwrap()).or_else(|_| {
+            clean
+                .iter()
+                .rev()
+                .find_map(|u| douyin_id(u).ok())
+                .context("抖音短链未带来作品 ID")
+        });
+        assert!(recovered.is_err());
+    }
+    #[test]
+    fn douyin_id_skips_path_segments_that_look_like_ids_but_arent() {
+        // Login landing paths must not be confused with an aweme_id.
+        assert!(douyin_id(&Url::parse("https://www.douyin.com/login").unwrap()).is_err());
+        assert!(douyin_id(&Url::parse("https://www.douyin.com/").unwrap()).is_err());
+        // Legitimate long path on douyin.com still works.
+        assert_eq!(
+            douyin_id(&Url::parse("https://www.douyin.com/video/12345678901").unwrap()).unwrap(),
+            "12345678901"
+        );
+        // Query-string aweme_id on an iesdouyin share URL also works.
+        assert_eq!(
+            douyin_id(
+                &Url::parse("https://www.iesdouyin.com/share/video/?aweme_id=12345678901").unwrap()
+            )
+            .unwrap(),
+            "12345678901"
+        );
     }
     #[test]
     fn parses_douyin_video_and_gallery() {
