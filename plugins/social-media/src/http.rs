@@ -9,11 +9,9 @@ use tokio::io::AsyncWriteExt;
 use url::Url;
 
 pub const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 Version/16.6 Mobile/15E148 Safari/604.1";
-/// Douyin's anti-bot tier trusts desktop-browser head requests more than mobile ones.
-/// Empirically, `iesdouyin.com/share/...` returns the hydration payload instead of a
-/// login redirect when the call looks like a recent desktop Chrome. The bilibili UA
-/// stays untouched because B站 blocks mobile-looking callers on some endpoints.
-const DESKTOP_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+/// Desktop Edge UA. Single source of truth is `crate::douyin::DESKTOP_UA`, kept
+/// in sync so the a_bogus signature covers the exact bytes users see.
+const DESKTOP_UA: &str = crate::douyin::DESKTOP_UA;
 pub struct Http {
     pub cookies: Vec<(String, String)>,
     pub public_dns: bool,

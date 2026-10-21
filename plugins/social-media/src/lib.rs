@@ -1,5 +1,4 @@
 //! Public share-link media plugin. No third-party parser service or Python runtime.
-mod abogus;
 mod abogus_johnserf;
 mod douyin;
 mod http;
