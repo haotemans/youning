@@ -235,8 +235,13 @@ pub async fn fetch_detail_with_session(
 }
 
 /// Pick a best playable MP4 URL out of `aweme_detail.video`.
-/// Prefers `play_addr.url_list[*]` (HTTPS, no auth, available on most works),
-/// falls back to `bit_rate[*].play_addr.url_list[*]` for higher-quality tiers.
+///
+/// `play_addr.url_list` carries 2–3 mirror URLs: a direct CDN host, an
+/// alternate CDN host, and a `douyin.com/aweme/v1/play/` dispatcher. The
+/// direct-CDN ones come with an IP-bound signature that fails with
+/// `deny by url auth` when the request originates from an IDC box that does
+/// not match the IP the URL was signed for. The dispatcher re-signs per
+/// request and works from anywhere, so prefer it.
 pub fn video_play_urls(item: &Value) -> Vec<String> {
     let mut urls: Vec<String> = Vec::new();
     if let Some(arr) = item.pointer("/video/play_addr/url_list").and_then(Value::as_array) {
@@ -269,6 +274,15 @@ pub fn video_play_urls(item: &Value) -> Vec<String> {
             }
         }
     }
+    urls.sort_by_key(|u| {
+        if u.contains("douyin.com/aweme/v1/play/") {
+            0
+        } else if u.contains("douyin.com") {
+            1
+        } else {
+            2
+        }
+    });
     urls
 }
 
@@ -308,5 +322,24 @@ mod tests {
             video_play_urls(&item),
             vec!["https://cdn.test/a.mp4".to_string(), "https://cdn.test/b.mp4".to_string()]
         );
+    }
+
+    #[test]
+    fn video_urls_prefer_douyin_dispatcher_over_direct_cdn() {
+        // Live capture: zjcdn.com direct URL fails with `deny by url auth`
+        // from an IDC IP, douyin.com/aweme/v1/play/ succeeds. The sort must
+        // put the dispatcher first.
+        let item = serde_json::json!({
+            "video": {
+                "play_addr": { "url_list": [
+                    "https://v5-dy-ov-experiment.zjcdn.com/abc/sign=auth-bound",
+                    "https://v5-hl-zenl-ov.zjcdn.com/abc/sign=auth-bound",
+                    "https://www.douyin.com/aweme/v1/play/?video_id=v1&sign=real"
+                ] }
+            }
+        });
+        let urls = video_play_urls(&item);
+        assert_eq!(urls.len(), 3);
+        assert!(urls[0].contains("douyin.com/aweme/v1/play/"));
     }
 }

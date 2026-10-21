@@ -185,8 +185,12 @@ pub fn douyin_from_detail(item: &Value, source: String) -> Result<Post> {
             );
         }
     } else {
-        let urls = crate::douyin::video_play_urls(item);
-        for url in urls {
+        // Douyin returns 2–3 mirror URLs for the same clip (origin + CDN + play
+        // dispatcher) — they all carry the same bytes. Treat them as a primary
+        // and let the first failure abort, instead of downloading the same
+        // video three times (and doubling the bandwidth, which is also what
+        // makes Argus angry on the third mirror).
+        if let Some(url) = crate::douyin::video_play_urls(item).into_iter().next() {
             push(&mut media, Some(url), true);
         }
     }
@@ -637,6 +641,8 @@ mod tests {
     }
     #[test]
     fn parses_douyin_aweme_detail_video() {
+        // Mirror URLs for the same clip collapse to one media entry; the best
+        // (douyin dispatcher) is picked by video_play_urls ordering.
         let item = serde_json::json!({
             "desc": "demo video",
             "video": {
@@ -646,7 +652,7 @@ mod tests {
             }
         });
         let post = douyin_from_detail(&item, "https://www.douyin.com/video/1".into()).unwrap();
-        assert_eq!(post.media.len(), 2);
+        assert_eq!(post.media.len(), 1);
         assert!(post.media[0].video);
         assert_eq!(post.title, "demo video");
     }
