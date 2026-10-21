@@ -170,6 +170,33 @@ pub fn douyin(data: &Value, source: String) -> Result<Post> {
         media,
     })
 }
+/// Map `aweme/v1/web/aweme/detail/`'s `aweme_detail` JSON onto a Post.
+/// Mirrors `douyin()`'s selection rules but reads the richer web-API shape:
+/// images live at `images[*].url_list`, video at `video.play_addr.url_list`
+/// (falling back to `video.bit_rate[*].play_addr.url_list`).
+pub fn douyin_from_detail(item: &Value, source: String) -> Result<Post> {
+    let mut media = vec![];
+    if let Some(images) = item["images"].as_array().filter(|a| !a.is_empty()) {
+        for image in images {
+            push(
+                &mut media,
+                first_url(&image["url_list"]).or_else(|| first_url(&image["download_url_list"])),
+                false,
+            );
+        }
+    } else {
+        let urls = crate::douyin::video_play_urls(item);
+        for url in urls {
+            push(&mut media, Some(url), true);
+        }
+    }
+    Ok(Post {
+        platform: Platform::Douyin,
+        title: text(item, "desc"),
+        source,
+        media,
+    })
+}
 pub fn xiaohongshu(data: &Value, source: String) -> Result<Post> {
     let map = data
         .pointer("/note/noteDetailMap")
@@ -359,17 +386,29 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
             } else {
                 "video"
             };
-            let (_, html) = http
-                .text(
-                    &format!("https://www.iesdouyin.com/share/{kind}/{id}/"),
-                    "https://www.douyin.com/",
-                )
-                .await?;
-            // Match the original work ID even if the short link resolves to a generic landing page.
-            douyin(
-                &state(&html, "window._ROUTER_DATA")?,
-                format!("https://www.douyin.com/{kind}/{id}"),
-            )?
+            let source = format!("https://www.douyin.com/{kind}/{id}");
+            // Preferred path: Douyin's own web API signed with a_bogus. It returns
+            // structured JSON without needing a cookie or running the bdms VM.
+            match crate::douyin::fetch_detail(http, &id).await {
+                Ok(item) => douyin_from_detail(&item, source)?,
+                Err(api_error) => {
+                    // Fallback: legacy share-page scrape. Hits the bdms challenge
+                    // on anonymous calls from IDC IPs, but still works when the
+                    // operator configures douyin_cookie.
+                    match http
+                        .text(
+                            &format!("https://www.iesdouyin.com/share/{kind}/{id}/"),
+                            "https://www.douyin.com/",
+                        )
+                        .await
+                    {
+                        Ok((_, html)) => douyin(&state(&html, "window._ROUTER_DATA")?, source)?,
+                        Err(page_error) => bail!(
+                            "抖音接口失败：{api_error};分享页回退也失败：{page_error}"
+                        ),
+                    }
+                }
+            }
         }
         Platform::Xiaohongshu => {
             let (_, html) = http
@@ -483,6 +522,8 @@ async fn bilibili(http: &Http, url: &Url) -> Result<Post> {
 mod tests {
     use super::*;
     use serde_json::json;
+    // make serde_json::json! unqualified so the new tests can write
+    // serde_json::json! explicitly (existing tests use json! via this import).
     #[test]
     fn rejects_recommended_posts_instead_of_downloading_wrong_work() {
         let xhs = json!({"note":{"noteDetailMap":{"other":{"note":{"type":"normal","imageList":[{"urlDefault":"https://cdn.test/other.jpg"}]}}}}});
@@ -593,6 +634,50 @@ mod tests {
             .unwrap(),
             "12345678901"
         );
+    }
+    #[test]
+    fn parses_douyin_aweme_detail_video() {
+        let item = serde_json::json!({
+            "desc": "demo video",
+            "video": {
+                "play_addr": {
+                    "url_list": ["https://cdn.test/low.mp4", "https://cdn.test/high.mp4"]
+                }
+            }
+        });
+        let post = douyin_from_detail(&item, "https://www.douyin.com/video/1".into()).unwrap();
+        assert_eq!(post.media.len(), 2);
+        assert!(post.media[0].video);
+        assert_eq!(post.title, "demo video");
+    }
+    #[test]
+    fn parses_douyin_aweme_detail_gallery() {
+        let item = serde_json::json!({
+            "desc": "gallery",
+            "images": [
+                {"url_list": ["https://cdn.test/1.jpg"]},
+                {"url_list": ["https://cdn.test/2.jpg"]}
+            ],
+            "video": {
+                "play_addr": { "url_list": ["https://cdn.test/cover.mp4"] }
+            }
+        });
+        let post = douyin_from_detail(&item, "https://www.douyin.com/note/1".into()).unwrap();
+        assert_eq!(post.media.len(), 2);
+        assert!(!post.media.iter().any(|m| m.video));
+    }
+    #[test]
+    fn parses_douyin_aweme_detail_bitrate_fallback() {
+        let item = serde_json::json!({
+            "video": {
+                "bit_rate": [
+                    { "play_addr": { "url_list": ["https://cdn.test/clear.mp4"] } }
+                ]
+            }
+        });
+        let post = douyin_from_detail(&item, "https://www.douyin.com/video/1".into()).unwrap();
+        assert_eq!(post.media.len(), 1);
+        assert_eq!(post.media[0].url, "https://cdn.test/clear.mp4");
     }
     #[test]
     fn parses_douyin_video_and_gallery() {

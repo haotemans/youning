@@ -136,15 +136,25 @@ impl Http {
                 .build()?;
             let mut request = client.get(url.clone()).header(header::REFERER, referer);
             if domain(host, "douyin.com") || domain(host, "iesdouyin.com") {
-                // Without these, Douyin's edge returns a 302 to /login even for public works.
-                request = request
-                    .header(header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
-                    .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
-                    .header("sec-fetch-dest", "document")
-                    .header("sec-fetch-mode", "navigate")
-                    .header("sec-fetch-site", "none")
-                    .header("sec-fetch-user", "?1")
-                    .header("upgrade-insecure-requests", "1");
+                // JSON API endpoints look very different from page navigation to
+                // Douyin's edge. Pick the right header set by path.
+                if url.path().starts_with("/aweme/v1/") {
+                    request = request
+                        .header(header::ACCEPT, "application/json, text/plain, */*")
+                        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+                        .header("sec-fetch-dest", "empty")
+                        .header("sec-fetch-mode", "cors")
+                        .header("sec-fetch-site", "same-origin");
+                } else {
+                    request = request
+                        .header(header::ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
+                        .header(header::ACCEPT_LANGUAGE, "zh-CN,zh;q=0.9")
+                        .header("sec-fetch-dest", "document")
+                        .header("sec-fetch-mode", "navigate")
+                        .header("sec-fetch-site", "none")
+                        .header("sec-fetch-user", "?1")
+                        .header("upgrade-insecure-requests", "1");
+                }
             }
             if let Some((_, cookie)) = self
                 .cookies
