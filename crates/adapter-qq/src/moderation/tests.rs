@@ -133,7 +133,7 @@ async fn sends_exact_ban_unban_and_recall_only_after_live_checks() {
         },
         ModerationAction::Recall { message_id: -321 },
     ] {
-        execute(&fake, &db.0, &ctx(), action).await.unwrap();
+        execute(&fake, &db.0, &ctx(), action, None).await.unwrap();
     }
     assert_eq!(
         fake.writes(),
@@ -159,11 +159,11 @@ async fn rejects_ordinary_actors_bot_without_permission_and_privileged_targets()
     };
     let mut fake = Fake::new();
     fake.roles.insert(123, "member");
-    assert!(execute(&fake, &db.0, &ctx(), action.clone()).await.is_err());
+    assert!(execute(&fake, &db.0, &ctx(), action.clone(), None).await.is_err());
     assert!(fake.writes().is_empty());
     let mut fake = Fake::new();
     fake.roles.insert(100, "member");
-    assert!(execute(&fake, &db.0, &ctx(), action).await.is_err());
+    assert!(execute(&fake, &db.0, &ctx(), action, None).await.is_err());
     assert!(fake.writes().is_empty());
     let fake = Fake::new();
     for user in [100, 123, 789, 999] {
@@ -174,7 +174,8 @@ async fn rejects_ordinary_actors_bot_without_permission_and_privileged_targets()
             ModerationAction::Ban {
                 user_id: user,
                 duration_secs: 60
-            }
+            },
+            None,
         )
         .await
         .is_err());
@@ -183,7 +184,8 @@ async fn rejects_ordinary_actors_bot_without_permission_and_privileged_targets()
         &fake,
         &db.0,
         &ctx(),
-        ModerationAction::Recall { message_id: 324 }
+        ModerationAction::Recall { message_id: 324 },
+        None,
     )
     .await
     .is_err());
@@ -198,7 +200,8 @@ async fn refuses_cross_group_unknown_messages_private_context_and_spoofed_roles(
             &fake,
             &db.0,
             &ctx(),
-            ModerationAction::Recall { message_id: id }
+            ModerationAction::Recall { message_id: id },
+            None,
         )
         .await
         .is_err());
@@ -209,7 +212,8 @@ async fn refuses_cross_group_unknown_messages_private_context_and_spoofed_roles(
         &fake,
         &db.0,
         &private,
-        ModerationAction::Recall { message_id: -321 }
+        ModerationAction::Recall { message_id: -321 },
+        None,
     )
     .await
     .is_err());
@@ -223,7 +227,8 @@ async fn refuses_cross_group_unknown_messages_private_context_and_spoofed_roles(
         ModerationAction::Ban {
             user_id: 456,
             duration_secs: 60
-        }
+        },
+        None,
     )
     .await
     .is_err());
@@ -239,6 +244,7 @@ async fn can_recall_own_message_without_bot_admin_and_surfaces_action_failure() 
         &db.0,
         &ctx(),
         ModerationAction::Recall { message_id: 323 },
+        None,
     )
     .await
     .unwrap();
@@ -255,7 +261,8 @@ async fn can_recall_own_message_without_bot_admin_and_surfaces_action_failure() 
         ModerationAction::Ban {
             user_id: 456,
             duration_secs: 60
-        }
+        },
+        None,
     )
     .await
     .unwrap_err()
