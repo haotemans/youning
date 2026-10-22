@@ -72,8 +72,9 @@ async fn mock_llm_decision_meme(listener: TcpListener) {
             Err(_) => return,
         };
         tokio::spawn(async move {
-            let mut buf = vec![0u8; 8192];
-            let _ = s.read(&mut buf).await;
+            // Drain the request body before closing the socket; otherwise Windows
+            // can reset the connection and discard the mock response.
+            read_request(&mut s).await.unwrap();
             let content = json!({
                 "action": "send_meme", "mood": "happy", "mention": false, "reply_len": "short",
                 "meme_type": "开心", "task_goal": null, "memory_write": null, "reason": "开心一下"
@@ -89,6 +90,28 @@ async fn mock_llm_decision_meme(listener: TcpListener) {
             );
             let _ = s.write_all(resp.as_bytes()).await;
         });
+    }
+}
+
+async fn read_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<()> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 { return Ok(()); }
+        buffer.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
+            let length = headers.lines().find_map(|line|
+                line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok())
+            ).unwrap_or(0);
+            while buffer.len() - (end + 4) < length {
+                let n = stream.read(&mut chunk).await?;
+                if n == 0 { break; }
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            return Ok(());
+        }
     }
 }
 

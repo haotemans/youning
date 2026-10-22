@@ -53,7 +53,9 @@ jobs:
           npm run build
 
       - name: 全量测试（mock WS/LLM、SQLx 存储，不依赖外部服务）
-        run: cargo test --locked --workspace
+        run: |
+          cargo test --locked -p yuantuan-webui --test memes_api
+          cargo test --locked --workspace
 
       - name: musl release 构建
         run: cargo build --locked --release --target x86_64-unknown-linux-musl -p yuantuan
@@ -89,7 +91,9 @@ jobs:
           npm run build
 
       - name: 全量测试
-        run: cargo test --locked --workspace
+        run: |
+          cargo test --locked -p yuantuan-webui --test memes_api
+          cargo test --locked --workspace
 
       - name: MSVC release 构建
         run: cargo build --locked --release --target x86_64-pc-windows-msvc -p yuantuan
