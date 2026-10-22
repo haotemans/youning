@@ -6,7 +6,7 @@ use sqlx::Row;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use yuantuan_core::consolidation::{run_once, ConsolidationCfg, ConsolidationDeps};
@@ -105,6 +105,20 @@ async fn seed_fixture(db_path: &PathBuf) {
     }
 }
 
+async fn wait_for_done(db_path: &PathBuf, expected: i64) {
+    let mut conn = db::connect(db_path).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let done: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'",
+            yuantuan_core::db::params![], |row| row.try_get(0),
+        ).await.unwrap();
+        if done >= expected { return; }
+        assert!(Instant::now() < deadline, "tracer did not persist ConsolidationDone");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn consolidation_end_to_end() {
     let dir = temp_dir("consolidation");
@@ -155,7 +169,7 @@ async fn consolidation_end_to_end() {
     };
 
     run_once(&deps).await;
-    tokio::time::sleep(Duration::from_millis(100)).await; // tracer 落库
+    wait_for_done(&db_path, 1).await;
 
     let mut conn = db::connect(&db_path).await.unwrap();
     let profiles: Vec<(String, String)> = conn
@@ -295,7 +309,7 @@ async fn consolidation_end_to_end() {
         count("SELECT COUNT(*) FROM events").await,
     ];
     run_once(&deps).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_done(&db_path, 2).await;
     let after = [
         count("SELECT COUNT(*) FROM summaries").await,
         count("SELECT COUNT(*) FROM long_memories").await,

@@ -1366,9 +1366,12 @@ mod tests {
         .spawn();
         engine.enqueue(make_job());
         engine.enqueue(make_job());
-        assert!(engine.shutdown(Duration::from_secs(2)).await);
+        // Allow SQLite worker scheduling on a loaded Windows runner; this
+        // assertion verifies draining, not a two-second performance budget.
+        assert!(engine.shutdown(Duration::from_secs(15)).await);
         assert_eq!(sent.load(Ordering::SeqCst), 2);
         let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         struct OnDrop(Option<tokio::sync::oneshot::Sender<()>>);
         impl Drop for OnDrop {
             fn drop(&mut self) {
@@ -1378,8 +1381,12 @@ mod tests {
             }
         }
         let sender = Arc::new(std::sync::Mutex::new(Some(dropped_tx)));
+        let started = Arc::new(std::sync::Mutex::new(Some(started_tx)));
         let stalled: SendFn = Arc::new(move |_| {
             let guard = OnDrop(sender.lock().unwrap().take());
+            if let Some(tx) = started.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
             Box::pin(async move {
                 let _guard = guard;
                 std::future::pending().await
@@ -1395,6 +1402,10 @@ mod tests {
         )
         .spawn();
         engine.enqueue(make_job());
+        tokio::time::timeout(Duration::from_secs(15), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(!engine.shutdown(Duration::from_millis(100)).await);
         tokio::time::timeout(Duration::from_secs(1), dropped_rx)
             .await

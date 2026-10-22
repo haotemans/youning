@@ -7,6 +7,24 @@ on:
   pull_request:
 
 jobs:
+  meme-gallery-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webui-frontend/package-lock.json
+      - name: Install frontend and browser
+        working-directory: webui-frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Meme gallery browser tests
+        working-directory: webui-frontend
+        run: npm run test:memes
+
   build-linux:
     runs-on: ubuntu-latest
     steps:
@@ -35,7 +53,9 @@ jobs:
           npm run build
 
       - name: 全量测试（mock WS/LLM、SQLx 存储，不依赖外部服务）
-        run: cargo test --locked --workspace
+        run: |
+          cargo test --locked -p yuantuan-webui --test memes_api
+          cargo test --locked --workspace
 
       - name: musl release 构建
         run: cargo build --locked --release --target x86_64-unknown-linux-musl -p yuantuan
@@ -71,7 +91,9 @@ jobs:
           npm run build
 
       - name: 全量测试
-        run: cargo test --locked --workspace
+        run: |
+          cargo test --locked -p yuantuan-webui --test memes_api
+          cargo test --locked --workspace
 
       - name: MSVC release 构建
         run: cargo build --locked --release --target x86_64-pc-windows-msvc -p yuantuan
