@@ -7,6 +7,24 @@ on:
   pull_request:
 
 jobs:
+  meme-gallery-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: webui-frontend/package-lock.json
+      - name: Install frontend and browser
+        working-directory: webui-frontend
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Meme gallery browser tests
+        working-directory: webui-frontend
+        run: npm run test:memes
+
   build-linux:
     runs-on: ubuntu-latest
     steps:
