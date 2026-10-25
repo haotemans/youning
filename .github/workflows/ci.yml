@@ -24,6 +24,9 @@ jobs:
       - name: Meme gallery browser tests
         working-directory: webui-frontend
         run: npm run test:memes
+      - name: Relationship graph browser tests
+        working-directory: webui-frontend
+        run: npm run test:relations
 
   build-linux:
     runs-on: ubuntu-latest
