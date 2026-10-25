@@ -74,6 +74,28 @@ test('successful remote avatars progressively replace local placeholders', async
   expect(errors).toEqual([])
 })
 
+test('emoji and supplementary Unicode nicknames do not break avatar encoding', async ({ page }) => {
+  const graph = {
+    nodes: [
+      { id: 'self', name: '云团' },
+      { id: 'p_100001', name: '🌸小花' },
+      { id: 'p_100002', name: '𠮷同学' },
+      { id: 'p_100003', name: '\ud800损坏字符' },
+      { id: 'p_100004', name: '<&特殊字符' },
+    ],
+    edges: [],
+  }
+  const errors = await openGraph(page, { graph })
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect.poll(() => page.evaluate(() => window.graphDraws)).toBeGreaterThan(4)
+  await page.locator('.n-select').click()
+  await page.getByText('🌸小花', { exact: true }).click()
+  await expect(page.locator('.person-name')).toHaveText('🌸小花')
+  await expect(page.locator('.person-avatar')).toHaveJSProperty('complete', true)
+  await expect.poll(() => page.locator('.person-avatar').evaluate(img => img.naturalWidth)).toBeGreaterThan(0)
+  expect(errors).toEqual([])
+})
+
 test('failed requests show an error and can be retried', async ({ page }) => {
   const options = { fail: true }
   const errors = await openGraph(page, options)
