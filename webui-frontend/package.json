@@ -9,7 +9,8 @@
     "build": "npm run typecheck && vite build",
     "test:models": "playwright test models-flow.spec.js",
     "test:plugins": "playwright test plugins-flow.spec.js",
-    "test:memes": "playwright test memes-flow.spec.js"
+    "test:memes": "playwright test memes-flow.spec.js",
+    "test:relations": "playwright test relations-flow.spec.js"
   },
   "dependencies": {
     "axios": "1.20.0",

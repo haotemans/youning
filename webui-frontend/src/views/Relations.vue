@@ -7,15 +7,20 @@
       </div>
       <n-space align="center" :size="10">
         <n-select :value="sel?.id" :options="data.nodes.map(n => ({ label: n.name || n.id, value: n.id }))"
-                  clearable placeholder="定位人物节点" size="small" style="width: 200px" @update:value="selectPerson" />
-        <n-button size="small" secondary :disabled="!hasNodes" @click="net?.fit({ animation: !reduceMotion })">重置视图</n-button>
+                  filterable clearable :disabled="loading || !!loadError" placeholder="定位人物节点" size="small" style="width: 200px" @update:value="selectPerson" />
+        <n-button size="small" secondary :disabled="loading || !!loadError || !hasNodes" @click="net?.fit({ animation: !reduceMotion })">重置视图</n-button>
       </n-space>
     </div>
 
     <n-card size="small" class="relations-card">
       <div class="relations-stage">
-        <div v-show="hasNodes" ref="el" class="graph-canvas" />
-        <empty-state v-if="!hasNodes" title="暂无关系图谱数据" />
+        <div v-show="hasNodes && !loadError" ref="el" class="graph-canvas" role="img" aria-label="人物关系图谱" :aria-busy="loading" />
+        <div v-if="loading" class="graph-status" role="status">正在加载关系图谱…</div>
+        <div v-else-if="loadError" class="graph-status" role="alert">
+          <span>{{ loadError }}</span>
+          <n-button size="small" @click="loadGraph">重新加载</n-button>
+        </div>
+        <empty-state v-else-if="!hasNodes" title="暂无关系图谱数据" />
 
         <Transition name="slide-in">
           <aside v-if="sel" :key="sel.id" class="person-drawer">
@@ -66,7 +71,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { DataSet, Network } from 'vis-network/standalone'
 import { api } from '../api'
 import { fmtTs } from '../fmt'
@@ -75,7 +80,9 @@ import EmptyState from '../components/EmptyState.vue'
 import mascot from '../assets/mascot.png'
 
 const el = ref(null)
-const hasNodes = ref(true)
+const hasNodes = computed(() => data.value.nodes.length > 0)
+const loading = ref(true)
+const loadError = ref('')
 /** @type {import('vue').Ref<any>} */
 const sel = ref(null)
 /** @type {import('vue').Ref<{ nodes: any[], edges: any[] }>} */
@@ -89,6 +96,52 @@ let net = null
 let graphNodes = null
 /** @type {any} */
 let graphEdges = null
+const requests = new AbortController()
+let disposed = false
+let settleTimer
+const avatarJobs = new Set()
+
+function destroyGraph() {
+  clearTimeout(settleTimer)
+  for (const cancel of avatarJobs) cancel()
+  avatarJobs.clear()
+  net?.destroy()
+  net = null
+  graphNodes = null
+  graphEdges = null
+}
+
+// Limit simultaneous avatar requests. Canvas nodes start with local images so
+// slow or unreachable QQ servers cannot delay the first useful frame.
+async function loadAvatars(nodes, dataset) {
+  let index = 0
+  async function worker() {
+    while (!disposed && graphNodes === dataset && index < nodes.length) {
+      const node = nodes[index++]
+      const url = avatarUrl(node)
+      if (!/^https?:/.test(url)) continue
+      await new Promise(resolve => {
+        const image = new Image()
+        const finish = () => {
+          clearTimeout(timeout)
+          image.onload = image.onerror = null
+          image.src = ''
+          avatarJobs.delete(finish)
+          resolve(undefined)
+        }
+        const timeout = setTimeout(finish, 4000)
+        avatarJobs.add(finish)
+        image.onload = () => {
+          if (!disposed && graphNodes === dataset) dataset.update({ id: node.id, image: url })
+          finish()
+        }
+        image.onerror = finish
+        image.src = url
+      })
+    }
+  }
+  await Promise.all(Array.from({ length: 4 }, worker))
+}
 
 const relatedEdges = computed(() =>
   data.value.edges.filter((e) => sel.value && (e.from === sel.value.id || e.to === sel.value.id))
@@ -145,93 +198,144 @@ const labelColor = () => ui.dark ? '#f1f5f9' : '#0f172a'
 
 function selectPerson(id) {
   sel.value = id ? (data.value.nodes.find(n => n.id === id) || null) : null
-  if (net) net.selectNodes(sel.value ? [sel.value.id] : [])
+  if (net) {
+    net.selectNodes(sel.value ? [sel.value.id] : [])
+    if (sel.value) {
+      clearTimeout(settleTimer)
+      net.setOptions({ physics: false })
+      net.focus(sel.value.id, { scale: 1, animation: !reduceMotion })
+    }
+  }
 }
 
-onMounted(async () => {
+async function loadGraph() {
+  destroyGraph()
+  sel.value = null
+  loading.value = true
+  loadError.value = ''
   try {
-    const { data: dash } = await api.get('/dashboard')
-    if (dash?.self_qq) selfQq.value = dash.self_qq
-  } catch { /* ignore */ }
+    const { data: d } = await api.get('/relations', { signal: requests.signal })
+    if (disposed) return
+    if (!Array.isArray(d?.nodes) || !Array.isArray(d?.edges)) throw new Error('关系图谱数据格式异常')
+    data.value = d
+    if (!hasNodes.value) return
+    await nextTick()
+    if (disposed) return
 
-  const { data: d } = await api.get('/relations')
-  data.value = d
-  hasNodes.value = d.nodes.length > 0
-  if (!hasNodes.value) return
+    const degree = Object.create(null)
+    for (const e of d.edges) {
+      degree[e.from] = (degree[e.from] || 0) + 1
+      degree[e.to] = (degree[e.to] || 0) + 1
+    }
+    const baseSize = (id) => (id === 'self' ? 28 : 24) + Math.min(12, (degree[id] || 0) * 2)
+    // Seed a spread-out layout instead of running the blocking
+    // improved-layout solver before the canvas has shown anything.
+    const ordered = [...d.nodes].sort((a, b) =>
+      Number(b.id === 'self') - Number(a.id === 'self') || (degree[b.id] || 0) - (degree[a.id] || 0))
+    const positions = new Map(ordered.map((n, i) => {
+      const angle = i * Math.PI * (3 - Math.sqrt(5))
+      const radius = 95 * Math.sqrt(i)
+      return [n.id, { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }]
+    }))
 
-  const degree = {}
-  for (const e of d.edges) {
-    degree[e.from] = (degree[e.from] || 0) + 1
-    degree[e.to] = (degree[e.to] || 0) + 1
-  }
-  const baseSize = (id) => (id === 'self' ? 28 : 24) + Math.min(12, (degree[id] || 0) * 2)
-
-  // 画布内仅展示圆形头像 + 昵称，不挂载悬浮 title 气泡；点击头像再弹出右侧详情卡片
-  /** @type {any} */
-  const nodes = new DataSet(d.nodes.map((n) => ({
-    id: n.id,
-    label: n.name || n.id,
-    shape: 'circularImage',
-    image: avatarUrl(n),
-    brokenImage: n.id === 'self' ? mascot : svgFallbackAvatar(n.name || n.id, false),
-    size: baseSize(n.id),
-    borderWidth: n.id === 'self' ? 3 : 2,
-    borderWidthSelected: 4,
-    color: {
-      border: n.id === 'self' ? selfBorder() : peerBorder(),
-      background: ui.dark ? '#1e293b' : '#f1f5f9',
-      highlight: {
-        border: selfBorder(),
+    // 画布内仅展示圆形头像 + 昵称，不挂载悬浮 title 气泡；点击头像再弹出右侧详情卡片
+    /** @type {any} */
+    const nodes = new DataSet(d.nodes.map((n) => ({
+      id: n.id,
+      ...positions.get(n.id),
+      label: n.name || n.id,
+      shape: 'circularImage',
+      image: n.id === 'self' ? mascot : svgFallbackAvatar(n.name || n.id),
+      brokenImage: n.id === 'self' ? mascot : svgFallbackAvatar(n.name || n.id, false),
+      size: baseSize(n.id),
+      borderWidth: n.id === 'self' ? 3 : 2,
+      borderWidthSelected: 4,
+      color: {
+        border: n.id === 'self' ? selfBorder() : peerBorder(),
         background: ui.dark ? '#1e293b' : '#f1f5f9',
+        highlight: {
+          border: selfBorder(),
+          background: ui.dark ? '#1e293b' : '#f1f5f9',
+        },
+        hover: {
+          border: selfBorder(),
+          background: ui.dark ? '#1e293b' : '#f1f5f9',
+        },
       },
-      hover: {
-        border: selfBorder(),
-        background: ui.dark ? '#1e293b' : '#f1f5f9',
-      },
-    },
-    font: {
-      color: labelColor(),
-      size: 13,
-      vadjust: 6,
-    },
-  })))
-
-  const edges = new DataSet(d.edges.map((e) => ({
-    from: e.from,
-    to: e.to,
-    width: 1.2 + e.familiar * 3.5,
-    color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
-    arrows: { to: { enabled: true, scaleFactor: 0.6 } },
-  })))
-
-  graphNodes = nodes
-  graphEdges = edges
-  net = new Network(el.value, { nodes, edges }, {
-    physics: {
-      stabilization: true,
-      barnesHut: { gravitationalConstant: -2600, springLength: 140, springConstant: 0.04 },
-    },
-    edges: { smooth: { enabled: true, type: 'continuous', roundness: 0.2 } },
-    interaction: { hover: true },
-    nodes: {
       font: {
-        face: getComputedStyle(document.documentElement).getPropertyValue('--yt-font'),
-        size: 13,
         color: labelColor(),
-        strokeWidth: 0,
+        size: 13,
+        vadjust: 6,
       },
-    },
-  })
+    })))
 
-  // Keep the settled graph still; selecting a person should not restart simulation.
-  net.once('stabilizationIterationsDone', () => net?.setOptions({ physics: false }))
+    const edges = new DataSet(d.edges.map((e) => ({
+      from: e.from,
+      to: e.to,
+      width: 1.2 + e.familiar * 3.5,
+      color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
+      arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+    })))
 
-  net.on('click', (p) => {
-    sel.value = p.nodes.length ? d.nodes.find((n) => n.id === p.nodes[0]) : null
-  })
+    graphNodes = nodes
+    graphEdges = edges
+    net = new Network(el.value, { nodes, edges }, {
+      layout: { improvedLayout: false },
+      physics: {
+        enabled: !reduceMotion,
+        stabilization: false,
+        barnesHut: { gravitationalConstant: -5000, springLength: 180, springConstant: 0.04, avoidOverlap: 0.6 },
+      },
+      edges: { smooth: false },
+      interaction: { hover: true, hideEdgesOnDrag: true },
+      nodes: {
+        font: {
+          face: getComputedStyle(document.documentElement).getPropertyValue('--yt-font'),
+          size: 13,
+          color: labelColor(),
+          strokeWidth: 0,
+        },
+      },
+    })
+
+    net.fit({ animation: false })
+    // Bound simulation time even for dense/disconnected graphs. Selection and
+    // theme updates must never restart it after it has settled.
+    const stopLayout = () => {
+      clearTimeout(settleTimer)
+      net?.setOptions({ physics: false })
+      if (!sel.value) net?.fit({ animation: false })
+    }
+    net.once('stabilized', stopLayout)
+    settleTimer = setTimeout(stopLayout, 1500)
+    void loadAvatars(d.nodes, nodes)
+
+    net.on('click', (p) => {
+      sel.value = p.nodes.length ? d.nodes.find((n) => n.id === p.nodes[0]) : null
+    })
+  } catch (error) {
+    if (!disposed) {
+      destroyGraph()
+      loadError.value = error.response?.data?.error || error.message || '关系图谱加载失败，请重试'
+    }
+  } finally {
+    if (!disposed) loading.value = false
+  }
+}
+
+onMounted(() => {
+  // Dashboard metadata is optional; it must not hold up the graph request.
+  void api.get('/dashboard', { signal: requests.signal }).then(({ data: dash }) => {
+    if (!disposed && dash?.self_qq) selfQq.value = dash.self_qq
+  }).catch(() => {})
+  void loadGraph()
 })
 
-onUnmounted(() => { net?.destroy(); net = null })
+onUnmounted(() => {
+  disposed = true
+  requests.abort()
+  destroyGraph()
+})
 
 watch(() => ui.dark, () => {
   if (!net || !graphNodes) return
@@ -258,8 +362,20 @@ watch(() => ui.dark, () => {
 }
 .relations-stage {
   position: relative;
+  min-height: 420px;
   overflow: hidden;
   border-radius: 12px;
+}
+.graph-status {
+  position: absolute;
+  inset: 0;
+  min-height: 420px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 16px;
+  color: var(--yt-ink-2);
 }
 .graph-canvas {
   height: calc(100vh - 165px);
