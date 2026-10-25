@@ -27,6 +27,106 @@
 
 **技术栈**：Rust + Axum + Tokio + SQLx + SQLite；Vue 3 + Vite + TypeScript + Naive UI。
 
+## Agent 架构
+
+攸宁当前采用 **自研 Rust 运行时 + 事件驱动 + 三角色模型分工 + 对话／任务双路径**。模型负责理解意图、生成内容和选择下一步；宿主代码负责上下文、动作校验、能力调用、执行预算与状态落库，而不是让一个模型直接包办整个系统。
+
+这里的「三角色」是同一运行时中的三种模型职责，可以分别绑定 provider 和 model，并不要求使用三个不同模型，也不是三个互相聊天的独立 Agent。对话路径面向即时交流与技能调用，任务路径面向需要多轮工具执行的工作。
+
+### 整体链路
+
+```mermaid
+flowchart TD
+    Input["QQ 私聊 / 群聊"] --> Adapter["adapter-qq / OneBot 11"]
+    Adapter --> Pipeline["EventBus / 会话调度 / Prefilter"]
+    Pipeline --> Snapshot["ReplySnapshot：人格与固定上下文"]
+    Memory["人物简档 / 话题记忆"] --> Snapshot
+    Snapshot --> Decision["decision：理解意图、建议动作"]
+    Decision --> Policy["Runtime：校验依据与执行约束"]
+    Policy -->|reply| Chat["bot_chat：生成回复"]
+    Policy -->|invoke_skill| Skills["SkillRegistry：执行技能"]
+    Policy -->|send_meme| Meme["表情管线"]
+    Policy -->|ignore| Ignore["记录决策，不回应"]
+    Chat --> Reply["ReplyEngine：分泡与发送队列"]
+    Skills --> Reply
+    Meme --> Reply
+    Reply --> Adapter
+    Policy -->|start_task| Tasks["SQLite tasks：持久化待办"]
+    Tasks --> Runner["TaskRunner：领取与调度任务"]
+    Runner --> Exec["agent_exec：多轮执行"]
+    Exec -->|tool_call| Tools["ToolRegistry：本地 / 插件 / MCP 工具"]
+    Tools -->|结果反馈| Exec
+    Exec --> Records["任务执行流水与终态"]
+    Records --> WebUI["WebUI：任务与运行观测"]
+    Policy -.-> WebUI
+    Consolidation["每日归纳"] --> Memory
+```
+
+图中是常规语义处理路径。命中的插件命令或消息匹配器可以走确定性直派，不必先经过 Decision；Skill 的渲染结果与附件直接进入回复队列，不要求再经过一次 `bot_chat` 包装。核心与 QQ 协议解耦，发送能力由装配层注入，当前实际接入仍以 QQ 为主。
+
+### 三种模型角色
+
+| 角色 | 负责什么 | 输出交给谁 |
+| --- | --- | --- |
+| `decision` | 判断发言对象、意图、对话承接及是否值得参与；建议回复、忽略、发图、调用技能或创建任务。 | 输出结构化 JSON，由 Runtime 校验、约束，再交给 Bot 管线分发；不是直接面向用户写答案。 |
+| `bot_chat` | 根据人格、同一份回复快照和回复方式生成自然语言内容。 | 交给 `ReplyEngine` 做分泡、延时与会话发送排队。 |
+| `agent_exec` | 围绕任务目标，选择工具、读取执行结果，并决定继续或结束。 | 输出 `tool_call / reply / done`，由 `TaskRunner` 执行并记录。 |
+
+三者通过 [LlmGateway](crates/core/src/llm.rs) 使用统一的模型调用入口，角色绑定保存在 `providers.toml`。角色是职责分工，不与某个模型品牌绑定；例如每日归纳也复用 `decision` 角色。当前 Agent 执行采用应用层 JSON 动作协议，由 Rust 查表调用工具，不依赖模型直接执行代码。
+
+### 对话管线：先判断，再回应
+
+[Bot 管线](crates/core/src/bot.rs) 将普通消息按固定窗口聚合，按会话调度；同一会话串行处理，不同会话可并发。`Prefilter` 先处理硬过滤与节流，再进入上下文读取和模型决策。
+
+[Decision](crates/core/src/decision.rs) 给出动作建议后，宿主继续检查请求原话、当前会话可用的技能、可见消息依据、对话对象和参与冷却。模型的建议不等于最终执行指令；不满足约束时可以收紧为澄清、说明不确定或忽略。输出格式不合法时重试一次，再失败则保守忽略，并保留 Trace。详细规则见[语义参与决策框架](docs/reference/decision-framework.md)。
+
+普通回答、技能结果和表情最终汇入回复引擎。**日常聊天不需要每次启动一个多轮 Agent 任务**，明确需要工具循环的请求才进入 `start_task` 路径。
+
+### 上下文与记忆：固定快照，保留出处
+
+[Context Builder](crates/core/src/context_builder.rs) 在一次数据库读事务中构建 `ReplySnapshot`，包含回复锚点、引用原文、近期消息、人物简档、话题记忆、人格、对话承接与活动任务状态。Decision 与普通聊天回复共享这份快照，避免模型等待期间的新消息改变本轮事实范围或回复对象。
+
+[记忆层](crates/core/src/memory.rs) 区分人物简档、话题记忆与每日摘要：简档记录有本人原话依据的相对稳定信息，话题记忆按当前问题检索，每日摘要用于梳理历史。当前检索基于词项匹配，并非向量检索；资料保留来源与时间，来源可定位也不等于语义已经验证。上下文预算目前以字符数近似控制，不是精确 token 预算。
+
+[每日归纳](crates/core/src/consolidation.rs) 作为后台侧路整理摘要、记忆与关系信息，影响后续回复，不改写已生成的本轮快照，也不自动训练模型或修改人格。活动任务的 `running` 状态只证明调度状态，不能作为「已经执行成功」的证据。
+
+### 能力扩展：Tool、Skill、Plugin 与 MCP
+
+| 扩展层 | 当前实现与职责 |
+| --- | --- |
+| **Tool** | 最小执行能力，提供名称、描述、参数 schema 和调用接口；由 [ToolRegistry](crates/core/src/tools.rs) 统一注册。Agent 从注册表获取工具目录并执行。 |
+| **Skill** | 可复用的技能入口，可封装提示词模板、模型调用或工具逻辑；由 [SkillRegistry](crates/core/src/skills.rs) 管理，支持 Decision 选择及命令／消息匹配直派。当前是 Rust trait 实现，不是运行时加载 `SKILL.md`。 |
+| **Plugin** | 打包与管理 Tool、Skill 的工程单元，通过 `plugin-api` 接入宿主。当前是编译进程序的 Rust 插件，运行时可启停和调整配置；宿主约束会话范围、超时、并发与输出大小，见[插件宿主](crates/core/src/plugins.rs)。 |
+| **MCP** | 通过本地子进程的 stdio 连接外部服务，将发现的工具包装后接入同一 ToolRegistry；当前实现覆盖工具发现与调用所需的子集，见 [MCP 客户端](crates/core/src/mcp.rs)。 |
+
+Docker 开发沙箱是可选工具能力，默认关闭，配置见[开发沙箱指南](docs/reference/agent-sandbox.md)。它不意味着所有原生插件和 MCP 子进程都自动运行在沙箱中；这些扩展仍应按受信任代码配置和使用。
+
+### 任务执行：有预算、有记录、不盲目重放
+
+[Agent 执行器](crates/core/src/agent.rs) 的闭环是：
+
+```text
+任务目标 + 工具目录 + 本任务执行历史
+  → agent_exec 输出下一步 JSON
+  → tool_call：调用已注册工具，将结果或错误反馈到下一轮
+  → reply：记录中间文本，继续执行（不是向聊天窗口发消息）
+  → done：保存最终结果；失败或预算耗尽则记录失败终态
+```
+
+`create_task` 先将任务持久化到 SQLite，再发布 `TaskCreated` 唤醒执行器。**数据库是任务待办的权威来源，事件只是唤醒信号**；Runner 也会定期扫描数据库，因此不依赖每一条通知都被及时消费。
+
+当前限制为 **最多 3 个并发任务、每任务最多 10 轮模型调用、单次工具调用最多等待 120 秒**。连续 2 次 JSON 解析失败或连续 3 次工具调用抛错会结束任务；模型调用失败、工具超时和 worker panic 也进入失败处理。插件或工具自身还可能有更严格的限制。
+
+任务状态与结束记录在同一事务中提交后，才广播完成事件；收尾落库失败会保留结果重试，不为补写状态而重新执行工具。重启后，尚未开始的任务可以继续被领取；已开始但中断的任务会标记失败，**不会自动重放可能产生重复副作用的工具调用**。这不是任意步骤断点续跑或副作用恰好一次保证。
+
+当前任务上下文主要是目标与该任务的执行历史，尚未直接复用完整聊天回复快照；任务中间文本和最终结果保存在 `tasks / task_events` 并供 WebUI 查看，**尚未形成 Agent 完成结果自动回传聊天的完整链路**。
+
+### 运行支撑与源码入口
+
+主进程在 [main.rs](crates/yuantuan/src/main.rs) 中装配对话管线、任务执行器、插件、MCP、每日归纳和 WebUI。SQLite 保存业务状态与任务流水；[EventBus](crates/core/src/event.rs) 使用进程内 `tokio::broadcast` 解耦模块，Tracer 与面板用于观测。事件总线不是持久消息队列，观测事件可能因消费滞后而丢失，不能用 Trace 代替任务数据库判断是否完成。
+
+本节依据 `e8ddbd0` 的相关代码与实现参考整理，属于架构概览和静态代码核对，不代表重新完成了真实 QQ、模型与工具的端到端验收。设计细节与未决事项继续以 [docs/README.md](docs/README.md) 中的实现参考和工作记录为入口。
+
 ## 接下来想走的方向
 
 以下是演进方向，不代表当前版本已经完整支持。
@@ -182,4 +282,5 @@ CI 还包含表情库与关系图谱的浏览器测试，具体入口见 [CI 工
 
 ## 修订记录
 
+- 2026-10-26：新增 Agent 架构概览、流程图与源码入口，说明三角色分工、对话与任务双路径、上下文和记忆、扩展机制、任务执行限制及当前实现边界。
 - 2026-10-26：项目首页更名为「攸宁 · Youning」，明确个人智能助手定位，区分当前能力与未来方向；更新仓库链接与安装说明，保留兼容现有程序和数据的名称。
