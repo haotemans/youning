@@ -170,7 +170,10 @@ function peerName(id) {
 }
 
 function svgFallbackAvatar(label, isSelf = false) {
-  const ch = String(label || '?').replace(/^['"\s]+/, '').charAt(0).toUpperCase() || 'U'
+  // charAt splits emoji/supplementary characters into lone surrogates, which
+  // make encodeURIComponent throw and prevent the entire graph from rendering.
+  const initial = Array.from(String(label || '?').replace(/^['"\s]+/, ''))[0] || 'U'
+  const ch = initial.toUpperCase().replace(/[\uD800-\uDFFF]/gu, '\uFFFD')
   const bg = isSelf ? '#2563eb' : '#475569'
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 120 120"><rect width="120" height="120" rx="60" fill="${bg}"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-size="52" font-weight="600">${ch.replace(/[<>&"']/g, '')}</text></svg>`
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`
