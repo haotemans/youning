@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
-async function openModels(page, { saveError = false, staleReadback = false, testGate } = {}) {
+async function openModels(page, { saveError = false, staleReadback = false, testGate, loadGate, loadError = false } = {}) {
+  let failNextLoad = loadError
   let stored = {
     provider: {
       newapi: {
@@ -20,6 +21,11 @@ async function openModels(page, { saveError = false, staleReadback = false, test
     if (path === '/api/config') {
       if (request.method() === 'GET') {
         calls.push('read')
+        if (loadGate) await loadGate
+        if (failNextLoad) {
+          failNextLoad = false
+          return route.fulfill({ status: 503, json: { error: '模拟读取失败' } })
+        }
         return route.fulfill({ json: { providers: stored } })
       }
       calls.push('save')
@@ -44,9 +50,33 @@ async function openModels(page, { saveError = false, staleReadback = false, test
   })
   await page.goto('/models')
   const card = page.locator('.role-card').filter({ has: page.getByText('bot_chat', { exact: true }) })
-  await expect(card.getByRole('button', { name: '保存并测试' })).toBeEnabled()
+  if (!loadGate && !loadError) await expect(card.getByRole('button', { name: '保存并测试' })).toBeEnabled()
   return { card, calls, stored: () => stored }
 }
+
+test('slow configuration shows loading instead of empty providers or unbound roles', async ({ page }) => {
+  let release
+  const loadGate = new Promise(resolve => { release = resolve })
+  const { card } = await openModels(page, { loadGate })
+  await expect(page.getByRole('status')).toContainText('正在加载模型配置')
+  await expect(page.getByText('尚未添加模型服务商')).toHaveCount(0)
+  await expect(page.getByText('未绑定', { exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '保存配置', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: '切换主题' }).click()
+  release()
+  await expect(card.getByRole('button', { name: '保存并测试' })).toBeEnabled()
+  await expect(page.getByRole('status')).toHaveCount(0)
+})
+
+test('failed configuration loads can be retried without showing an empty editor', async ({ page }) => {
+  const { card } = await openModels(page, { loadError: true })
+  await expect(page.getByRole('alert')).toContainText('模拟读取失败')
+  await expect(page.locator('.role-card')).toHaveCount(0)
+  await expect(page.getByText('尚未添加模型服务商')).toHaveCount(0)
+  await page.getByRole('button', { name: '重新加载', exact: true }).click()
+  await expect(card.getByRole('button', { name: '保存并测试' })).toBeEnabled()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+})
 
 test('recommended reasoning persists independently per role and is used by save and test', async ({ page }) => {
   const { card, stored } = await openModels(page)

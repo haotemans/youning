@@ -3,17 +3,29 @@
     <div class="yt-page-head">
       <div class="yt-page-head-left">
         <span class="yt-page-title">模型服务</span>
-        <span class="yt-page-sub mono">{{ providerList.length }} 个服务商</span>
+        <span class="yt-page-sub mono">{{ loaded ? `${providerList.length} 个服务商` : (loading ? '加载中…' : '配置未加载') }}</span>
       </div>
       <n-space :size="10">
         <span v-if="dirty" class="save-msg">有未保存更改</span>
         <span v-if="msg" :class="['save-msg', ok ? 'ok' : 'fail']">{{ msg }}</span>
-        <n-button size="small" secondary :loading="loading" :disabled="saving" @click="load">刷新</n-button>
+        <n-button size="small" secondary :loading="loading" :disabled="saving || loading" @click="load">刷新</n-button>
         <n-button size="small" type="primary" :loading="saving" :disabled="!loaded || loading" @click="save">保存配置</n-button>
       </n-space>
     </div>
 
-    <n-card title="角色模型路由" size="small">
+    <template v-if="!loaded">
+      <div v-if="loading" class="models-loading" role="status">
+        <n-spin size="small" />
+        <span>正在加载模型配置…</span>
+      </div>
+      <n-alert v-else-if="msg" type="error" :bordered="false" role="alert">
+        {{ msg }}
+        <n-button size="small" secondary @click="load">重新加载</n-button>
+      </n-alert>
+      <n-skeleton v-if="loading" height="320px" :sharp="false" />
+    </template>
+
+    <n-card v-if="loaded" title="角色模型路由" size="small">
       <template #header-extra>
         <n-button size="small" secondary :disabled="!loaded || loading || saving" @click="applyRecommendedReasoning">
           决策 low / 回复 high
@@ -43,7 +55,7 @@
               </div>
               <div class="field-item">
                 <label class="field-label">模型 ID</label>
-                <n-select v-model:value="roles[r].model" :options="modelOptions(r)" size="small"
+                <n-select v-model:value="roles[r].model" :options="roleModelOptions[r]" size="small"
                           filterable tag clearable placeholder="输入或选择模型 ID" />
               </div>
               <div class="field-item">
@@ -71,7 +83,7 @@
       </n-grid>
     </n-card>
 
-    <n-card title="服务端点 (Providers)" size="small">
+    <n-card v-if="loaded" title="服务端点 (Providers)" size="small">
       <template #header-extra>
         <div class="header-actions">
           <n-input v-model:value="newName" size="small" placeholder="输入新服务商标识"
@@ -95,7 +107,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { api } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import ProviderCard from '../components/ProviderCard.vue'
@@ -148,6 +160,9 @@ const providerOptions = computed(() => Object.keys(providers.value).map((n) => (
 const providerList = computed(() => Object.entries(providers.value).map(([name, p]) => ({ name, p })))
 const dirty = computed(() => loaded.value && JSON.stringify(configPayload()) !== savedSignature.value)
 const testEpoch = { decision: 0, bot_chat: 0, agent_exec: 0 }
+const lifecycle = new AbortController()
+let disposed = false
+onUnmounted(() => { disposed = true; lifecycle.abort() })
 
 watch([providers, roles], () => {
   msg.value = ''
@@ -168,6 +183,7 @@ function modelOptions(role) {
   if (current && !models.includes(current)) models.unshift(current)
   return [...new Set(models)].map((model) => ({ label: model, value: model }))
 }
+const roleModelOptions = computed(() => Object.fromEntries(roleNames.map(r => [r, modelOptions(r)])))
 
 function applyConfig(data) {
   const ps = data.providers?.provider || {}
@@ -194,11 +210,14 @@ function applyConfig(data) {
 }
 
 async function load() {
+  if (loading.value) return
   loading.value = true
   try {
-    const { data } = await api.get('/config')
+    const { data } = await api.get('/config', { signal: lifecycle.signal })
+    if (disposed) return
     applyConfig(data)
   } catch (e) {
+    if (disposed) return
     ok.value = false
     msg.value = axios.isAxiosError(e) ? (e.response?.data?.error || '加载配置失败') : '加载配置失败'
   } finally {
@@ -335,6 +354,15 @@ async function save() {
 </script>
 
 <style scoped>
+.models-loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px;
+  color: var(--yt-ink-2);
+  background: var(--yt-soft-bg);
+  border-radius: 10px;
+}
 .role-card {
   border: 1px solid var(--yt-card-border);
   border-radius: 10px;
