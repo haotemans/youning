@@ -199,6 +199,17 @@ const selfBorder = () => ui.dark ? '#60a5fa' : '#2563eb'
 const peerBorder = () => ui.dark ? '#475569' : '#cbd5e1'
 const labelColor = () => ui.dark ? '#f1f5f9' : '#0f172a'
 
+function edgeColor(edge) {
+  const touchesSelf = edge.from === 'self' || edge.to === 'self'
+  return {
+    color: touchesSelf ? (ui.dark ? '#83a4df' : '#86a3ea') : (ui.dark ? '#8395af' : '#8b9db5'),
+    highlight: selfBorder(),
+    hover: selfBorder(),
+    opacity: ui.dark ? 0.7 : 0.65,
+    inherit: false,
+  }
+}
+
 function selectPerson(id) {
   sel.value = id ? (data.value.nodes.find(n => n.id === id) || null) : null
   if (net) {
@@ -275,9 +286,9 @@ async function loadGraph() {
     const edges = new DataSet(d.edges.map((e) => ({
       from: e.from,
       to: e.to,
-      width: 1.2 + e.familiar * 3.5,
-      color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
-      arrows: { to: { enabled: true, scaleFactor: 0.6 } },
+      width: 1.1 + Math.max(0, Math.min(1, Number(e.familiar) || 0)) * 1.4,
+      color: edgeColor(e),
+      arrows: { to: { enabled: true, scaleFactor: 0.35 } },
     })))
 
     graphNodes = nodes
@@ -289,7 +300,13 @@ async function loadGraph() {
         stabilization: false,
         barnesHut: { gravitationalConstant: -5000, springLength: 180, springConstant: 0.04, avoidOverlap: 0.6 },
       },
-      edges: { smooth: false },
+      // Static curves soften the graph without adding physics support nodes.
+      // Opposite directions bend to opposite sides instead of overlapping.
+      edges: {
+        smooth: { enabled: true, type: 'curvedCW', roundness: 0.12 },
+        selectionWidth: 2,
+        hoverWidth: 1,
+      },
       interaction: { hover: true, hideEdgesOnDrag: true },
       nodes: {
         font: {
@@ -354,7 +371,7 @@ watch(() => ui.dark, () => {
   })))
   graphEdges.update(graphEdges.get().map(e => ({
     id: e.id,
-    color: { color: e.from === 'self' || e.to === 'self' ? selfBorder() : '#64748b', opacity: 0.7 },
+    color: edgeColor(e),
   })))
 })
 </script>
