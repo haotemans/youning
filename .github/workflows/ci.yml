@@ -27,6 +27,9 @@ jobs:
       - name: Relationship graph browser tests
         working-directory: webui-frontend
         run: npm run test:relations
+      - name: Model configuration browser tests
+        working-directory: webui-frontend
+        run: npm run test:models
 
   build-linux:
     runs-on: ubuntu-latest

@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 
 const defaults = {
-  content: readFileSync(new URL('../../crates/core/src/personality/default.txt', import.meta.url), 'utf8'),
+  content: readFileSync(new URL('../../crates/core/src/personality/default.txt', import.meta.url), 'utf8').replace(/\r\n/g, '\n'),
   reply_examples: JSON.parse(readFileSync(new URL('../../crates/core/src/personality/examples.json', import.meta.url), 'utf8')),
 }
 
