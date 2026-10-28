@@ -861,6 +861,17 @@ async fn process_plugin_result(
                 }],
             )
             .await;
+        } else if delivery == MediaDelivery::Unconfirmed {
+            process_bubbles(
+                eng,
+                job,
+                &[Bubble {
+                    text: "图片已生成，但 QQ 尚未确认送达。图片文件已保留，未自动重复发送。".into(),
+                    at: false,
+                    meme: None,
+                }],
+            )
+            .await;
         }
         return;
     }

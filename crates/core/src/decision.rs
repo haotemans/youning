@@ -445,6 +445,35 @@ pub(crate) fn is_directed(
             .first()
             .is_some_and(|m| m.person_id == "self")
         || msg.text.trim_start().starts_with("云团")
+        || is_reply_attention_request(&msg.text)
+}
+
+// Explicit requests for a response are directed speech even without a QQ @.
+// A third-person complaint ("猫猫为什么不理我") does not match this form;
+// assessment/evidence checks still run before a reply is allowed.
+fn is_reply_attention_request(text: &str) -> bool {
+    let text = text.trim();
+    [
+        "你",
+        "怎么",
+        "为什么",
+        "为啥",
+        "理理我",
+        "回复我",
+        "回我一下",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+        && [
+            "不理我",
+            "不回我",
+            "不回复我",
+            "理理我",
+            "回复我",
+            "回我一下",
+        ]
+        .iter()
+        .any(|phrase| text.contains(phrase))
 }
 
 fn is_question(text: &str) -> bool {
@@ -692,6 +721,21 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_attention_requests_are_not_unsolicited_group_banter() {
+        for text in ["为啥老是不理我", "你怎么不回我", "理理我", "回复我一下"]
+        {
+            assert!(is_reply_attention_request(text), "{text}");
+        }
+        for text in [
+            "猫猫为什么不理我",
+            "他不回复我",
+            "为什么今天下雨",
+            "大家看图",
+        ] {
+            assert!(!is_reply_attention_request(text), "{text}");
+        }
+    }
 
     #[tokio::test]
     async fn quiet_policy_rejects_acknowledgments_and_ambient_chatter() {

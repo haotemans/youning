@@ -215,7 +215,8 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
                     // 生图命令走 dispatcher→worker 直派，不进消息聚合窗口。
-                    let is_media_cmd = is_image_command(&m.text)
+                    let is_media_cmd = is_direct_message(&m, &deps.self_ids)
+                        || is_image_command(&m.text)
                         || matches!(match_plugin_message(&deps, &m), Ok(Some(_)));
 
                     if is_media_cmd {
@@ -288,6 +289,10 @@ fn decision_ready(llm: &SharedLlm) -> bool {
         .as_ref()
         .map(|g| g.role(Role::Decision).is_some())
         .unwrap_or(false)
+}
+
+fn is_direct_message(m: &MessageReceivedPayload, self_ids: &SelfMsgIds) -> bool {
+    m.at_me || m.chat_type == "private" || m.reply_to.is_some_and(|id| self_ids.contains(id))
 }
 
 /// reply_engine::route_of 的转发（chat_type/target 解析）
@@ -830,6 +835,35 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn addressed_requests_do_not_enter_the_ordinary_group_window() {
+        let mut message = MessageReceivedPayload {
+            msg_id: 1,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_456".into(),
+            text: "禁言猫猫".into(),
+            at_me: true,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1,
+        };
+        let ids = SelfMsgIds::default();
+        assert!(is_direct_message(&message, &ids));
+        message.at_me = false;
+        message.text.clear();
+        message.has_image = true;
+        assert!(!is_direct_message(&message, &ids));
+        message.reply_to = Some(-12);
+        assert!(!is_direct_message(&message, &ids));
+        ids.record(-12);
+        assert!(is_direct_message(&message, &ids));
+        message.reply_to = None;
+        message.chat_type = "private".into();
+        assert!(is_direct_message(&message, &ids));
+    }
     #[test]
     fn plugin_image_mention_uses_incoming_sender_and_requires_explicit_opt_in() {
         let mut message = MessageReceivedPayload {

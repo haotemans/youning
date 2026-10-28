@@ -98,16 +98,24 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> std::io::Result<()>
     let mut chunk = [0u8; 4096];
     loop {
         let n = stream.read(&mut chunk).await?;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         buffer.extend_from_slice(&chunk[..n]);
         if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
             let headers = String::from_utf8_lossy(&buffer[..end]).to_lowercase();
-            let length = headers.lines().find_map(|line|
-                line.strip_prefix("content-length:").and_then(|value| value.trim().parse::<usize>().ok())
-            ).unwrap_or(0);
+            let length = headers
+                .lines()
+                .find_map(|line| {
+                    line.strip_prefix("content-length:")
+                        .and_then(|value| value.trim().parse::<usize>().ok())
+                })
+                .unwrap_or(0);
             while buffer.len() - (end + 4) < length {
                 let n = stream.read(&mut chunk).await?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 buffer.extend_from_slice(&chunk[..n]);
             }
             return Ok(());
@@ -151,18 +159,36 @@ async fn mock_napcat_capture(port: u16, initial: Vec<Value>, captures: Captures)
             .unwrap();
     }
     let mut seq = 800i64;
+    let mut history = Vec::new();
     while let Some(Ok(frame)) = r.next().await {
         let Message::Text(t) = frame else { continue };
         let v: Value = match serde_json::from_str(&t) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        if v["action"].as_str().unwrap_or("").starts_with("send_") {
+        if v["action"] == "get_group_msg_history" {
+            w.lock()
+                .await
+                .send(Message::Text(
+                    json!({"retcode":0,"data":{"messages":history},"echo":v["echo"]})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        } else if v["action"].as_str().unwrap_or("").starts_with("send_") {
             captures
                 .lock()
                 .unwrap()
                 .push(v["params"]["message"].clone());
             seq += 1;
+            let mut segments = v["params"]["message"].clone();
+            for segment in segments.as_array_mut().unwrap() {
+                if segment["type"] == "image" {
+                    segment["data"]["file_size"] = json!(1);
+                }
+            }
+            history.push(json!({"group_id":v["params"]["group_id"],"user_id":SELF_QQ,"time":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),"message_id":seq,"real_seq":seq,"message":segments}));
             let echo = v["echo"].as_str().unwrap_or("").to_string();
             let _ = w
                 .lock()
