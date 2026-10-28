@@ -214,12 +214,13 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
-                    // 生图命令走 dispatcher→worker 直派，不进消息聚合窗口。
-                    let is_media_cmd = is_direct_message(&m, &deps.self_ids)
+                    // Direct requests and plugin commands must not be consumed
+                    // as an unrelated image/spam window's secondary messages.
+                    let immediate = is_direct_message(&m, &deps.self_ids)
                         || is_image_command(&m.text)
                         || matches!(match_plugin_message(&deps, &m), Ok(Some(_)));
 
-                    if is_media_cmd {
+                    if immediate {
                         let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
                             let cap = *deps.per_chat_cap.read().unwrap();
                             let (tx, mut lane_rx) = tokio::sync::mpsc::channel::<(
@@ -292,7 +293,11 @@ fn decision_ready(llm: &SharedLlm) -> bool {
 }
 
 fn is_direct_message(m: &MessageReceivedPayload, self_ids: &SelfMsgIds) -> bool {
-    m.at_me || m.chat_type == "private" || m.reply_to.is_some_and(|id| self_ids.contains(id))
+    m.at_me
+        || m.chat_type == "private"
+        || m.reply_to.is_some_and(|id| self_ids.contains(id))
+        || m.text.trim_start().starts_with("云团")
+        || crate::decision::is_reply_attention_request(&m.text)
 }
 
 /// reply_engine::route_of 的转发（chat_type/target 解析）
@@ -853,6 +858,8 @@ mod tests {
         let ids = SelfMsgIds::default();
         assert!(is_direct_message(&message, &ids));
         message.at_me = false;
+        message.text = "为啥老是不理我".into();
+        assert!(is_direct_message(&message, &ids));
         message.text.clear();
         message.has_image = true;
         assert!(!is_direct_message(&message, &ids));

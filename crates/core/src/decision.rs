@@ -451,7 +451,7 @@ pub(crate) fn is_directed(
 // Explicit requests for a response are directed speech even without a QQ @.
 // A third-person complaint ("猫猫为什么不理我") does not match this form;
 // assessment/evidence checks still run before a reply is allowed.
-fn is_reply_attention_request(text: &str) -> bool {
+pub(crate) fn is_reply_attention_request(text: &str) -> bool {
     let text = text.trim();
     [
         "你",
