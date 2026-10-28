@@ -1,4 +1,4 @@
-use crate::http::{domain, Http};
+use crate::http::{domain, Http, PlatformHttpError};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::Value;
@@ -343,6 +343,28 @@ fn douyin_id(url: &Url) -> Result<String> {
         .context("未识别到抖音作品 ID")
 }
 
+fn bilibili_video_id(url: &Url) -> Option<&str> {
+    let mut parts = url.path_segments()?;
+    if parts.next()? != "video" {
+        return None;
+    }
+    let id = parts.next()?;
+    ((id.starts_with("BV") && id.len() == 12 && id.bytes().all(|c| c.is_ascii_alphanumeric()))
+        || (id.starts_with("av") && id.len() > 2 && id[2..].bytes().all(|c| c.is_ascii_digit())))
+    .then_some(id)
+}
+fn bilibili_landing(url: &Url) -> bool {
+    let host = url.host_str().unwrap_or_default();
+    (domain(host, "bilibili.com") && bilibili_video_id(url).is_some())
+        || (host == "t.bilibili.com"
+            && !url.path().trim_matches('/').is_empty()
+            && url
+                .path()
+                .trim_matches('/')
+                .bytes()
+                .all(|c| c.is_ascii_digit()))
+}
+
 pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
     let mut url = share_url(input)?;
     let site = platform(&url)?;
@@ -352,13 +374,14 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
             .host_str()
             .is_some_and(|h| domain(h, "xhslink.com") || domain(h, "xhslink.cn"))
     {
-        let (trace, _) = http
-            .get_trace(url.as_str(), &url.origin().ascii_serialization())
-            .await?;
-        let resolved = trace
-            .last()
-            .cloned()
-            .context("短链跳转失败")?;
+        let referer = url.origin().ascii_serialization();
+        let trace = if site == Platform::Bilibili {
+            http.resolve_redirects(url.as_str(), &referer, bilibili_landing)
+                .await?
+        } else {
+            http.get_trace(url.as_str(), &referer).await?.0
+        };
+        let resolved = trace.last().cloned().context("短链跳转失败")?;
         if platform(&resolved)? != site {
             bail!("分享链接跳转到了其他平台");
         }
@@ -382,9 +405,7 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
                     )
             })?;
             let kind = if url.path().contains("/note/")
-                || short_link_trace
-                    .iter()
-                    .any(|u| u.path().contains("/note/"))
+                || short_link_trace.iter().any(|u| u.path().contains("/note/"))
             {
                 "note"
             } else {
@@ -407,9 +428,9 @@ pub async fn resolve(http: &Http, input: &str) -> Result<Post> {
                         .await
                     {
                         Ok((_, html)) => douyin(&state(&html, "window._ROUTER_DATA")?, source)?,
-                        Err(page_error) => bail!(
-                            "抖音接口失败：{api_error};分享页回退也失败：{page_error}"
-                        ),
+                        Err(page_error) => {
+                            bail!("抖音接口失败：{api_error};分享页回退也失败：{page_error}")
+                        }
                     }
                 }
             }
@@ -471,22 +492,16 @@ async fn bilibili(http: &Http, url: &Url) -> Result<Post> {
             media,
         });
     }
-    let id = url
-        .path_segments()
-        .and_then(|mut p| p.find(|p| p.starts_with("BV") || p.starts_with("av")))
-        .filter(|id| id.bytes().all(|c| c.is_ascii_alphanumeric()))
-        .context("未识别到 B站 BV/av 视频号")?;
+    let id = bilibili_video_id(url).context("未识别到 B站 BV/av 视频号")?;
     let key = if id.starts_with("BV") {
         format!("bvid={id}")
     } else {
         format!("aid={}", &id[2..])
     };
-    let view = http
-        .json(
-            &format!("https://api.bilibili.com/x/web-interface/view?{key}"),
-            "https://www.bilibili.com/",
-        )
-        .await?;
+    let view = bilibili_view_with(&key, |endpoint| async move {
+        http.json(&endpoint, "https://www.bilibili.com/").await
+    })
+    .await?;
     if view["code"] != 0 {
         bail!("B站视频不可用，接口代码 {}", view["code"]);
     }
@@ -496,12 +511,7 @@ async fn bilibili(http: &Http, url: &Url) -> Result<Post> {
         .map(|(_, v)| v.parse::<usize>())
         .transpose()?
         .unwrap_or(1);
-    let pages = view["data"]["pages"].as_array().context("缺少分P信息")?;
-    let cid = page
-        .checked_sub(1)
-        .and_then(|p| pages.get(p))
-        .and_then(|v| v["cid"].as_u64())
-        .context("分P不存在")?;
+    let (cid, title) = bilibili_page(&view, page)?;
     let data=http.json(&format!("https://api.bilibili.com/x/player/playurl?{key}&cid={cid}&qn=32&fnval=1&fnver=0&platform=html5"),"https://www.bilibili.com/").await?;
     if data["code"] != 0 {
         bail!("B站播放地址不可用，接口代码 {}", data["code"]);
@@ -516,16 +526,151 @@ async fn bilibili(http: &Http, url: &Url) -> Result<Post> {
     }
     Ok(Post {
         platform: Platform::Bilibili,
-        title: text(&view["data"], "title"),
+        title,
         source,
         media,
     })
+}
+
+fn bilibili_view_fallback(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<PlatformHttpError>()
+        .is_some_and(|e| e.0 == 412)
+}
+async fn bilibili_view_with<F, Fut>(key: &str, mut fetch: F) -> Result<Value>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<Value>>,
+{
+    match fetch(format!(
+        "https://api.bilibili.com/x/web-interface/view?{key}"
+    ))
+    .await
+    {
+        Ok(view) => Ok(view),
+        Err(error) if bilibili_view_fallback(&error) => {
+            // Keep the exact video identity when the view endpoint rejects the
+            // server but Bilibili's public page list and player remain usable.
+            let pages = fetch(format!("https://api.bilibili.com/x/player/pagelist?{key}"))
+                .await
+                .context("B站视频信息接口返回 HTTP 412，备用分P接口也不可用；可在采薇设置中配置 bilibili_cookie 后重试")?;
+            bilibili_view_from_pages(pages)
+        }
+        Err(error) => Err(error),
+    }
+}
+fn bilibili_view_from_pages(pages: Value) -> Result<Value> {
+    if pages["code"] != 0 {
+        bail!("B站分P信息不可用，接口代码 {}", pages["code"]);
+    }
+    if !pages["data"].is_array() {
+        bail!("B站分P接口缺少分P信息");
+    }
+    Ok(serde_json::json!({"code":0,"data":{"pages":pages["data"]}}))
+}
+fn bilibili_page(view: &Value, page: usize) -> Result<(u64, String)> {
+    let pages = view["data"]["pages"].as_array().context("缺少分P信息")?;
+    let selected = page
+        .checked_sub(1)
+        .and_then(|p| pages.get(p))
+        .context("分P不存在")?;
+    let cid = selected["cid"]
+        .as_u64()
+        .filter(|cid| *cid > 0)
+        .context("缺少有效分P编号")?;
+    let title = text(&view["data"], "title");
+    Ok((
+        cid,
+        if title.is_empty() {
+            text(selected, "part")
+        } else {
+            title
+        },
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn bilibili_falls_back_once_for_412_and_keeps_the_video_key() {
+        for key in ["bvid=BV1GJ411x7h7", "aid=170001"] {
+            let mut requests = vec![];
+            let view = bilibili_view_with(key, |url| {
+                requests.push(url);
+                std::future::ready(if requests.len() == 1 {
+                    Err(PlatformHttpError(412).into())
+                } else {
+                    Ok(json!({"code":0,"data":[{"cid":11,"part":"第一P"},{"cid":22,"part":"第二P"}]}))
+                })
+            }).await.unwrap();
+            assert_eq!(
+                requests,
+                [
+                    format!("https://api.bilibili.com/x/web-interface/view?{key}"),
+                    format!("https://api.bilibili.com/x/player/pagelist?{key}")
+                ]
+            );
+            assert_eq!(bilibili_page(&view, 2).unwrap().0, 22);
+        }
+        for status in [403, 404, 429, 500] {
+            let mut calls = 0;
+            assert!(bilibili_view_with("aid=170001", |_| {
+                calls += 1;
+                std::future::ready(Err(PlatformHttpError(status).into()))
+            })
+            .await
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+        let mut calls = 0;
+        let view = bilibili_view_with("aid=170001", |_| {
+            calls += 1;
+            std::future::ready(Ok(json!({"code":-404})))
+        })
+        .await
+        .unwrap();
+        assert_eq!(view["code"], -404);
+        assert_eq!(calls, 1);
+    }
+    #[test]
+    fn bilibili_412_fallback_preserves_selected_page_and_api_errors() {
+        assert!(bilibili_view_fallback(&PlatformHttpError(412).into()));
+        assert!(!bilibili_view_fallback(&PlatformHttpError(403).into()));
+        assert!(!bilibili_view_fallback(&anyhow::anyhow!("timeout")));
+        let view = bilibili_view_from_pages(json!({"code":0,"data":[
+            {"cid":11,"part":"第一P"},{"cid":22,"part":"第二P"}
+        ]}))
+        .unwrap();
+        assert_eq!(bilibili_page(&view, 2).unwrap(), (22, "第二P".into()));
+        assert!(bilibili_page(&view, 0).is_err());
+        assert!(bilibili_page(&view, 3).is_err());
+        assert!(bilibili_view_from_pages(json!({"code":-404,"data":[]})).is_err());
+        assert!(bilibili_view_from_pages(json!({"code":0,"data":null})).is_err());
+        let view = json!({"data":{"title":"原视频标题","pages":[{"cid":11,"part":"第一P"}]}});
+        assert_eq!(bilibili_page(&view, 1).unwrap(), (11, "原视频标题".into()));
+    }
+    #[test]
+    fn bilibili_short_links_stop_only_at_recognized_video_or_dynamic() {
+        for url in [
+            "https://www.bilibili.com/video/BV1GJ411x7h7?p=2",
+            "https://m.bilibili.com/video/av170001",
+            "https://t.bilibili.com/123456",
+        ] {
+            assert!(bilibili_landing(&Url::parse(url).unwrap()), "{url}");
+        }
+        for url in [
+            "https://www.bilibili.com/",
+            "https://www.bilibili.com/video/av",
+            "https://www.bilibili.com/video/BVbad",
+            "https://bilibili.com.evil.test/video/BV1GJ411x7h7",
+            "https://t.bilibili.com/",
+            "https://b23.tv/abc",
+        ] {
+            assert!(!bilibili_landing(&Url::parse(url).unwrap()), "{url}");
+        }
+    }
     // make serde_json::json! unqualified so the new tests can write
     // serde_json::json! explicitly (existing tests use json! via this import).
     #[test]

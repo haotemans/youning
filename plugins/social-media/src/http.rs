@@ -12,6 +12,14 @@ pub const UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) App
 /// Desktop Edge UA. Single source of truth is `crate::douyin::DESKTOP_UA`, kept
 /// in sync so the a_bogus signature covers the exact bytes users see.
 const DESKTOP_UA: &str = crate::douyin::DESKTOP_UA;
+#[derive(Debug)]
+pub(crate) struct PlatformHttpError(pub u16);
+impl std::fmt::Display for PlatformHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "平台返回 HTTP {}，可能需要登录或稍后重试", self.0)
+    }
+}
+impl std::error::Error for PlatformHttpError {}
 pub struct Http {
     pub cookies: Vec<(String, String)>,
     pub public_dns: bool,
@@ -47,10 +55,7 @@ pub fn public_ip(ip: IpAddr) -> bool {
 impl Http {
     pub async fn get(&self, url: &str, referer: &str) -> Result<(Url, Response)> {
         let (trace, response) = self.get_trace(url, referer).await?;
-        let url = trace
-            .last()
-            .cloned()
-            .context("分享链接重定向链为空")?;
+        let url = trace.last().cloned().context("分享链接重定向链为空")?;
         Ok((url, response))
     }
     /// Follow redirects like `get` but also return every URL visited, in order
@@ -58,6 +63,28 @@ impl Http {
     /// bounced to a login landing page and the work id only survives on an
     /// intermediate `Location` header.
     pub async fn get_trace(&self, url: &str, referer: &str) -> Result<(Vec<Url>, Response)> {
+        let (trace, response) = self.get_trace_inner(url, referer, None).await?;
+        Ok((trace, response.context("分享链接缺少响应")?))
+    }
+    /// Resolve a short link without requesting a recognized landing page.
+    /// The caller only uses its identity, not the landing page's HTML.
+    pub async fn resolve_redirects(
+        &self,
+        url: &str,
+        referer: &str,
+        stop_before: fn(&Url) -> bool,
+    ) -> Result<Vec<Url>> {
+        Ok(self
+            .get_trace_inner(url, referer, Some(stop_before))
+            .await?
+            .0)
+    }
+    async fn get_trace_inner(
+        &self,
+        url: &str,
+        referer: &str,
+        stop_before: Option<fn(&Url) -> bool>,
+    ) -> Result<(Vec<Url>, Option<Response>)> {
         let mut trace = Vec::new();
         let mut url = Url::parse(url).context("无效的链接")?;
         for _ in 0..8 {
@@ -72,8 +99,12 @@ impl Http {
             if port != 80 && port != 443 {
                 bail!("不支持该链接端口");
             }
+            let stop = !trace.is_empty() && stop_before.is_some_and(|matches| matches(&url));
             if trace.last() != Some(&url) {
                 trace.push(url.clone());
+            }
+            if stop {
+                return Ok((trace, None));
             }
             let mut addresses: Vec<_> = tokio::net::lookup_host((host, port))
                 .await
@@ -130,7 +161,16 @@ impl Http {
                 .resolve_to_addrs(host, &addresses)
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(90))
-                .user_agent(if domain(host, "bilibili.com") || domain(host, "douyin.com") || domain(host, "iesdouyin.com") { DESKTOP_UA } else { UA })
+                .user_agent(
+                    if domain(host, "bilibili.com")
+                        || domain(host, "douyin.com")
+                        || domain(host, "iesdouyin.com")
+                    {
+                        DESKTOP_UA
+                    } else {
+                        UA
+                    },
+                )
                 .build()?;
             let mut request = client.get(url.clone()).header(header::REFERER, referer);
             if domain(host, "douyin.com") || domain(host, "iesdouyin.com") {
@@ -175,12 +215,9 @@ impl Http {
                 continue;
             }
             if !response.status().is_success() {
-                bail!(
-                    "平台返回 HTTP {}，可能需要登录或稍后重试",
-                    response.status().as_u16()
-                );
+                return Err(PlatformHttpError(response.status().as_u16()).into());
             }
-            return Ok((trace, response));
+            return Ok((trace, Some(response)));
         }
         bail!("分享链接重定向次数过多")
     }
