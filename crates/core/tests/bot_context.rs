@@ -791,6 +791,9 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
     let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         let case: Value = serde_json::from_str(ctx["anchor"]["text"].as_str().unwrap()).unwrap();
+        if case["mention_other"] == true {
+            assert_eq!(ctx["message"]["mentions"], json!(["p_other"]));
+        }
         if ctx["anchor"]["text"].as_str().unwrap().contains("blocked_scope") {
             assert!(!body["messages"][0]["content"].as_str().unwrap().contains("- lookup.search:"));
         }
@@ -822,6 +825,18 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         role_hint: None,
     })));
     let cases = [
+        (
+            json!({"text":"你用的是哪个","lookup":false,"action":"reply","audience":"bot","intent":"question","linked":true,"continuing":true,"mention_other":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"云团帮我看下这个","lookup":false,"action":"reply","audience":"bot","intent":"question","mention_other":true}),
+            "g",
+            true,
+            "reply",
+        ),
         // A fabricated high-confidence audience=request interpretation must not
         // turn ambient game chat into prompt optimization or any other action.
         (
@@ -968,6 +983,17 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
             .message("p_a", chat, &case.to_string(), None, None)
             .await;
         msg.at_me = direct;
+        if case["mention_other"] == true {
+            db::connect(&rig.path)
+                .await
+                .unwrap()
+                .execute(
+                    "UPDATE messages SET mentions='[\"p_other\"]' WHERE msg_id=?1",
+                    params![msg.msg_id],
+                )
+                .await
+                .unwrap();
+        }
         let mut snapshot =
             capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
                 .await

@@ -117,6 +117,8 @@ impl HostServices for FakeHost {
     async fn chat(&self, _: &ToolCtx, system: &str, _: &str) -> Result<String> {
         Ok(if system.contains("只分类") {
             r#"{"domain":"code"}"#
+        } else if system == ANSWER_PROMPT {
+            r#"{"answer":"Rust 适合系统编程，具体选型仍要结合项目要求。[1]","source_ids":[1]}"#
         } else {
             r#"{"tag":"code.doc","params":{"library":"rust"}}"#
         }
@@ -129,6 +131,119 @@ impl HostServices for FakeHost {
         Ok(())
     }
     fn log(&self, _: &str) {}
+}
+
+struct AnswerHost {
+    reply: Option<&'static str>,
+    inputs: Mutex<Vec<Value>>,
+}
+#[async_trait]
+impl HostServices for AnswerHost {
+    async fn chat(&self, _: &ToolCtx, system: &str, user: &str) -> Result<String> {
+        assert_eq!(system, ANSWER_PROMPT);
+        self.inputs
+            .lock()
+            .unwrap()
+            .push(serde_json::from_str(user).unwrap());
+        self.reply
+            .map(str::to_owned)
+            .context("answer provider unavailable")
+    }
+    async fn read_data(&self, _: &str) -> Result<Option<Value>> {
+        Ok(None)
+    }
+    async fn write_data(&self, _: &str, _: Value) -> Result<()> {
+        Ok(())
+    }
+    fn log(&self, _: &str) {}
+}
+
+#[tokio::test]
+async fn search_answers_the_original_question_instead_of_forwarding_snippets() {
+    let s = server().await;
+    let host = Arc::new(AnswerHost {
+        reply: Some(
+            r#"{"answer":"这份来源只介绍 Rust，无法据此比较指定的两个模型版本，请补充版本链接。[1]","source_ids":[1]}"#,
+        ),
+        inputs: Mutex::new(vec![]),
+    });
+    let skill = SearchSkill {
+        api: Arc::new(Client::new(&s.origin, "", 5).unwrap()),
+        host: host.clone(),
+    };
+    let out = skill.invoke(&ctx(),json!({"query":"Rust","user_text":"这两个模型版本哪个适合本地生图？","domain":"general","context":"private context"})).await.unwrap();
+    let rendered = out.data["rendered"].as_str().unwrap();
+    assert!(rendered.contains("无法据此比较"));
+    assert!(rendered.contains("https://www.rust-lang.org/"));
+    assert!(!rendered.contains("Systems language"));
+    assert!(!rendered.starts_with("搜索结果"));
+    let inputs = host.inputs.lock().unwrap();
+    assert_eq!(inputs[0]["question"], "这两个模型版本哪个适合本地生图？");
+    assert_eq!(
+        inputs[0]["untrusted_sources"][0]["content"],
+        "Systems language"
+    );
+    assert!(!inputs[0].to_string().contains("private context"));
+}
+
+#[tokio::test]
+async fn failed_synthesis_never_falls_back_to_raw_search_results() {
+    let s = server().await;
+    for reply in [
+        None,
+        Some("not json"),
+        Some(r#"{"answer":"unsupported","source_ids":[99]}"#),
+    ] {
+        let skill = SearchSkill {
+            api: Arc::new(Client::new(&s.origin, "", 5).unwrap()),
+            host: Arc::new(AnswerHost {
+                reply,
+                inputs: Mutex::new(vec![]),
+            }),
+        };
+        let out = skill
+            .invoke(&ctx(), json!({"query":"Rust","domain":"general"}))
+            .await
+            .unwrap();
+        let rendered = out.data["rendered"].as_str().unwrap();
+        assert!(rendered.contains("没能整理出可靠回答"));
+        assert!(!rendered.contains("Systems language"));
+        assert!(!rendered.contains("https://"));
+    }
+}
+
+#[test]
+fn answer_sources_must_come_from_the_actual_search_results() {
+    let sources = vec![json!({"title":"Primary","url":"https://example.com/"})];
+    for reply in [
+        r#"{"answer":"x","source_ids":[0]}"#,
+        r#"{"answer":"x","source_ids":[]}"#,
+        r#"{"answer":"https://invented.test","source_ids":[1]}"#,
+    ] {
+        assert!(format_answer(reply, &sources).is_none());
+    }
+    assert!(
+        format_answer(r#"{"answer":"有依据的结论[1]","source_ids":[1]}"#, &sources)
+            .unwrap()
+            .contains("[1] Primary https://example.com/")
+    );
+}
+
+#[tokio::test]
+async fn no_results_do_not_ask_the_model_to_invent_an_answer() {
+    let host = AnswerHost {
+        reply: None,
+        inputs: Mutex::new(vec![]),
+    };
+    let rendered = synthesize(
+        &host,
+        &ctx(),
+        "比较两个版本",
+        &json!({"query":"versions","results":[]}),
+    )
+    .await;
+    assert!(rendered.contains("没有检索到"));
+    assert!(host.inputs.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

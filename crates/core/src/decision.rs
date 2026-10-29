@@ -123,6 +123,7 @@ reply_mode: answer / clarify / state_uncertainty；缺必要信息用 clarify，
 - profile_updates 仅在 anchor 本人明确陈述或更正稳定称呼、技术偏好、长期项目、交流习惯时填；否则 []。不提取玩笑、假设、他人评价、临时情绪；不从 Bot 旧回答推断人物事实。引文必须逐字来自 anchor，字段更新保留仍然适用的已有信息
 - 是否回复、回复长度、情绪 mood 由场景与你的判断决定。普通聊天、简单事实和直接判断默认 short；用户要求详细解释、严谨证明、完整步骤，或问题需要复杂推导、代码实现、故障排查、风险说明时选择 long，不能为了简短省略必要内容
 - 当消息请求某个已注册 Skill 的能力时（如"整理一下"、"翻译"、"会议纪要"），优先返回 action=invoke_skill 而非 reply；skill_name 必须从可用 Skills 列表里挑
+- 当前消息明确 @ 或引用其他成员时优先按对其他人的发言处理，不能因旧的同人对话关联就认为仍在问你。比较具体模型或软件版本时，只有通用概念不足以给确定结论；项目同名、版本不明先澄清，需核实发布信息时调用可用的信息查询技能
 - 群聊中的生图、提示词优化、群管理等执行型 Skill 需要当前本人直接呼叫你，或有同一人近期真实回复关联并引用该关联消息作为承接依据。不能只凭你判断 audience=bot 就执行；群友讨论游戏时说“剑星的简单一点”不是让你优化提示词，目录里有相关能力也不构成调用理由
 "#;
 
@@ -256,6 +257,17 @@ pub async fn decide(
         ..Default::default()
     };
     if let Some(o) = parsed.as_mut() {
+        if explicitly_addressed_to_other(msg, snapshot) {
+            o.action = DecisionAction::Ignore;
+            o.task_goal = None;
+            o.skill_name = None;
+            o.skill_slots = None;
+            o.request_quote = None;
+            o.reason = "当前消息明确指向其他群成员，不承接为对云团的请求".into();
+            policy
+                .notes
+                .push("协议 @ 或引用对象为其他成员，阻止误接话".into());
+        }
         let lookup = o.action == DecisionAction::InvokeSkill
             && o.skill_name
                 .as_deref()
@@ -465,6 +477,19 @@ fn is_tool_addressed(
         || msg.text.trim_start().starts_with("云团")
 }
 
+fn explicitly_addressed_to_other(
+    msg: &MessageReceivedPayload,
+    snapshot: &crate::context_builder::ReplySnapshot,
+) -> bool {
+    msg.chat_type == "group"
+        && !is_tool_addressed(msg, snapshot)
+        && (!snapshot.anchor.mentions.is_empty()
+            || snapshot
+                .quoted_messages
+                .first()
+                .is_some_and(|m| m.person_id != "self"))
+}
+
 // Explicit requests for a response are directed speech even without a QQ @.
 // A third-person complaint ("猫猫为什么不理我") does not match this form;
 // assessment/evidence checks still run before a reply is allowed.
@@ -656,7 +681,7 @@ fn build_context(
     json!({
         "message":{"text":truncate_chars(&msg.text,500),"chat_type":msg.chat_type,"at_me":msg.at_me,
             "reply_to_me":snapshot.quoted_messages.first().is_some_and(|m|m.person_id=="self"),
-            "has_image":msg.has_image,"mentions":null},
+            "has_image":msg.has_image,"mentions":snapshot.anchor.mentions},
         "sender":sender,"scene":snapshot.scene,"mood":mood.get().as_str(),"active_task":null,
     })
 }
