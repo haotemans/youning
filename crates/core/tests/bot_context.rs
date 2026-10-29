@@ -788,6 +788,10 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         }
     }
     let rig = Rig::new().await;
+    // Linked cases need a real, positive prior message ID even when they are
+    // first in the case list; zero is intentionally rejected by the schema.
+    rig.message("self", "g", "先前回复，请明确版本信息", None, None)
+        .await;
     let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         let case: Value = serde_json::from_str(ctx["anchor"]["text"].as_str().unwrap()).unwrap();
