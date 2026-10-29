@@ -171,7 +171,7 @@ async fn search_answers_the_original_question_instead_of_forwarding_snippets() {
         api: Arc::new(Client::new(&s.origin, "", 5).unwrap()),
         host: host.clone(),
     };
-    let out = skill.invoke(&ctx(),json!({"query":"Rust","user_text":"这两个模型版本哪个适合本地生图？","domain":"general","context":"private context"})).await.unwrap();
+    let out = skill.invoke(&ctx(),json!({"query":"Rust","original_user_text":"这两个模型版本哪个适合本地生图？","user_text":"不相关的模型改写","domain":"general","context":"private context"})).await.unwrap();
     let rendered = out.data["rendered"].as_str().unwrap();
     assert!(rendered.contains("无法据此比较"));
     assert!(rendered.contains("https://www.rust-lang.org/"));

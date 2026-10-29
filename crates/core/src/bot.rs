@@ -690,6 +690,7 @@ async fn add_message_slots(
     m: &MessageReceivedPayload,
     slots: &mut serde_json::Value,
 ) {
+    slots["original_user_text"] = serde_json::json!(m.text);
     slots["reply_to"] = serde_json::json!(m.reply_to);
     let mentions = async {
         let mut conn = crate::db::connect(&deps.db_path).await.ok()?;
@@ -960,6 +961,10 @@ mod tests {
                     });
                 }
                 if slots["query"] == "https://www.bilibili.com/video/BV1xx411c7mD" {
+                    assert_eq!(
+                        slots["original_user_text"],
+                        "/下载 https://www.bilibili.com/video/BV1xx411c7mD"
+                    );
                     return Ok(crate::tools::ToolOutput {
                         summary: "下载完成，开始交付".into(),
                         artifacts: vec![self.artifact.clone()],

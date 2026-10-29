@@ -573,7 +573,8 @@ impl Skill for SearchSkill {
             .api
             .search_with_catalog(&args, 5, routing_catalog.as_ref())
             .await?;
-        let question = slot_text(&slots, &["user_text", "query"]).unwrap_or(text);
+        let question =
+            slot_text(&slots, &["original_user_text", "user_text", "query"]).unwrap_or(text);
         data["rendered"] = json!(synthesize(self.host.as_ref(), ctx, question, &data).await);
         if let Some(note) = routing_note {
             data["routing_note"] = json!(note);
