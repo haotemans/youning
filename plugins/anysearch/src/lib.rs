@@ -603,7 +603,7 @@ async fn synthesize(
         .map(Vec::as_slice)
         .unwrap_or_default();
     if results.is_empty() {
-        return "没有检索到可用来源，暂时无法核实这个问题。可以补充具体项目链接或版本名称。".into();
+        return "没有检索到可用来源，暂时无法核实这个问题。可以补充更具体的问题、关键词或相关链接。".into();
     }
     let input =
         json!({"question":short(question,4000),"query":data["query"],"untrusted_sources":results});
