@@ -14,6 +14,7 @@ pub(super) struct ExpectedDelivery {
     text: String,
     images: Vec<(String, u64)>,
     mentions: Vec<u64>,
+    message_id: Option<i64>,
 }
 
 fn number(value: &Value) -> Option<u64> {
@@ -56,16 +57,30 @@ impl ExpectedDelivery {
             text,
             images,
             mentions,
+            message_id: None,
         })
+    }
+
+    pub(super) fn with_receipt(mut self, data: &Value) -> Self {
+        self.message_id = data["message_id"]
+            .as_i64()
+            .or_else(|| data["message_id"].as_str()?.parse().ok())
+            .filter(|id| *id != 0);
+        self
     }
 
     fn receipt(&self, history: &Value) -> Option<Value> {
         for message in history["messages"].as_array()? {
+            let message_id = message["message_id"]
+                .as_i64()
+                .or_else(|| message["message_id"].as_str()?.parse().ok())
+                .filter(|id| *id != 0);
             if number(&message["group_id"]) != Some(self.group)
                 || number(&message["user_id"]).or_else(|| number(&message["sender"]["user_id"]))
                     != Some(self.bot)
                 || number(&message["time"]).is_none_or(|time| time.saturating_add(2) < self.started)
                 || number(&message["real_seq"]).unwrap_or(0) == 0
+                || self.message_id.is_some_and(|id| Some(id) != message_id)
             {
                 continue;
             }
@@ -91,7 +106,18 @@ impl ExpectedDelivery {
                     _ => {}
                 }
             }
-            if text == self.text && images == self.images && mentions == self.mentions {
+            // NapCat may rename/re-encode an uploaded image. Once the returned
+            // message ID matches, validate media presence rather than its old
+            // local filename. Ambiguous/time-out sends still require exact media.
+            let images_match = if self.message_id.is_some() {
+                images.len() == self.images.len()
+                    && images
+                        .iter()
+                        .all(|(file, size)| !file.is_empty() && *size > 0)
+            } else {
+                images == self.images
+            };
+            if text == self.text && images_match && mentions == self.mentions {
                 if let Some(id) = message["message_id"]
                     .as_i64()
                     .or_else(|| message["message_id"].as_str()?.parse().ok())
@@ -145,6 +171,7 @@ mod tests {
             text: "NAI 4.5 · 3:4".into(),
             images: vec![("unique.png".into(), 123)],
             mentions: vec![],
+            message_id: None,
         }
     }
     fn message() -> Value {
@@ -177,6 +204,29 @@ mod tests {
         msg["message"][1]["data"]["text"] = json!("other caption");
         assert!(expected.receipt(&json!({"messages":[msg]})).is_none());
     }
+    #[test]
+    fn accepted_id_still_requires_server_delivery_and_exact_recipient() {
+        let expected = expected().with_receipt(&json!({"message_id":-123}));
+        let mut msg = message();
+        msg["real_seq"] = json!(0);
+        assert!(expected
+            .receipt(&json!({"messages":[msg.clone()]}))
+            .is_none());
+        msg["real_seq"] = json!(789);
+        msg["message"][0]["data"]["file"] = json!("server-renamed.jpg");
+        msg["message"][0]["data"]["file_size"] = json!(999);
+        assert!(expected
+            .receipt(&json!({"messages":[msg.clone()]}))
+            .is_some());
+        msg["message_id"] = json!(-456);
+        assert!(expected
+            .receipt(&json!({"messages":[msg.clone()]}))
+            .is_none());
+        msg["message_id"] = json!(-123);
+        msg["group_id"] = json!(43);
+        assert!(expected.receipt(&json!({"messages":[msg]})).is_none());
+    }
+
     #[test]
     fn image_mention_confirmation_requires_the_exact_requester() {
         let mut expected = expected();

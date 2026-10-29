@@ -214,11 +214,13 @@ pub fn spawn_pipeline(deps: PipelineDeps) -> JoinHandle<()> {
         loop {
             match rx.recv().await {
                 Ok(Event::MessageReceived(m)) => {
-                    // 生图命令走 dispatcher→worker 直派，不进消息聚合窗口。
-                    let is_media_cmd = is_image_command(&m.text)
+                    // Direct requests and plugin commands must not be consumed
+                    // as an unrelated image/spam window's secondary messages.
+                    let immediate = is_direct_message(&m, &deps.self_ids)
+                        || is_image_command(&m.text)
                         || matches!(match_plugin_message(&deps, &m), Ok(Some(_)));
 
-                    if is_media_cmd {
+                    if immediate {
                         let lane = lanes.entry(m.chat_id.clone()).or_insert_with(|| {
                             let cap = *deps.per_chat_cap.read().unwrap();
                             let (tx, mut lane_rx) = tokio::sync::mpsc::channel::<(
@@ -288,6 +290,14 @@ fn decision_ready(llm: &SharedLlm) -> bool {
         .as_ref()
         .map(|g| g.role(Role::Decision).is_some())
         .unwrap_or(false)
+}
+
+fn is_direct_message(m: &MessageReceivedPayload, self_ids: &SelfMsgIds) -> bool {
+    m.at_me
+        || m.chat_type == "private"
+        || m.reply_to.is_some_and(|id| self_ids.contains(id))
+        || m.text.trim_start().starts_with("云团")
+        || crate::decision::is_reply_attention_request(&m.text)
 }
 
 /// reply_engine::route_of 的转发（chat_type/target 解析）
@@ -680,6 +690,7 @@ async fn add_message_slots(
     m: &MessageReceivedPayload,
     slots: &mut serde_json::Value,
 ) {
+    slots["original_user_text"] = serde_json::json!(m.text);
     slots["reply_to"] = serde_json::json!(m.reply_to);
     let mentions = async {
         let mut conn = crate::db::connect(&deps.db_path).await.ok()?;
@@ -831,6 +842,37 @@ async fn handle_plugin_command(deps: &PipelineDeps, m: &MessageReceivedPayload) 
 mod tests {
     use super::*;
     #[test]
+    fn addressed_requests_do_not_enter_the_ordinary_group_window() {
+        let mut message = MessageReceivedPayload {
+            msg_id: 1,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_456".into(),
+            text: "禁言猫猫".into(),
+            at_me: true,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: 1,
+        };
+        let ids = SelfMsgIds::default();
+        assert!(is_direct_message(&message, &ids));
+        message.at_me = false;
+        message.text = "为啥老是不理我".into();
+        assert!(is_direct_message(&message, &ids));
+        message.text.clear();
+        message.has_image = true;
+        assert!(!is_direct_message(&message, &ids));
+        message.reply_to = Some(-12);
+        assert!(!is_direct_message(&message, &ids));
+        ids.record(-12);
+        assert!(is_direct_message(&message, &ids));
+        message.reply_to = None;
+        message.chat_type = "private".into();
+        assert!(is_direct_message(&message, &ids));
+    }
+    #[test]
     fn plugin_image_mention_uses_incoming_sender_and_requires_explicit_opt_in() {
         let mut message = MessageReceivedPayload {
             msg_id: 0,
@@ -919,6 +961,10 @@ mod tests {
                     });
                 }
                 if slots["query"] == "https://www.bilibili.com/video/BV1xx411c7mD" {
+                    assert_eq!(
+                        slots["original_user_text"],
+                        "/下载 https://www.bilibili.com/video/BV1xx411c7mD"
+                    );
                     return Ok(crate::tools::ToolOutput {
                         summary: "下载完成，开始交付".into(),
                         artifacts: vec![self.artifact.clone()],

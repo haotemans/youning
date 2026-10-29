@@ -173,14 +173,21 @@ pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
                 ChatType::Group => s.send_group_msg(req.target, req.segments).await,
                 ChatType::Private => s.send_private_msg(req.target, req.segments).await,
             };
-            if let (Err(error), Some(expected)) = (&result, expected) {
-                if error
-                    .downcast_ref::<yuantuan_core::reply_engine::DeliveryUnconfirmed>()
-                    .is_some()
-                {
+            if let Some(expected) = expected {
+                let needs_confirmation = result.is_ok()
+                    || result.as_ref().err().is_some_and(|error| {
+                        error
+                            .downcast_ref::<yuantuan_core::reply_engine::DeliveryUnconfirmed>()
+                            .is_some()
+                    });
+                if needs_confirmation {
+                    let expected = match &result {
+                        Ok(data) => expected.with_receipt(data),
+                        Err(_) => expected,
+                    };
                     tracing::info!(
                         target = req.target,
-                        "QQ 媒体回执超时，核对历史记录等待延迟送达"
+                        "QQ 图片请求已提交，核对历史记录中的服务端送达凭据"
                     );
                     if let Some(receipt) = delivery::confirm_from_history(
                         &expected,
@@ -190,6 +197,10 @@ pub fn send_fn(handle: AdapterHandle) -> yuantuan_core::reply_engine::SendFn {
                         tracing::info!(target=req.target, "QQ 延迟图片已通过历史记录确认送达");
                         return Ok(receipt);
                     }
+                    return Err(yuantuan_core::reply_engine::DeliveryUnconfirmed(
+                        "QQ 图片未取得服务端送达凭据，附件保留，不自动重复发送".into(),
+                    )
+                    .into());
                 }
             }
             result

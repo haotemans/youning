@@ -122,7 +122,7 @@ impl Handler {
     fn description(&self) -> &'static str {
         match self.op {
             Op::Recall => "按 OneBot 消息 ID 撤回本群消息（也可引用消息后 /撤回）",
-            Op::Ban => "按 QQ 号禁言本群普通成员，duration_minutes 为分钟",
+            Op::Ban => "禁言本群普通成员。slots.user_id 为目标 QQ，或使用当前消息中唯一真实 @ 目标；slots.duration_minutes 为用户明确指定的正整数分钟。缺少时长须先问用户，不得自行补默认时长。",
             Op::Unban => "按 QQ 号解除本群普通成员的禁言",
         }
     }
@@ -218,7 +218,7 @@ impl Skill for Handler {
             description: self.description(),
             prompt_template: "".into(),
             tools: vec![self.name()],
-            role_hint: None,
+            role_hint: Some("仅根据当前用户的明确管理请求调用。目标从当前消息真实 @ 成员或 QQ 号取得；禁言缺少时长时先询问分钟数，不擅自选择默认时长，不虚构执行成功。"),
         }
     }
     fn commands(&self) -> &'static [&'static str] {
