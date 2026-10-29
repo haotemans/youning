@@ -800,7 +800,7 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         let out = json!({"action":case["action"],"mood":"calm","mention":false,"reply_len":"short","reason":"基于语境选择能力",
             "task_goal":"执行当前任务","request_quote":if case["forged_quote"] == true {json!("不存在的原话")} else {case["text"].clone()},
             "skill_name":if case["lookup"] == true {"lookup.search"} else {"writer.write"}, "skill_slots":{"query":"FLUX 3 release open source"},
-            "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" {"continuing"} else {"new_topic"},
+            "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" || case["continuing"]==true {"continuing"} else {"new_topic"},
                 "confidence":if case["low"]==true {"low"} else {"high"},"benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":ids}});
         axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
     }));
@@ -822,6 +822,50 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         role_hint: None,
     })));
     let cases = [
+        // A fabricated high-confidence audience=request interpretation must not
+        // turn ambient game chat into prompt optimization or any other action.
+        (
+            json!({"text":"剑星的简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","continuing":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"生成一张白发猫娘","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"运行这段代码","lookup":false,"action":"start_task","audience":"bot","intent":"request"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true,"continuing":true}),
+            "g",
+            false,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true,"continuing":true,"foreign_link":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"优化一下提示词","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
         (
             json!({"text":"flux3开源了吗","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question"}),
             "g",
@@ -934,7 +978,10 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
             reply.person_id = "self".into();
             snapshot.recent_messages.push(reply.clone());
             snapshot.dialogue["last_reply_to_sender"] =
-                json!({"msg_id":reply.msg_id,"text":"另一个版本也要核实吗"});
+                json!({"msg_id":reply.msg_id,"person_id":"self","text":"另一个版本也要核实吗"});
+            if case["foreign_link"] == true {
+                snapshot.dialogue["reply_target_person_id"] = json!("p_someone_else");
+            }
         }
         let outcome = decision::decide(
             &rig.path,

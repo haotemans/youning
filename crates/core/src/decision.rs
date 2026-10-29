@@ -123,6 +123,7 @@ reply_mode: answer / clarify / state_uncertainty；缺必要信息用 clarify，
 - profile_updates 仅在 anchor 本人明确陈述或更正稳定称呼、技术偏好、长期项目、交流习惯时填；否则 []。不提取玩笑、假设、他人评价、临时情绪；不从 Bot 旧回答推断人物事实。引文必须逐字来自 anchor，字段更新保留仍然适用的已有信息
 - 是否回复、回复长度、情绪 mood 由场景与你的判断决定。普通聊天、简单事实和直接判断默认 short；用户要求详细解释、严谨证明、完整步骤，或问题需要复杂推导、代码实现、故障排查、风险说明时选择 long，不能为了简短省略必要内容
 - 当消息请求某个已注册 Skill 的能力时（如"整理一下"、"翻译"、"会议纪要"），优先返回 action=invoke_skill 而非 reply；skill_name 必须从可用 Skills 列表里挑
+- 群聊中的生图、提示词优化、群管理等执行型 Skill 需要当前本人直接呼叫你，或有同一人近期真实回复关联并引用该关联消息作为承接依据。不能只凭你判断 audience=bot 就执行；群友讨论游戏时说“剑星的简单一点”不是让你优化提示词，目录里有相关能力也不构成调用理由
 "#;
 
 /// 拼 SYSTEM_PROMPT：基础说明 + 当前已注册 Skills 目录（Q-S02 裁决）
@@ -415,12 +416,21 @@ fn enforce_action_contract(
                 || (information_lookup && matches!(a.intent, Intent::Question | Intent::FollowUp)))
     });
     let evidence_ok = source_quote(&snapshot.anchor.text, out.request_quote.as_deref());
+    let addressed = is_tool_addressed(msg, snapshot)
+        || out.assessment.as_ref().is_some_and(|a| {
+            a.continuity == Continuity::Continuing
+                && snapshot.dialogue["reply_target_person_id"] == msg.sender_pid
+                && snapshot.dialogue["last_reply_to_sender"]["person_id"] == "self"
+                && snapshot.dialogue["last_reply_to_sender"]["msg_id"]
+                    .as_i64()
+                    .is_some_and(|id| a.evidence_msg_ids.contains(&id))
+        });
     let goal_ok = out.action != DecisionAction::StartTask
         || out
             .task_goal
             .as_ref()
             .is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 800);
-    if !semantic_request || !evidence_ok || !goal_ok {
+    if !semantic_request || !evidence_ok || !goal_ok || (!information_lookup && !addressed) {
         out.action = if is_directed(msg, snapshot) {
             DecisionAction::Reply
         } else {
@@ -430,11 +440,19 @@ fn enforce_action_contract(
         out.skill_name = None;
         out.skill_slots = None;
         out.request_quote = None;
-        out.reason = "任务/技能缺少有效的语境判断、原话依据或目标，降级为普通聊天判断".into();
+        out.reason =
+            "任务/技能缺少有效的语境判断、原话依据、对话指向或目标，降级为普通聊天判断".into();
     }
 }
 
 pub(crate) fn is_directed(
+    msg: &MessageReceivedPayload,
+    snapshot: &crate::context_builder::ReplySnapshot,
+) -> bool {
+    is_tool_addressed(msg, snapshot) || is_reply_attention_request(&msg.text)
+}
+
+fn is_tool_addressed(
     msg: &MessageReceivedPayload,
     snapshot: &crate::context_builder::ReplySnapshot,
 ) -> bool {
@@ -445,7 +463,6 @@ pub(crate) fn is_directed(
             .first()
             .is_some_and(|m| m.person_id == "self")
         || msg.text.trim_start().starts_with("云团")
-        || is_reply_attention_request(&msg.text)
 }
 
 // Explicit requests for a response are directed speech even without a QQ @.
