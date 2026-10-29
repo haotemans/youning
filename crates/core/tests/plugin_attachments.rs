@@ -522,7 +522,28 @@ async fn generated_image_caption_is_atomic_and_unknown_delivery_is_not_retried()
             !uri.starts_with("file:////"),
             "Linux file URI must have exactly three slashes"
         );
-        assert_eq!(requests.len(), if outcome == 2 { 3 } else { 1 });
+        assert_eq!(
+            requests.len(),
+            match outcome {
+                0 => 1,
+                1 => 2,
+                _ => 3,
+            }
+        );
+        if outcome == 1 {
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|segments| segments[0]["type"] == "image")
+                    .count(),
+                1
+            );
+            assert_eq!(requests[1][0]["type"], "text");
+            let notice = requests[1][0]["data"]["text"].as_str().unwrap();
+            assert!(notice.contains("尚未确认送达"));
+            assert!(notice.contains("已保留"));
+            assert!(!notice.contains("发送失败"));
+        }
         if outcome == 2 {
             assert_eq!(requests[2][0]["type"], "text");
             assert!(requests[2][0]["data"]["text"]
@@ -530,7 +551,8 @@ async fn generated_image_caption_is_atomic_and_unknown_delivery_is_not_retried()
                 .unwrap()
                 .contains("发送失败"));
         }
-        // Unknown delivery must not send any contradictory failure notice.
+        // Unknown delivery sends only a pending notice, never an image retry
+        // or a definitive failure/success claim.
 
         assert!(path.exists());
     }
