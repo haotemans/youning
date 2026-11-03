@@ -169,6 +169,46 @@ async fn insert_new_meme(
     Ok(InsertOutcome::Added)
 }
 
+/// WebUI 手动上传：校验真实图片格式并立即入库，保持原始 GIF/WebP 文件。
+/// 返回 false 表示完全相同或感知重复，不覆盖现有文件。
+pub async fn ingest_upload(db_path: &Path, memes_dir: &Path, bytes: &[u8], category: &str) -> Result<bool> {
+    anyhow::ensure!(!bytes.is_empty() && bytes.len() <= 10 * 1024 * 1024, "图片大小必须在 1B 到 10MB 之间");
+    let format = image::guess_format(bytes).context("无法识别图片格式")?;
+    let ext = match format {
+        image::ImageFormat::Png => "png",
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::Gif => "gif",
+        image::ImageFormat::WebP => "webp",
+        _ => anyhow::bail!("仅支持 PNG、JPG、GIF 和 WebP"),
+    };
+    image::load_from_memory(bytes).context("图片数据无效或无法解码")?;
+    let hash = compute_md5(bytes);
+    let mut conn = crate::db::connect(db_path).await?;
+    if is_duplicate(&mut conn, &hash, compute_dhash(bytes)).await {
+        return Ok(false);
+    }
+    let folder = memes_dir.join("_manual");
+    tokio::fs::create_dir_all(&folder).await?;
+    let rel = format!("_manual/{hash}.{ext}");
+    let path = folder.join(format!("{hash}.{ext}"));
+    // 只写由内容哈希生成的文件名，绝不采用上传者提供的路径。
+    if tokio::fs::metadata(&path).await.is_ok() {
+        anyhow::bail!("该图片文件已存在");
+    }
+    tokio::fs::write(&path, bytes).await?;
+    match insert_new_meme(&mut conn, &rel, category, "admin", "active", bytes).await {
+        Ok(InsertOutcome::Added) => Ok(true),
+        Ok(InsertOutcome::Duplicated) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            Ok(false)
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            Err(e)
+        }
+    }
+}
+
 // ---------- 抽图 ----------
 
 /// 类别内 active 抽一张：last_used_ts 最久未用优先（NULL 最先），取前 3 随机一；
