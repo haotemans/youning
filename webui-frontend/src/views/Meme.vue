@@ -5,7 +5,12 @@
         <span class="yt-page-title">表情图库</span>
         <span class="yt-page-sub mono">待审 {{ counts.pending }} · 已入库 {{ counts.active }}</span>
       </div>
-      <n-button size="small" secondary :loading="loading" :disabled="busy" @click="load">刷新</n-button>
+      <div class="meme-upload">
+        <n-input v-model:value="uploadCategory" size="small" placeholder="上传分类（默认 misc）" :maxlength="40" :disabled="busy || uploading" />
+        <input ref="fileInput" class="meme-file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" multiple @change="uploadFiles" />
+        <n-button size="small" type="primary" :loading="uploading" :disabled="busy || uploading" @click="fileInput?.click()">添加表情包</n-button>
+        <n-button size="small" secondary :loading="loading" :disabled="busy" @click="load">刷新</n-button>
+      </div>
     </div>
 
     <n-card size="small">
@@ -82,6 +87,9 @@ import MemeImage from '../components/MemeImage.vue'
 
 type Meme = { id: number; file: string; category: string; use_count: number; added_by: string }
 type Action = 'approve' | 'category' | 'reject'
+const fileInput = ref<HTMLInputElement | null>(null)
+const uploadCategory = ref('')
+const uploading = ref(false)
 const items = ref<Meme[]>([])
 const counts = ref({ pending: 0, active: 0 })
 const categories = ref<string[]>([])
@@ -108,6 +116,38 @@ const sortOptions = [{ label: '最新添加', value: 'newest' }, { label: '最�
 const allSelected = computed(() => items.value.length > 0 && items.value.every(m => selected.value.includes(m.id)))
 
 function errorText(e: any, fallback: string) { return e.response?.data?.error || fallback }
+async function uploadFiles(event: Event) {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  if (!files.length || uploading.value) return
+  uploading.value = true
+  feedback.value = ''
+  let added = 0
+  const errors: string[] = []
+  try {
+    for (const file of files) {
+      if (file.size === 0 || file.size > 10 * 1024 * 1024) {
+        errors.push(`${file.name}：文件必须小于等于 10MB`)
+        continue
+      }
+      try {
+        await api.post('/memes/upload', file, {
+          params: { category: uploadCategory.value.trim() || 'misc' },
+          headers: { 'Content-Type': 'application/octet-stream' },
+        })
+        added++
+      } catch (e) {
+        errors.push(`${file.name}：${errorText(e, '上传失败')}`)
+      }
+    }
+    feedbackError.value = errors.length > 0
+    feedback.value = `成功添加 ${added} 张` + (errors.length ? `；失败：${errors.join('；')}` : '')
+    if (added) { status.value = 'active'; page.value = 1; await load() }
+  } finally {
+    input.value = ''
+    uploading.value = false
+  }
+}
 async function load() {
   clearTimeout(searchTimer)
   controller?.abort()
@@ -195,6 +235,9 @@ onBeforeUnmount(() => { controller?.abort(); clearTimeout(searchTimer) })
 </script>
 
 <style scoped>
+.meme-upload { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.meme-upload :deep(.n-input) { width: 170px; }
+.meme-file-input { display: none; }
 .gallery-help { color: var(--yt-ink-3); font-size: 13px; margin: 14px 0; }
 .meme-filter { display: grid; grid-template-columns: minmax(180px, 1fr) 180px 150px; gap: 10px; }
 .gallery-message { margin-top: 14px; }
