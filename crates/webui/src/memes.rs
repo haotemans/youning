@@ -1,6 +1,7 @@
 //! Authenticated meme gallery: filtering/pagination, approval, categorization and deletion.
 
 use crate::AppState;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -10,6 +11,26 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::HashSet;
 use std::path::Component;
+
+#[derive(Default, Deserialize)]
+pub struct UploadQuery { category: Option<String> }
+
+/// 原始图片字节上传，浏览器使用 application/octet-stream。
+/// 由路由限制请求体 10MiB，服务器再次验证实际图片格式。
+pub async fn upload(State(state): State<AppState>, Query(q): Query<UploadQuery>, bytes: Bytes) -> Response {
+    let category = match normalize_category(q.category, false) {
+        Ok(c) => c.unwrap_or_else(|| "misc".to_string()),
+        Err(response) => return response,
+    };
+    if bytes.is_empty() || bytes.len() > 10 * 1024 * 1024 {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "图片必须小于等于 10MB");
+    }
+    match yuantuan_core::meme::ingest_upload(&state.db_path, &state.memes_dir, &bytes, &category).await {
+        Ok(true) => Json(json!({"ok": true, "category": category})).into_response(),
+        Ok(false) => err(StatusCode::CONFLICT, "图库中已有相同或相似的图片"),
+        Err(e) => err(StatusCode::BAD_REQUEST, &format!("上传失败: {e}")),
+    }
+}
 
 #[derive(Default, Deserialize)]
 pub struct ListQuery {
