@@ -34,10 +34,17 @@ impl ExpectedDelivery {
                 "text" => text.push_str(segment["data"]["text"].as_str()?),
                 "at" => mentions.push(number(&segment["data"]["qq"])?),
                 "image" => {
-                    let path = url::Url::parse(segment["data"]["file"].as_str()?)
-                        .ok()?
-                        .to_file_path()
-                        .ok()?;
+                    let file = segment["data"]["file"].as_str()?;
+                    if let Some(encoded) = file.strip_prefix("base64://") {
+                        if encoded.is_empty() || encoded.len() > 12 * 1024 * 1024 {
+                            return None;
+                        }
+                        // Inline uploads have no trustworthy server filename.
+                        // Confirm only with the accepted message ID and sequence.
+                        images.push((String::new(), 0));
+                        continue;
+                    }
+                    let path = url::Url::parse(file).ok()?.to_file_path().ok()?;
                     let metadata = tokio::fs::metadata(&path).await.ok()?;
                     if !metadata.is_file() || metadata.len() == 0 {
                         return None;
@@ -115,7 +122,10 @@ impl ExpectedDelivery {
                         .iter()
                         .all(|(file, size)| !file.is_empty() && *size > 0)
             } else {
-                images == self.images
+                self.images
+                    .iter()
+                    .all(|(file, size)| !file.is_empty() && *size > 0)
+                    && images == self.images
             };
             if text == self.text && images_match && mentions == self.mentions {
                 if let Some(id) = message["message_id"]
@@ -176,6 +186,23 @@ mod tests {
     }
     fn message() -> Value {
         json!({"group_id":42,"user_id":100,"time":1001,"real_seq":"789","message_id":-123,"message":[{"type":"image","data":{"file":"unique.png","file_size":"123"}},{"type":"text","data":{"text":"NAI 4.5 · 3:4"}}]})
+    }
+    #[tokio::test]
+    async fn inline_images_require_accepted_id_and_a_real_server_sequence() {
+        let request = SendRequest {
+            chat_type: ChatType::Group,
+            target: 42,
+            operation: yuantuan_core::reply_engine::SendOperation::Message,
+            segments: json!([{"type":"image","data":{"file":"base64://aW1hZ2U="}},{"type":"text","data":{"text":"NAI 4.5 · 3:4"}}]),
+        };
+        let mut expected = ExpectedDelivery::from_request(&request, 100).await.unwrap();
+        expected.started = 1000;
+        assert!(expected.receipt(&json!({"messages":[message()]})).is_none());
+        let expected = expected.with_receipt(&json!({"message_id":-123}));
+        assert!(expected.receipt(&json!({"messages":[message()]})).is_some());
+        let mut queued = message();
+        queued["real_seq"] = json!(0);
+        assert!(expected.receipt(&json!({"messages":[queued]})).is_none());
     }
     #[test]
     fn history_confirmation_requires_server_sequence_identity_and_exact_attachment() {

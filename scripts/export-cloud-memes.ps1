@@ -12,6 +12,7 @@ for ($sheetIndex = 0; $sheetIndex -lt $manifest.sheets.Count; $sheetIndex++) {
     try {
         if ($sheet.Width -ne 2048 -or $sheet.Height -ne 2048 -or $sheetSpec.cells.Count -ne 16) { throw 'Unexpected sticker sheet layout' }
         for ($index = 0; $index -lt 16; $index++) {
+            if ($sheetSpec.cells[$index].enabled -eq $false) { continue }
             $category = [string]$sheetSpec.cells[$index].category
             if ($category.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0 -or $category -in '.', '..') { throw 'Invalid category' }
             $folder = Join-Path $memesOutputRoot $category

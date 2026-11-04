@@ -49,7 +49,8 @@
         },
         {
           "caption": "发红包啦！",
-          "category": "发红包"
+          "category": "发红包",
+          "enabled": false
         },
         {
           "caption": "哈哈，是吗…",
@@ -103,7 +104,8 @@
         },
         {
           "caption": "暗中观察",
-          "category": "暗中观察"
+          "category": "暗中观察",
+          "enabled": false
         },
         {
           "caption": "要抱抱嘛",
@@ -139,7 +141,8 @@
         },
         {
           "caption": "谢谢你！",
-          "category": "谢谢你"
+          "category": "谢谢你",
+          "enabled": false
         }
       ]
     },
@@ -197,7 +200,8 @@
         },
         {
           "caption": "收到！",
-          "category": "收到"
+          "category": "收到",
+          "enabled": false
         },
         {
           "caption": "棒！",

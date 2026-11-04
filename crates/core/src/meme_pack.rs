@@ -29,6 +29,11 @@ struct Sheet {
 #[derive(Deserialize)]
 struct Cell {
     category: String,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
+}
+fn default_enabled() -> bool {
+    true
 }
 struct Sticker {
     relative: PathBuf,
@@ -55,6 +60,9 @@ fn extract() -> Result<Vec<Sticker>> {
         let margin = manifest.margin;
         ensure!(margin * 2 < side, "裁切边距无效");
         for (index, cell) in sheet.cells.iter().enumerate() {
+            if !cell.enabled {
+                continue;
+            }
             ensure!(
                 !cell.category.is_empty()
                     && Path::new(&cell.category).components().count() == 1
@@ -168,7 +176,7 @@ pub async fn install(db: &Path, root: &Path) -> Result<usize> {
 mod tests {
     use super::*;
     #[tokio::test]
-    async fn all_64_text_variants_install_once_and_admin_changes_survive() {
+    async fn all_60_unique_captions_install_once_and_admin_changes_survive() {
         let dir = std::env::temp_dir().join(format!(
             "yt-cloud-pack-{}-{}",
             std::process::id(),
@@ -179,7 +187,7 @@ mod tests {
         let root = dir.join("memes");
         let mut conn = crate::db::connect(&db).await.unwrap();
         crate::db::migrate(&mut conn).await.unwrap();
-        assert_eq!(install(&db, &root).await.unwrap(), 64);
+        assert_eq!(install(&db, &root).await.unwrap(), 60);
         assert_eq!(install(&db, &root).await.unwrap(), 0);
         let (count, categories): (i64, i64) = conn
             .query_row(
@@ -189,7 +197,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!((count, categories), (64, 60));
+        assert_eq!((count, categories), (60, 60));
         conn.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_pack',1,1);
             INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(1,'g','group','p_pack','发表情',1);").await.unwrap();
         let msg = crate::event::MessageReceivedPayload {
@@ -235,7 +243,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(remaining, 63);
+        assert_eq!(remaining, 59);
         let status: String = conn
             .query_row(
                 "SELECT status FROM meme_library WHERE id=2 AND category='我的分类'",

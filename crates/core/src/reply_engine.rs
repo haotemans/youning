@@ -18,6 +18,7 @@ use crate::prefilter::SelfMsgIds;
 use crate::state::{MoodState, MoodValue};
 use crate::{context_builder, llm, meme};
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use rand::Rng;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -894,7 +895,45 @@ async fn process_plugin_result(
 
 /// 直接发图：无首泡延时、无作废核对，失败退避重试一次；落 self 图片消息保持流水连贯
 async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
-    process_media(eng, job, path, "image", note, ArtifactRetention::Keep).await
+    use tokio::io::AsyncReadExt;
+    let encoded = async {
+        let file = tokio::fs::File::open(path).await?;
+        let mut bytes = Vec::new();
+        file.take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
+            "表情文件为空或超过8MiB"
+        );
+        Ok::<_, anyhow::Error>(format!(
+            "base64://{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    }
+    .await;
+    match encoded {
+        Ok(file) => {
+            process_media_caption_with_file(
+                eng,
+                job,
+                path,
+                "image",
+                note,
+                ArtifactRetention::Keep,
+                None,
+                Some(file),
+            )
+            .await;
+        }
+        Err(e) => eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+            chat_id: job.chat_id.clone(),
+            bubble_index: 0,
+            total: 1,
+            ok: false,
+            note: Some(format!("表情读取失败：{e}")),
+        })),
+    }
 }
 
 async fn process_media(
@@ -924,7 +963,21 @@ async fn process_media_caption(
     retention: ArtifactRetention,
     caption: Option<&str>,
 ) -> MediaDelivery {
-    let mut segments = vec![json!({"type":kind,"data":{"file":meme::file_url(path)}})];
+    process_media_caption_with_file(eng, job, path, kind, note, retention, caption, None).await
+}
+
+async fn process_media_caption_with_file(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    path: &Path,
+    kind: &str,
+    note: &str,
+    retention: ArtifactRetention,
+    caption: Option<&str>,
+    file: Option<String>,
+) -> MediaDelivery {
+    let file = file.unwrap_or_else(|| meme::file_url(path));
+    let mut segments = vec![json!({"type":kind,"data":{"file":file}})];
     if job.chat_type == ChatType::Group && job.mention {
         if let Some(qq) = job.mention_qq.filter(|qq| *qq > 0) {
             segments.push(json!({"type":"at","data":{"qq":qq.to_string()}}));
@@ -1391,6 +1444,11 @@ mod tests {
         assert_eq!(requests[0].segments[0]["type"], "text");
         assert_eq!(requests[0].segments[0]["data"]["text"], "好耶！");
         assert_eq!(requests[1].segments[0]["type"], "image");
+        let file = requests[1].segments[0]["data"]["file"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(file.strip_prefix("base64://").unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"image", "NapCat 不需要访问云团本地的表情路径");
     }
 
     #[tokio::test]

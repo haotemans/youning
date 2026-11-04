@@ -310,11 +310,10 @@ async fn decision_send_meme_sends_image() {
         .expect("应含 image 段");
     let file = img["data"]["file"].as_str().unwrap().to_string();
     assert!(
-        file.starts_with("file:///"),
-        "file 应为 file:// 绝对路径: {file}"
+        file.starts_with("base64://iVBORw0"),
+        "应直接携带 PNG，不能依赖 NapCat 的本地目录"
     );
-    let local = url::Url::parse(&file).unwrap().to_file_path().unwrap();
-    assert!(local.exists(), "图文件应存在: {}", local.display());
+    assert!(png_path.exists(), "表情原文件仍应保留");
 
     // use_count 增加、last_used_ts 已写(等异步落库,不要硬编码 200ms——CI 共享 vCPU 上 200ms 不够)
     let mut conn = db::connect(&db_path).await.unwrap();
