@@ -7,6 +7,13 @@ on:
   pull_request:
 
 jobs:
+  feature-doc-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify feature docs and source ownership
+        run: python3 scripts/check_feature_docs.py
+
   meme-gallery-ui:
     runs-on: ubuntu-latest
     steps:

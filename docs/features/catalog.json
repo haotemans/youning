@@ -1,0 +1,329 @@
+{
+  "schema": 1,
+  "scope": "Current primary Rust modules and Vue views, not a claim of end-to-end acceptance",
+  "features": [
+    {
+      "id": "qq",
+      "title": "QQ 接入与消息采集",
+      "status": "已接入（需真实 QQ 验收）",
+      "doc": "docs/features/qq.md",
+      "source": [
+        "crates/adapter-qq/src/client.rs",
+        "crates/adapter-qq/src/delivery.rs",
+        "crates/adapter-qq/src/ingest.rs",
+        "crates/adapter-qq/src/lib.rs",
+        "crates/adapter-qq/src/server.rs",
+        "crates/core/src/napcat_slot.rs",
+        "webui-frontend/src/views/Platform.vue"
+      ],
+      "tests": [
+        "crates/adapter-qq/tests/ingest.rs",
+        "crates/adapter-qq/tests/reply.rs",
+        "crates/adapter-qq/tests/delayed_delivery.rs"
+      ]
+    },
+    {
+      "id": "conversation",
+      "title": "会话调度与消息过滤",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/conversation.md",
+      "source": [
+        "crates/core/src/bot.rs",
+        "crates/core/src/prefilter.rs",
+        "crates/core/src/window.rs"
+      ],
+      "tests": [
+        "crates/adapter-qq/tests/pipeline.rs",
+        "crates/core/tests/bot_context.rs"
+      ]
+    },
+    {
+      "id": "decision",
+      "title": "参与判断与状态",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/decision.md",
+      "source": [
+        "crates/core/src/decision.rs",
+        "crates/core/src/engagement.rs",
+        "crates/core/src/state.rs"
+      ],
+      "tests": [
+        "crates/core/examples/verify_participation.rs",
+        "crates/core/tests/bot_context.rs"
+      ]
+    },
+    {
+      "id": "replies",
+      "title": "回复分泡与媒体发送",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/replies.md",
+      "source": [
+        "crates/core/src/reply_engine.rs"
+      ],
+      "tests": [
+        "crates/adapter-qq/tests/reply.rs",
+        "crates/adapter-qq/tests/delayed_delivery.rs"
+      ]
+    },
+    {
+      "id": "memory",
+      "title": "上下文、长期记忆与每日归纳",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/memory.md",
+      "source": [
+        "crates/core/src/consolidation.rs",
+        "crates/core/src/context_builder.rs",
+        "crates/core/src/memory.rs",
+        "crates/webui/src/memories.rs",
+        "webui-frontend/src/views/Memories.vue"
+      ],
+      "tests": [
+        "crates/core/tests/bot_context.rs",
+        "crates/core/tests/consolidation.rs"
+      ]
+    },
+    {
+      "id": "personality",
+      "title": "人格与回复示例版本",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/personality.md",
+      "source": [
+        "crates/core/src/personality.rs",
+        "crates/webui/src/personality.rs",
+        "webui-frontend/src/views/Personality.vue"
+      ],
+      "tests": [
+        "webui-frontend/tests/personality-flow.spec.js",
+        "crates/core/tests/bot_context.rs"
+      ]
+    },
+    {
+      "id": "tasks",
+      "title": "Agent 任务与工具执行",
+      "status": "已实现基础闭环（自动回聊未完成）",
+      "doc": "docs/features/tasks.md",
+      "source": [
+        "crates/core/src/agent.rs",
+        "crates/core/src/tools.rs",
+        "crates/core/src/tools/sandbox.rs",
+        "crates/webui/src/tasks_api.rs",
+        "webui-frontend/src/views/Tasks.vue"
+      ],
+      "tests": [
+        "crates/core/tests/agent_loop.rs",
+        "crates/core/tests/sandbox_docker.rs"
+      ]
+    },
+    {
+      "id": "extensions",
+      "title": "Plugin、Skill 与 Tool",
+      "status": "编译期插件已实现（动态安装未实现）",
+      "doc": "docs/features/extensions.md",
+      "source": [
+        "crates/core/src/plugins.rs",
+        "crates/core/src/plugins/invocation.rs",
+        "crates/core/src/skills.rs",
+        "crates/plugin-api/src/lib.rs",
+        "crates/plugin-api/src/skills.rs",
+        "crates/plugin-api/src/tools.rs",
+        "crates/webui/src/plugins_api.rs",
+        "webui-frontend/src/views/Plugins.vue"
+      ],
+      "tests": [
+        "crates/core/tests/plugin_host.rs",
+        "crates/core/tests/plugin_attachments.rs"
+      ]
+    },
+    {
+      "id": "mcp",
+      "title": "MCP 服务连接",
+      "status": "已实现 stdio 工具子集",
+      "doc": "docs/features/mcp.md",
+      "source": [
+        "crates/core/src/mcp.rs",
+        "crates/webui/src/mcp_api.rs",
+        "webui-frontend/src/views/Mcp.vue"
+      ],
+      "tests": [
+        "crates/core/tests/plugin_host.rs"
+      ]
+    },
+    {
+      "id": "memes",
+      "title": "表情包采集、图库与发送",
+      "status": "已实现流程（偷图需审核）",
+      "doc": "docs/features/memes.md",
+      "source": [
+        "crates/core/src/meme.rs",
+        "crates/webui/src/memes.rs",
+        "webui-frontend/src/views/Meme.vue"
+      ],
+      "tests": [
+        "crates/adapter-qq/tests/meme.rs",
+        "crates/webui/tests/memes_api.rs",
+        "webui-frontend/tests/memes-flow.spec.js"
+      ]
+    },
+    {
+      "id": "models",
+      "title": "模型角色与运行参数",
+      "status": "已实现（外部 Provider 需自配）",
+      "doc": "docs/features/models.md",
+      "source": [
+        "crates/core/src/llm.rs",
+        "crates/webui/src/config_api.rs",
+        "crates/webui/src/llm_test.rs",
+        "webui-frontend/src/views/Models.vue",
+        "webui-frontend/src/views/Params.vue"
+      ],
+      "tests": [
+        "crates/webui/tests/config_hot.rs",
+        "crates/webui/tests/llm_test.rs",
+        "webui-frontend/tests/models-flow.spec.js"
+      ]
+    },
+    {
+      "id": "admin-ui",
+      "title": "Web 管理后台与观测",
+      "status": "已实现（界面按后端能力受限）",
+      "doc": "docs/features/admin-ui.md",
+      "source": [
+        "crates/webui/src/auth.rs",
+        "crates/webui/src/dashboard.rs",
+        "crates/webui/src/events_api.rs",
+        "crates/webui/src/lib.rs",
+        "crates/webui/src/overview.rs",
+        "crates/webui/src/state.rs",
+        "crates/webui/src/static_files.rs",
+        "crates/webui/src/ws.rs",
+        "webui-frontend/src/views/Dashboard.vue",
+        "webui-frontend/src/views/Login.vue",
+        "webui-frontend/src/views/Trace.vue"
+      ],
+      "tests": [
+        "crates/webui/tests/auth_status.rs",
+        "crates/webui/tests/pages_api.rs"
+      ]
+    },
+    {
+      "id": "storage",
+      "title": "SQLite 数据与事件追踪",
+      "status": "已实现（代码入口）",
+      "doc": "docs/features/storage.md",
+      "source": [
+        "crates/core/src/db.rs",
+        "crates/core/src/db/access.rs",
+        "crates/core/src/event.rs"
+      ],
+      "tests": [
+        "crates/core/tests/sqlx_storage.rs"
+      ]
+    },
+    {
+      "id": "backup",
+      "title": "备份与恢复",
+      "status": "已实现（恢复在启动阶段生效）",
+      "doc": "docs/features/backup.md",
+      "source": [
+        "crates/core/src/backup.rs",
+        "crates/webui/src/backup_api.rs",
+        "webui-frontend/src/views/Backup.vue"
+      ],
+      "tests": [
+        "crates/webui/tests/pages_api.rs"
+      ]
+    },
+    {
+      "id": "relations",
+      "title": "关系图谱",
+      "status": "已有数据与页面（质量依赖归纳）",
+      "doc": "docs/features/relations.md",
+      "source": [
+        "crates/webui/src/relations.rs",
+        "webui-frontend/src/views/Relations.vue"
+      ],
+      "tests": [
+        "webui-frontend/tests/relations-flow.spec.js"
+      ]
+    },
+    {
+      "id": "runtime",
+      "title": "启动、监督与部署",
+      "status": "已实现（部署依赖现场环境）",
+      "doc": "docs/features/runtime.md",
+      "source": [
+        "crates/core/src/lib.rs",
+        "crates/core/src/supervisor.rs",
+        "crates/yuantuan/src/config.rs",
+        "crates/yuantuan/src/db.rs",
+        "crates/yuantuan/src/main.rs",
+        "crates/yuantuan/src/shutdown.rs"
+      ],
+      "tests": [
+        "crates/core/tests/sqlx_storage.rs"
+      ]
+    },
+    {
+      "id": "knowledge",
+      "title": "知识库（占位）",
+      "status": "未实现：仅 UI 状态占位",
+      "doc": "docs/features/knowledge.md",
+      "source": [
+        "webui-frontend/src/views/Kb.vue"
+      ],
+      "tests": []
+    },
+    {
+      "id": "plugin-anysearch",
+      "title": "采苓：AnySearch 搜索",
+      "status": "代码与插件入口已实现（外部网络依赖）",
+      "doc": "docs/features/plugin-anysearch.md",
+      "source": [
+        "plugins/anysearch/src/lib.rs"
+      ],
+      "tests": [
+        "plugins/anysearch/src/tests.rs"
+      ]
+    },
+    {
+      "id": "plugin-nai-image",
+      "title": "琼华：NAI 生图",
+      "status": "代码与插件入口已实现（外部 API 依赖）",
+      "doc": "docs/features/plugin-nai-image.md",
+      "source": [
+        "plugins/nai-image/src/lib.rs",
+        "plugins/nai-image/src/prompt.rs"
+      ],
+      "tests": []
+    },
+    {
+      "id": "plugin-social-media",
+      "title": "采薇：视频与图文解析",
+      "status": "实验性（真实平台可用性不稳定）",
+      "doc": "docs/features/plugin-social-media.md",
+      "source": [
+        "plugins/social-media/src/abogus_johnserf.rs",
+        "plugins/social-media/src/douyin.rs",
+        "plugins/social-media/src/http.rs",
+        "plugins/social-media/src/lib.rs",
+        "plugins/social-media/src/parse.rs",
+        "plugins/social-media/src/websign.rs"
+      ],
+      "tests": []
+    },
+    {
+      "id": "plugin-moderator",
+      "title": "敬之：群聊管理",
+      "status": "已实现权限检查（需真实 QQ 验收）",
+      "doc": "docs/features/plugin-moderator.md",
+      "source": [
+        "crates/adapter-qq/src/moderation.rs",
+        "plugins/moderator/src/lib.rs"
+      ],
+      "tests": [
+        "crates/adapter-qq/src/moderation/tests.rs",
+        "plugins/moderator/src/tests.rs"
+      ]
+    }
+  ]
+}
