@@ -1,6 +1,6 @@
 # 琼华：NAI 生图
 
-[返回功能索引](README.md) · [返回文档总索引](../README.md)
+[返回功能索引](../../README.md) · [返回文档总索引](../../../README.md) · [本模块索引](README.md)
 
 **当前状态：代码与插件入口已实现（外部 API 依赖）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
@@ -13,12 +13,12 @@
 
 ## 边界
 
-- 模型支持的比例、密钥、API 路径、超时以[插件 README](../../plugins/nai-image/README.md)为准，外部生成服务失败不等于本地已生成图片。
+- 模型支持的比例、密钥、API 路径、超时以[插件 README](../../../../plugins/nai-image/README.md)为准，外部生成服务失败不等于本地已生成图片。
 
 ## 对应实现（本页负责的主源码）
 
-- [`plugins/nai-image/src/lib.rs`](../../plugins/nai-image/src/lib.rs)
-- [`plugins/nai-image/src/prompt.rs`](../../plugins/nai-image/src/prompt.rs)
+- [`plugins/nai-image/src/lib.rs`](../../../../plugins/nai-image/src/lib.rs)
+- [`plugins/nai-image/src/prompt.rs`](../../../../plugins/nai-image/src/prompt.rs)
 
 ## 验证入口
 

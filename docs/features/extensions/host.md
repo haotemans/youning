@@ -1,6 +1,6 @@
 # Plugin、Skill 与 Tool
 
-[返回功能索引](README.md) · [返回文档总索引](../README.md)
+[返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
 
 **当前状态：编译期插件已实现（动态安装未实现）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
@@ -15,22 +15,22 @@
 ## 边界
 
 - 编译进程序的第三方 Rust 插件是受信任本地代码，不是进程级隔离；动态插件市场、面板上传编译属于规划。
-- 开发插件时参照[插件接口 README](../../plugins/README.md)和[插件层记录](../changes/plugins-layer-workbench.md)。
+- 开发插件时参照[插件接口 README](../../../plugins/README.md)和[插件层记录](../../changes/plugins-layer-workbench.md)。
 
 ## 对应实现（本页负责的主源码）
 
-- [`crates/core/src/plugins.rs`](../../crates/core/src/plugins.rs)
-- [`crates/core/src/plugins/invocation.rs`](../../crates/core/src/plugins/invocation.rs)
-- [`crates/core/src/skills.rs`](../../crates/core/src/skills.rs)
-- [`crates/plugin-api/src/lib.rs`](../../crates/plugin-api/src/lib.rs)
-- [`crates/plugin-api/src/skills.rs`](../../crates/plugin-api/src/skills.rs)
-- [`crates/plugin-api/src/tools.rs`](../../crates/plugin-api/src/tools.rs)
-- [`crates/webui/src/plugins_api.rs`](../../crates/webui/src/plugins_api.rs)
-- [`webui-frontend/src/views/Plugins.vue`](../../webui-frontend/src/views/Plugins.vue)
+- [`crates/core/src/plugins.rs`](../../../crates/core/src/plugins.rs)
+- [`crates/core/src/plugins/invocation.rs`](../../../crates/core/src/plugins/invocation.rs)
+- [`crates/core/src/skills.rs`](../../../crates/core/src/skills.rs)
+- [`crates/plugin-api/src/lib.rs`](../../../crates/plugin-api/src/lib.rs)
+- [`crates/plugin-api/src/skills.rs`](../../../crates/plugin-api/src/skills.rs)
+- [`crates/plugin-api/src/tools.rs`](../../../crates/plugin-api/src/tools.rs)
+- [`crates/webui/src/plugins_api.rs`](../../../crates/webui/src/plugins_api.rs)
+- [`webui-frontend/src/views/Plugins.vue`](../../../webui-frontend/src/views/Plugins.vue)
 
 ## 验证入口
 
-- [`crates/core/tests/plugin_host.rs`](../../crates/core/tests/plugin_host.rs)
-- [`crates/core/tests/plugin_attachments.rs`](../../crates/core/tests/plugin_attachments.rs)
+- [`crates/core/tests/plugin_host.rs`](../../../crates/core/tests/plugin_host.rs)
+- [`crates/core/tests/plugin_attachments.rs`](../../../crates/core/tests/plugin_attachments.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
