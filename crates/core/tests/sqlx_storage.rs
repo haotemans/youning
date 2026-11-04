@@ -150,6 +150,9 @@ async fn backup_restores_a_consistent_snapshot_during_concurrent_writes() {
     let rig = TestDb::new().await;
     let mut c = db::connect(&rig.path).await.unwrap();
     c.execute_batch("CREATE TABLE pair (id INTEGER PRIMARY KEY, n INTEGER); INSERT INTO pair VALUES (1,0),(2,0);").await.unwrap();
+    c.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_image',1,1);
+        INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts,has_image) VALUES(1,'g','group','p_image','分享项目截图',1,1);
+        INSERT INTO message_images(msg_id,image_index,url,status,observation) VALUES(1,0,'https://example.test/project.png','ready','{\"summary\":\"项目截图\",\"visible_text\":\"Rust\",\"uncertainty\":\"归属未知\"}');").await.unwrap();
     let value = "中文与引号 '; DROP TABLE persons; --";
     c.execute(
         "INSERT INTO state_kv VALUES ('text',?1,1)",
@@ -215,7 +218,11 @@ async fn backup_restores_a_consistent_snapshot_during_concurrent_writes() {
         .fetch_one(&mut *c)
         .await
         .unwrap();
-    assert_eq!((integrity.as_str(), version), ("ok", 8));
+    assert_eq!((integrity.as_str(), version), ("ok", 9));
+    let image_source: (i64,String) = sqlx::query_as("SELECT m.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id")
+        .fetch_one(&mut *c).await.unwrap();
+    assert_eq!(image_source.0,1);
+    assert!(image_source.1.contains("项目截图"));
     assert_eq!(pair.0, pair.1, "备份不能落在写事务的中间");
     assert_eq!(text, value);
     assert_eq!(
