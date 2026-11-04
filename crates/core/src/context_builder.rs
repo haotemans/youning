@@ -345,7 +345,7 @@ pub async fn capture_reply_snapshot(
     let active_tasks = tx.prepare("SELECT task_id,substr(goal,1,160),used_calls FROM tasks WHERE chat_id=?1 AND created_by_pid=?2 AND state='running' ORDER BY created_at DESC LIMIT 3").await?
         .query_map(params![anchor.chat_id,anchor.sender_pid], |r| Ok(json!({"task_id":r.try_get::<String, _>(0)?,"goal":r.try_get::<String, _>(1)?,"used_calls":r.try_get::<i64, _>(2)?,"state":"running"}))).await?
         .collect::<sqlx::Result<Vec<_>>>()?;
-    let meme_categories = tx.prepare("SELECT category FROM meme_library WHERE status='active' AND length(category) BETWEEN 1 AND 60 GROUP BY category ORDER BY category LIMIT 24").await?
+    let meme_categories = tx.prepare("SELECT category FROM meme_library WHERE status='active' AND length(category) BETWEEN 1 AND 60 GROUP BY category ORDER BY MIN(CASE WHEN file LIKE '%/cloud-v1-%' THEN 0 ELSE 1 END),category LIMIT 96").await?
         .query_map(params![], |r| r.try_get(0)).await?
         .collect::<sqlx::Result<Vec<String>>>()?;
     tx.commit().await?;
@@ -394,6 +394,7 @@ pub fn render_bot_context_with_skills(
     let mut profile = snapshot.profile.clone();
     let mut participants = snapshot.participants.clone();
     let mut active_tasks = snapshot.active_tasks.clone();
+    let mut meme_categories = snapshot.meme_categories.clone();
     let mut pruned = false;
     loop {
         let user = serde_json::to_string(&json!({
@@ -408,7 +409,7 @@ pub fn render_bot_context_with_skills(
                     json!({"name":name,"description":description})).collect::<Vec<_>>(),
                 "cross_chat_history_available":false,"execution_results":[]},
             "dialogue":snapshot.dialogue, "active_tasks":active_tasks,
-            "meme_categories":snapshot.meme_categories,
+            "meme_categories":meme_categories,
             "visual_context":snapshot.visual_context,"relationships":snapshot.relationships,
         }))?;
         if system.chars().count() + user.chars().count() <= cfg.budget_chars {
@@ -431,6 +432,8 @@ pub fn render_bot_context_with_skills(
             participants.pop();
         } else if !active_tasks.is_empty() {
             active_tasks.pop();
+        } else if !meme_categories.is_empty() {
+            meme_categories.pop();
         } else {
             anyhow::bail!("上下文预算不足以保留人格、回复锚点及引用原文，停止本次模型调用");
         }

@@ -13,6 +13,7 @@ pub mod event;
 pub mod llm;
 pub mod mcp;
 pub mod meme;
+pub mod meme_pack;
 pub mod memory;
 pub mod napcat_slot;
 pub mod personality;

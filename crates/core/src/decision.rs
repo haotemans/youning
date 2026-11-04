@@ -204,6 +204,7 @@ pub async fn decide(
         "active_tasks",
         "person_context",
         "relationships",
+        "meme_categories",
     ] {
         while ctx.to_string().chars().count() > 8000 {
             if ctx[key].as_array_mut().is_none_or(|a| a.pop().is_none()) {
