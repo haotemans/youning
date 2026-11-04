@@ -1,0 +1,36 @@
+# Plugin、Skill 与 Tool
+
+[返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
+
+**当前状态：编译期插件已实现（动态安装未实现）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
+
+> 注册表、编译期插件装配、热配置、作用域与调用限制。
+
+## 实际行为
+
+- `Tool` 是结构化执行能力；`Skill` 是 Rust trait 定义的技能入口；`Plugin` 把 Tool/Skill 打包给宿主，管理归属、会话范围、超时、并发和输出限制。
+- 当前插件在构建时编译进程序，面板支持列出、配置和启停已编译插件；把任意插件文件丢进目录不会自动安装。
+- `SKILL.md` 是插件的参考或使用契约，不代表运行时会自动解析并安装 Markdown Skill。
+
+## 边界
+
+- 编译进程序的第三方 Rust 插件是受信任本地代码，不是进程级隔离；动态插件市场、面板上传编译属于规划。
+- 开发插件时参照[插件接口 README](../../../plugins/README.md)和[插件层记录](../../changes/plugins-layer-workbench.md)。
+
+## 对应实现（本页负责的主源码）
+
+- [`crates/core/src/plugins.rs`](../../../crates/core/src/plugins.rs)
+- [`crates/core/src/plugins/invocation.rs`](../../../crates/core/src/plugins/invocation.rs)
+- [`crates/core/src/skills.rs`](../../../crates/core/src/skills.rs)
+- [`crates/plugin-api/src/lib.rs`](../../../crates/plugin-api/src/lib.rs)
+- [`crates/plugin-api/src/skills.rs`](../../../crates/plugin-api/src/skills.rs)
+- [`crates/plugin-api/src/tools.rs`](../../../crates/plugin-api/src/tools.rs)
+- [`crates/webui/src/plugins_api.rs`](../../../crates/webui/src/plugins_api.rs)
+- [`webui-frontend/src/views/Plugins.vue`](../../../webui-frontend/src/views/Plugins.vue)
+
+## 验证入口
+
+- [`crates/core/tests/plugin_host.rs`](../../../crates/core/tests/plugin_host.rs)
+- [`crates/core/tests/plugin_attachments.rs`](../../../crates/core/tests/plugin_attachments.rs)
+
+维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。

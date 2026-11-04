@@ -1,6 +1,6 @@
 # 进行中的工作
 
-[返回文档索引](../README.md)
+[返回文档索引](../README.md) · [当前功能与代码映射](../features/README.md)
 
 这里保留未关闭或验收信息尚不充分的 Workbench。下表采用原记录的状态，不把实现片段或历史测试记录视为整项工作的完成证明。
 
@@ -9,7 +9,7 @@
 | [后端加固](backend-hardening-workbench.md) | `implementing → verifying`，包含多轮落地记录 | 连续窗口与 Agent 加固已补回归；继续核对窗口优先级、回复锚点、资源上限及停机边界 | [运行时设计](../design/runtime-design.md)、[信息流参考](../reference/message-flow-rules.md) |
 | [备份页](backup-page-workbench.md) | `decided` | 已有备份实现，但原记录缺少收口反馈；需要核对范围和验收证据 | [备份实现](../../crates/core/src/backup.rs)、[管理 API](../../crates/webui/src/backup_api.rs)、[数据模型](../reference/data-model.md) |
 | [前端设计](frontend-design-workbench.md) | `implementing` | 页面验收、多媒体后续阶段与旧待办是否仍适用 | [运行时设计第四章](../design/runtime-design.md)、[前端代码](../../webui-frontend) |
-| [插件层](plugins-layer-workbench.md) | `verifying` | 群聊端到端验证、插件数据备份、Skill 与 MCP 联动；开发指南仍在待办中 | [插件示例](../../plugins/hello)、[Skill 契约](../../crates/core/src/skills.rs)、[MCP 客户端](../../crates/core/src/mcp.rs) |
+| [插件层](plugins-layer-workbench.md) | `verifying` | 群聊端到端验证、插件数据备份、Skill 与 MCP 联动；开发指南仍在待办中 | [当前插件](../../plugins/README.md)、[Skill 契约](../../crates/core/src/skills.rs)、[MCP 客户端](../../crates/core/src/mcp.rs) |
 
 ## 继续与收口
 

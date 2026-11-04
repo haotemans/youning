@@ -24,7 +24,7 @@
 | Web 管理面板 | 在浏览器中管理模型、配置、任务、记忆及运行状态，查看决策与事件记录。 |
 | 轻量自托管 | Rust 后端、内嵌前端与 SQLite 本地存储，以单二进制部署为基础；实际资源占用取决于配置、负载和启用的外部服务。 |
 
-具体工具能力取决于插件开关、模型与外部服务配置。设计目标不等于当前实现已全部完成；实现边界与已知差距见[信息流实现参考](docs/reference/message-flow-rules.md)。
+具体工具能力取决于插件开关、模型与外部服务配置。**功能、源码、测试和实现状态请以[功能对应索引](docs/features/README.md)为入口**；设计目标不等于已经交付，已知差距另见[信息流实现参考](docs/reference/message-flow-rules.md)。
 
 **技术栈**：Rust + Axum + Tokio + SQLx + SQLite；Vue 3 + Vite + TypeScript + Naive UI。
 
@@ -132,7 +132,7 @@ Docker 开发沙箱是可选工具能力，默认关闭，配置见[开发沙箱
 
 主进程在 [main.rs](crates/yuantuan/src/main.rs) 中装配对话管线、任务执行器、插件、MCP、每日归纳和 WebUI。SQLite 保存业务状态与任务流水；[EventBus](crates/core/src/event.rs) 使用进程内 `tokio::broadcast` 解耦模块，Tracer 与面板用于观测。事件总线不是持久消息队列，观测事件可能因消费滞后而丢失，不能用 Trace 代替任务数据库判断是否完成。
 
-本节依据 `e8ddbd0` 的相关代码与实现参考整理，属于架构概览和静态代码核对，不代表重新完成了真实 QQ、模型与工具的端到端验收。设计细节与未决事项继续以 [docs/README.md](docs/README.md) 中的实现参考和工作记录为入口。
+本节是架构概览，若与更新后的实现不一致，请先查[功能对应索引](docs/features/README.md)及最新代码；原概览依据 `e8ddbd0` 的相关代码与实现参考整理，属于架构概览和静态代码核对，不代表重新完成了真实 QQ、模型与工具的端到端验收。设计细节与未决事项继续以 [docs/README.md](docs/README.md) 中的实现参考和工作记录为入口。
 
 ## 接下来想走的方向
 
@@ -271,6 +271,15 @@ docs/            设计、实现参考、工作记录、决策与历史归档
 
 ## 开发与测试
 
+功能文档按 [模块目录](docs/features/README.md) 维护：`core/`、`adapter-qq/`、`webui/`、`extensions/`、`runtime/`，插件另在 `extensions/plugins/` 独立成篇。新增或修改 Rust 模块、API、插件及管理页面时，更新对应功能 Markdown 和 [映射清单](docs/features/catalog.json)：
+
+```bash
+python3 scripts/check_feature_docs.py
+```
+
+CI 检查源码唯一归属、模块索引、相对链接，并在 PR 上检查相关功能源码与 Markdown 是否同步更新；这不是对文档语义或外部服务连通性的自动验证。
+
+
 运行 Rust workspace 测试：
 
 ```bash
@@ -289,5 +298,7 @@ CI 还包含表情库与关系图谱的浏览器测试，具体入口见 [CI 工
 
 ## 修订记录
 
+- 2026-11-04：将功能文档按模块拆分为层级目录，增加模块 README 与功能变更同步校验。
+- 2026-11-04：新增功能—代码—测试索引入口及持续同步检查，明确未实现知识库和多模态识图边界。
 - 2026-10-26：新增 Agent 架构概览、流程图与源码入口，说明三角色分工、对话与任务双路径、上下文和记忆、扩展机制、任务执行限制及当前实现边界。
 - 2026-10-26：项目首页更名为「攸宁 · Youning」，明确个人智能助手定位，区分当前能力与未来方向；更新仓库链接与安装说明，保留兼容现有程序和数据的名称。
