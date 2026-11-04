@@ -40,12 +40,12 @@
           <div class="identity-text"><span class="selected-name">{{ selectedPerson.name }}</span><span class="identity-id mono">{{ selectedPerson.qq ? `QQ ${selectedPerson.qq}` : selectedPerson.id }}</span></div>
           <n-button size="small" secondary class="relations-link" @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
         </div>
-        <n-tabs v-if="selectedPerson" :value="tab" type="line" @update:value="changeTab">
+        <n-tabs v-if="selectedPerson || tab !== 'profile'" :value="tab" type="line" @update:value="changeTab">
           <n-tab name="profile">人物画像</n-tab>
           <n-tab name="memories">历史记忆</n-tab>
           <n-tab name="summaries">每日摘要</n-tab>
         </n-tabs>
-        <div v-else class="portrait-heading">人物画像</div>
+        <div v-else class="portrait-heading"><span>人物画像</span><n-button text size="small" @click="changeTab('memories')">历史记录</n-button></div>
 
         <n-alert v-if="loadError" type="error" class="memory-alert" role="alert">{{ loadError }} <n-button text size="tiny" @click="loadCurrent">重试</n-button></n-alert>
         <n-spin :show="loading || (!selectedPerson && peopleLoading)">
@@ -231,7 +231,7 @@ function changePeoplePage(delta: number) { peoplePage.value += delta; void loadP
 function refresh() { void loadPeople(); if (tab.value !== 'profile') void loadConversations(); resetRecords() }
 watch(search, () => {
   listController?.abort(); peopleController?.abort(); closeSource(false); clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { selectedPerson.value = null; tab.value = 'profile'; peoplePage.value = 1; refresh() }, 250)
+  searchTimer = setTimeout(() => { selectedPerson.value = null; if (tab.value !== 'profile') tab.value = 'memories'; peoplePage.value = 1; refresh() }, 250)
 })
 watch(conversationKey, () => { peoplePage.value = 1; void loadPeople(); resetRecords() })
 async function loadSource() {
@@ -271,7 +271,7 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); listControll
 .selected-name { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .relations-link { margin-left: auto; }
 .memory-records { min-height: 220px; }
-.portrait-heading { padding: 4px 0 16px; font-weight: 600; border-bottom: 1px solid var(--yt-card-border); }
+.portrait-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0 16px; font-weight: 600; border-bottom: 1px solid var(--yt-card-border); }
 .portrait-directory { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; padding-top: 18px; }
 .portrait-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--yt-card-border); border-radius: 10px; background: var(--yt-elevated); color: var(--yt-ink-1); text-align: left; font: inherit; cursor: pointer; min-width: 0; }
 .portrait-card:hover { border-color: var(--yt-primary); }
