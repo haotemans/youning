@@ -13,6 +13,8 @@
 - 当前记忆检索主要是词项匹配，并非向量数据库；上下文预算主要按字符数近似，不是严格 token 预算。
 - 管理页可查看记忆和摘要，但查看、归纳、验证事实是不同步骤。
 
+定向请求的图片和引用可进入视觉观察，复用缓存、成本闸和并发限制；原消息、本人资料、互动关系共同提供语境，观察再进入回复快照及每日归纳。截图/OCR 不是本人原话或真实关系证据，人物画像和关系增量仍校验对应人物、原消息及引文。
+
 ## 边界
 
 - 归纳结果影响后续快照，不 retroactively 修改当前回答；摘要不等于长期人格事实。
@@ -22,11 +24,14 @@
 
 - [`crates/core/src/consolidation.rs`](../../../crates/core/src/consolidation.rs)
 - [`crates/core/src/context_builder.rs`](../../../crates/core/src/context_builder.rs)
+- [`crates/core/src/vision.rs`](../../../crates/core/src/vision.rs)
 - [`crates/core/src/memory.rs`](../../../crates/core/src/memory.rs)
 - [`crates/webui/src/memories.rs`](../../../crates/webui/src/memories.rs)
 - [`webui-frontend/src/views/Memories.vue`](../../../webui-frontend/src/views/Memories.vue)
 
 ## 验证入口
+
+- [`crates/core/tests/visual_context.rs`](../../../crates/core/tests/visual_context.rs)
 
 - [`crates/core/tests/bot_context.rs`](../../../crates/core/tests/bot_context.rs)
 - [`crates/core/tests/consolidation.rs`](../../../crates/core/tests/consolidation.rs)
