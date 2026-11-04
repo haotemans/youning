@@ -547,12 +547,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                 match deps.reply.as_ref() {
                     Some(engine) => match reply_engine_route(m) {
                         Ok((chat_type, target)) => {
-                            let picked = match meme::pick(&deps.db_path, &deps.memes_dir, &cat)
-                                .await
-                            {
-                                some @ Some(_) => some,
-                                None => meme::pick(&deps.db_path, &deps.memes_dir, "misc").await,
-                            };
+                            let picked = meme::pick(&deps.db_path, &deps.memes_dir, &cat).await;
                             match picked {
                                 Some(path) => {
                                     info!(chat_id = %m.chat_id, category = %cat, "send_meme 抽图入队");

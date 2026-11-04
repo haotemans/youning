@@ -45,6 +45,7 @@ pub async fn ensure_default_persona(conn: &mut sqlx::SqliteConnection) -> Result
 }
 const BEHAVIOR_RULES: &str = r#"行为准则：
 - 用中文口语交流，默认一条完整回答。只在带句末标点的完整句子之间使用「‖」，禁止在词语、半句、逗号或未闭合引号中间插入分隔符；代码里的符号保持原样。可用独立指令行 ::at、::meme 类别，不把控制符混进正文
+- 表情包只从 meme_categories 的真实类别中选择，用独立一行 ::meme 类别，可放在文字后；每次回复最多一张，情绪和上下文不适合时不附图，不用表情替代用户所需的解释。图库为空就不输出表情指令。NAI 生图是另一项能力，不能把要求生成新画面的请求当作发库存表情。
 - 回答完就停，不为了延长聊天追加“你呢”“要不要我帮你”“还有什么想聊”等反问/邀约；只有解决当前问题确实缺少信息时才追问。普通闲聊不连续接梗、不重复附和、不主动@人
 - 本次只回答 reply_target 对应的 anchor，不因其他成员插话改变回复对象；按 person_id 区分同名成员
 - anchor.mentions 是协议记录的真实 @ 对象；未 @ 你而明确 @ 其他成员或引用其他成员的问题，不因你之前参与过话题就当成在问你
@@ -90,6 +91,7 @@ pub struct ReplySnapshot {
     pub scene: Value,
     pub dialogue: Value,
     pub active_tasks: Vec<Value>,
+    pub meme_categories: Vec<String>,
     persona: String,
 }
 
@@ -319,6 +321,9 @@ pub async fn capture_reply_snapshot(
     let active_tasks = tx.prepare("SELECT task_id,substr(goal,1,160),used_calls FROM tasks WHERE chat_id=?1 AND created_by_pid=?2 AND state='running' ORDER BY created_at DESC LIMIT 3").await?
         .query_map(params![anchor.chat_id,anchor.sender_pid], |r| Ok(json!({"task_id":r.try_get::<String, _>(0)?,"goal":r.try_get::<String, _>(1)?,"used_calls":r.try_get::<i64, _>(2)?,"state":"running"}))).await?
         .collect::<sqlx::Result<Vec<_>>>()?;
+    let meme_categories = tx.prepare("SELECT category FROM meme_library WHERE status='active' AND length(category) BETWEEN 1 AND 60 GROUP BY category ORDER BY category LIMIT 24").await?
+        .query_map(params![], |r| r.try_get(0)).await?
+        .collect::<sqlx::Result<Vec<String>>>()?;
     tx.commit().await?;
     Ok(ReplySnapshot {
         anchor: anchor_message,
@@ -332,6 +337,7 @@ pub async fn capture_reply_snapshot(
         scene,
         dialogue,
         active_tasks,
+        meme_categories,
         persona,
     })
 }
@@ -376,6 +382,7 @@ pub fn render_bot_context_with_skills(
                     json!({"name":name,"description":description})).collect::<Vec<_>>(),
                 "cross_chat_history_available":false,"execution_results":[]},
             "dialogue":snapshot.dialogue, "active_tasks":active_tasks,
+            "meme_categories":snapshot.meme_categories,
         }))?;
         if system.chars().count() + user.chars().count() <= cfg.budget_chars {
             return Ok(BotContext {

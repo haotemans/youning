@@ -171,8 +171,8 @@ async fn insert_new_meme(
 
 // ---------- 抽图 ----------
 
-/// 类别内 active 抽一张：last_used_ts 最久未用优先（NULL 最先），取前 3 随机一；
-/// 选中即更新 use_count/last_used_ts。返回绝对路径。
+/// 类别内 active 抽一张：排除缺失文件及上一张，最久未用的前 3 张随机一张。
+/// 选择和使用记录在同一事务中更新；单图类别允许复用。
 pub async fn pick(db_path: &Path, memes_dir: &Path, category: &str) -> Option<PathBuf> {
     pick_with(db_path, memes_dir, category, |n| {
         rand::Rng::random_range(&mut rand::rng(), 0..n)
@@ -188,11 +188,23 @@ async fn pick_with(
     choose: impl Fn(usize) -> usize,
 ) -> Option<PathBuf> {
     let mut conn = crate::db::connect(db_path).await.ok()?;
+    let root = memes_dir.canonicalize().ok()?;
+    let mut tx = conn.begin_immediate().await.ok()?;
+    let last_key = format!("meme.last_pick:{category}");
+    let last: Option<i64> = tx
+        .query_row(
+            "SELECT value FROM state_kv WHERE key=?1",
+            params![last_key],
+            |r| Ok(r.try_get::<String, _>(0)?.parse::<i64>().ok()),
+        )
+        .await
+        .ok()
+        .flatten();
     let candidates: Vec<(i64, String)> = {
-        let mut st = conn
+        let mut st = tx
             .prepare(
                 "SELECT id, file FROM meme_library WHERE category = ?1 AND status = 'active'
-             ORDER BY last_used_ts IS NOT NULL ASC, last_used_ts ASC LIMIT 3",
+             ORDER BY last_used_ts IS NOT NULL ASC, last_used_ts ASC, use_count ASC, id ASC",
             )
             .await
             .ok()?;
@@ -203,13 +215,32 @@ async fn pick_with(
         rows.collect::<std::result::Result<Vec<(i64, String)>, _>>()
     }
     .ok()?;
+    let mut candidates: Vec<(i64, PathBuf)> = candidates
+        .into_iter()
+        .filter_map(|(id, rel)| {
+            let relative = Path::new(&rel);
+            if !relative
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                return None;
+            }
+            let path = root.join(relative).canonicalize().ok()?;
+            (path.starts_with(&root) && path.is_file()).then_some((id, path))
+        })
+        .take(4)
+        .collect();
     if candidates.is_empty() {
         return None;
     }
+    if candidates.len() > 1 {
+        candidates.retain(|(id, _)| Some(*id) != last);
+    }
+    candidates.truncate(3);
     let idx = choose(candidates.len()).min(candidates.len() - 1);
-    let (id, rel) = &candidates[idx];
+    let (id, path) = &candidates[idx];
     let now = now_secs();
-    if let Err(e) = conn
+    if let Err(e) = tx
         .execute(
             "UPDATE meme_library SET use_count = use_count + 1, last_used_ts = ?1 WHERE id = ?2",
             params![now, id],
@@ -217,8 +248,17 @@ async fn pick_with(
         .await
     {
         warn!(error = %e, "meme 使用计数更新失败");
+        return None;
     }
-    Some(memes_dir.join(rel))
+    tx.execute(
+        "INSERT INTO state_kv(key,value,updated_at) VALUES(?1,?2,?3)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
+        params![last_key, id.to_string(), now],
+    )
+    .await
+    .ok()?;
+    tx.commit().await.ok()?;
+    Some(path.clone())
 }
 
 /// OneBot image 段 file 字段：file:// 绝对路径（正斜杠）
@@ -489,6 +529,7 @@ mod tests {
             (3, Some(300)),
             (4, Some(400)),
         ] {
+            std::fs::write(memes.join(format!("f{id}.png")), b"image").unwrap();
             conn.execute(
                 "INSERT INTO meme_library(id, file, category, md5, added_by, status, use_count, last_used_ts, created_at)
                  VALUES (?1, ?2, '开心', ?3, 'admin', 'active', 0, ?4, 100)",
@@ -521,6 +562,8 @@ mod tests {
         let memes = dir.join("memes");
         std::fs::create_dir_all(&memes).unwrap();
         let mut conn = crate::db::connect(&db).await.unwrap();
+        std::fs::write(memes.join("fresh.png"), b"image").unwrap();
+        std::fs::write(memes.join("used.png"), b"image").unwrap();
         conn.execute(
             "INSERT INTO meme_library(id, file, category, md5, added_by, status, use_count, last_used_ts, created_at)
              VALUES (1, 'fresh.png', '开心', 'md5-1', 'admin', 'active', 0, NULL, 100)", crate::db::params![],
@@ -534,6 +577,55 @@ mod tests {
         // NULL 排最前：候选选择器固定取下标 0，从未用过的图必为首选
         let p = pick_with(&db, &memes, "开心", |_| 0).await.unwrap();
         assert_eq!(p.file_name().unwrap().to_string_lossy(), "fresh.png");
+    }
+
+    #[tokio::test]
+    async fn pick_skips_stale_files_and_never_immediately_repeats_when_alternatives_exist() {
+        let dir = temp_db().await;
+        let db = dir.join("yuantuan.db");
+        let memes = dir.join("memes");
+        std::fs::create_dir_all(&memes).unwrap();
+        std::fs::write(dir.join("outside.png"), b"outside").unwrap();
+        let mut conn = crate::db::connect(&db).await.unwrap();
+        for (id, file, status) in [
+            (1, "missing1.png", "active"),
+            (2, "missing2.png", "active"),
+            (3, "missing3.png", "active"),
+            (4, "../outside.png", "active"),
+            (5, "a.png", "active"),
+            (6, "b.png", "active"),
+            (7, "pending.png", "pending"),
+        ] {
+            conn.execute("INSERT INTO meme_library(id,file,category,md5,added_by,status,use_count,created_at) VALUES(?1,?2,'开心',?3,'admin',?4,0,100)",
+                params![id,file,format!("md5-{id}"),status]).await.unwrap();
+        }
+        for file in ["a.png", "b.png", "pending.png"] {
+            std::fs::write(memes.join(file), b"image").unwrap();
+        }
+        for expected in ["a.png", "b.png", "a.png", "b.png"] {
+            let selected = pick_with(&db, &memes, "开心", |_| 0).await.unwrap();
+            assert_eq!(selected.file_name().unwrap(), expected);
+        }
+        std::fs::remove_file(memes.join("b.png")).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                pick(&db, &memes, "开心")
+                    .await
+                    .unwrap()
+                    .file_name()
+                    .unwrap(),
+                "a.png"
+            );
+        }
+        let unused: i64 = conn
+            .query_row(
+                "SELECT SUM(use_count) FROM meme_library WHERE id NOT IN (5,6)",
+                params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unused, 0);
     }
 
     #[tokio::test]

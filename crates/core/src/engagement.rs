@@ -155,6 +155,10 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         DecisionAction::StartTask | DecisionAction::InvokeSkill
     ) {
         let intent_ok = a.intent == Intent::Request
+            || (out.action == DecisionAction::InvokeSkill
+                && a.intent == Intent::FollowUp
+                && a.continuity == Continuity::Continuing
+                && (input.direct || linked_followup))
             || (input.information_lookup
                 && matches!(a.intent, Intent::Question | Intent::FollowUp));
         if !intent_ok || a.confidence != Level::High || a.audience != Audience::Bot {

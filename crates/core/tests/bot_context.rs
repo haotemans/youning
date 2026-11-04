@@ -806,7 +806,7 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         if case["linked"] == true { ids.push(ctx["dialogue"]["last_reply_to_sender"]["msg_id"].clone()); }
         let out = json!({"action":case["action"],"mood":"calm","mention":false,"reply_len":"short","reason":"基于语境选择能力",
             "task_goal":"执行当前任务","request_quote":if case["forged_quote"] == true {json!("不存在的原话")} else {case["text"].clone()},
-            "skill_name":if case["lookup"] == true {"lookup.search"} else {"writer.write"}, "skill_slots":{"query":"FLUX 3 release open source"},
+            "skill_name":if case["lookup"] == true {json!("lookup.search")} else {case.get("skill").cloned().unwrap_or(json!("writer.write"))}, "skill_slots":{"query":"FLUX 3 release open source","prompt":"白发猫娘，短发，雪山，横版构图"},
             "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" || case["continuing"]==true {"continuing"} else {"new_topic"},
                 "confidence":if case["low"]==true {"low"} else {"high"},"benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":ids}});
         axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
@@ -822,6 +822,13 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
     let registry = skills::SkillRegistry::new();
     registry.register_arc(std::sync::Arc::new(Lookup));
     registry.register_arc(std::sync::Arc::new(skills::SkillImpl::new(SkillDef {
+        name: "nai-image.generate",
+        description: "生成图片",
+        prompt_template: String::new(),
+        tools: vec![],
+        role_hint: None,
+    })));
+    registry.register_arc(std::sync::Arc::new(skills::SkillImpl::new(SkillDef {
         name: "writer.write",
         description: "生成提示词",
         prompt_template: String::new(),
@@ -829,6 +836,48 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         role_hint: None,
     })));
     let cases = [
+        (
+            json!({"text":"来张白发猫娘","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"想看一只戴围巾的狐狸","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"换成短发，再来张横版","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up","linked":true}),
+            "g",
+            false,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"背景换成雪山","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up","linked":true,"foreign_link":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"换成短发","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"你会画画吗","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"群友说来张猫娘","skill":"nai-image.generate","action":"invoke_skill","audience":"group","intent":"sharing"}),
+            "g",
+            false,
+            "ignore",
+        ),
         (
             json!({"text":"你用的是哪个","lookup":false,"action":"reply","audience":"bot","intent":"question","linked":true,"continuing":true,"mention_other":true}),
             "g",
@@ -1032,10 +1081,22 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
 #[tokio::test]
 async fn reply_capabilities_distinguish_available_skills_from_execution_results() {
     let rig = Rig::new().await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    for (id, category, status) in [
+        (1, "开心", "active"),
+        (2, "开心", "active"),
+        (3, "委屈", "active"),
+        (4, "待审核", "pending"),
+    ] {
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES(?1,?2,?3,'admin',?4,0,100)", params![format!("{id}.png"),category,format!("md5-{id}"),status]).await.unwrap();
+    }
     let msg = rig.message("p_a", "g", "你能联网吗", None, None).await;
     let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
         .await
         .unwrap();
+    assert_eq!(snapshot.meme_categories.len(), 2);
+    assert!(snapshot.meme_categories.contains(&"开心".to_string()));
+    assert!(!snapshot.meme_categories.contains(&"待审核".to_string()));
     assert!(snapshot.scene["current_time"]
         .as_str()
         .unwrap()
