@@ -1,6 +1,6 @@
 # 知识库（占位）
 
-[返回功能索引](README.md) · [返回文档总索引](../README.md)
+[返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
 
 **当前状态：未实现：仅 UI 状态占位**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
@@ -14,11 +14,11 @@
 ## 边界
 
 - 这是明确的**占位功能**，不得在 README 或发布说明中标注“知识库已支持”。
-- 候选方案留在[实现草案](../changes/plugins-knowledge-implementation-plan.md)，其文字不是现有实现承诺。
+- 候选方案留在[实现草案](../../changes/plugins-knowledge-implementation-plan.md)，其文字不是现有实现承诺。
 
 ## 对应实现（本页负责的主源码）
 
-- [`webui-frontend/src/views/Kb.vue`](../../webui-frontend/src/views/Kb.vue)
+- [`webui-frontend/src/views/Kb.vue`](../../../webui-frontend/src/views/Kb.vue)
 
 ## 验证入口
 

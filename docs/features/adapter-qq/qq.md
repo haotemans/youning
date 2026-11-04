@@ -1,6 +1,6 @@
 # QQ 接入与消息采集
 
-[返回功能索引](README.md) · [返回文档总索引](../README.md)
+[返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
 
 **当前状态：已接入（需真实 QQ 验收）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
@@ -15,24 +15,24 @@
 
 ## 边界
 
-- 只声明当前 QQ 接入，桌面、多平台适配器仍属规划；群管理权限检查另见[群管理插件](plugin-moderator.md)。
+- 只声明当前 QQ 接入，桌面、多平台适配器仍属规划；群管理权限检查另见[群管理插件](../extensions/plugins/moderator.md)。
 - 发送媒体需 NapCat 能读取附件路径；跨容器/跨机器部署需另行保证文件可达。
-- 相关实现规则见[信息流参考](../reference/message-flow-rules.md)和[ADR-0001](../adr/0001-napcat-as-qq-protocol-endpoint.md)。
+- 相关实现规则见[信息流参考](../../reference/message-flow-rules.md)和[ADR-0001](../../adr/0001-napcat-as-qq-protocol-endpoint.md)。
 
 ## 对应实现（本页负责的主源码）
 
-- [`crates/adapter-qq/src/client.rs`](../../crates/adapter-qq/src/client.rs)
-- [`crates/adapter-qq/src/delivery.rs`](../../crates/adapter-qq/src/delivery.rs)
-- [`crates/adapter-qq/src/ingest.rs`](../../crates/adapter-qq/src/ingest.rs)
-- [`crates/adapter-qq/src/lib.rs`](../../crates/adapter-qq/src/lib.rs)
-- [`crates/adapter-qq/src/server.rs`](../../crates/adapter-qq/src/server.rs)
-- [`crates/core/src/napcat_slot.rs`](../../crates/core/src/napcat_slot.rs)
-- [`webui-frontend/src/views/Platform.vue`](../../webui-frontend/src/views/Platform.vue)
+- [`crates/adapter-qq/src/client.rs`](../../../crates/adapter-qq/src/client.rs)
+- [`crates/adapter-qq/src/delivery.rs`](../../../crates/adapter-qq/src/delivery.rs)
+- [`crates/adapter-qq/src/ingest.rs`](../../../crates/adapter-qq/src/ingest.rs)
+- [`crates/adapter-qq/src/lib.rs`](../../../crates/adapter-qq/src/lib.rs)
+- [`crates/adapter-qq/src/server.rs`](../../../crates/adapter-qq/src/server.rs)
+- [`crates/core/src/napcat_slot.rs`](../../../crates/core/src/napcat_slot.rs)
+- [`webui-frontend/src/views/Platform.vue`](../../../webui-frontend/src/views/Platform.vue)
 
 ## 验证入口
 
-- [`crates/adapter-qq/tests/ingest.rs`](../../crates/adapter-qq/tests/ingest.rs)
-- [`crates/adapter-qq/tests/reply.rs`](../../crates/adapter-qq/tests/reply.rs)
-- [`crates/adapter-qq/tests/delayed_delivery.rs`](../../crates/adapter-qq/tests/delayed_delivery.rs)
+- [`crates/adapter-qq/tests/ingest.rs`](../../../crates/adapter-qq/tests/ingest.rs)
+- [`crates/adapter-qq/tests/reply.rs`](../../../crates/adapter-qq/tests/reply.rs)
+- [`crates/adapter-qq/tests/delayed_delivery.rs`](../../../crates/adapter-qq/tests/delayed_delivery.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
