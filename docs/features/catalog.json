@@ -85,7 +85,9 @@
       "tests": [
         "crates/core/tests/bot_context.rs",
         "crates/core/tests/consolidation.rs",
-        "crates/core/tests/visual_context.rs"
+        "crates/core/tests/visual_context.rs",
+        "crates/webui/tests/memories_api.rs",
+        "webui-frontend/tests/memories-flow.spec.js"
       ],
       "module": "core"
     },

@@ -97,6 +97,7 @@
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { DataSet, Network } from 'vis-network/standalone'
 import { api } from '../api'
 import { fmtTs } from '../fmt'
@@ -117,6 +118,7 @@ const detailError = ref('')
 const data = ref({ nodes: [], edges: [] })
 const selfQq = ref(0)
 const ui = useUiStore()
+const route = useRoute()
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 /** @type {any} */
 let net = null
@@ -375,6 +377,7 @@ async function loadGraph() {
     net.once('stabilized', stopLayout)
     settleTimer = setTimeout(stopLayout, 1500)
     void loadAvatars(d.nodes, nodes)
+    if (typeof route.query.person === 'string') selectPerson(route.query.person)
 
     net.on('click', (p) => {
       sel.value = p.nodes.length ? d.nodes.find((n) => n.id === p.nodes[0]) : null
@@ -396,6 +399,8 @@ onMounted(() => {
   }).catch(() => {})
   void loadGraph()
 })
+
+watch(() => route.query.person, id => { if (!loading.value) selectPerson(typeof id === 'string' ? id : null) })
 
 onUnmounted(() => {
   disposed = true

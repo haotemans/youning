@@ -15,6 +15,14 @@
 
 定向请求的图片和引用可进入视觉观察，复用缓存、成本闸和并发限制；原消息、本人资料、互动关系共同提供语境，观察再进入回复快照及每日归纳。截图/OCR 不是本人原话或真实关系证据，人物画像和关系增量仍校验对应人物、原消息及引文。
 
+记忆库管理页复用当前面板组件与配色，以头像、昵称和 QQ 展示统一人物，不按群复制人物。左侧人物列表支持按昵称、QQ、历史群名片和记忆内容搜索；右侧聚合该人物跨群及私聊的长期记忆、每日摘要，并按需读取全局人物画像。会话作为来源筛选，保留各群名片；群自身的记忆保留会话归属，不按群成员批量分配给个人。头像缺失时显示名字首字，未获取群名时显示会话类型和编号。
+
+`GET /api/memories`、`GET /api/summaries` 保留 `owner_type/owner_id/limit`，增加 `person_id/chat_id/chat_type/search/page/page_size`；分页每页默认24、最多96条，响应包含真实筛选总数和记忆/摘要计数，避免把截取的200条当全库数量。空内容、字面null/undefined不展示，原记录保留。列表展示消息记忆、窗口归纳、历史记忆等来源标签，旧记录没有出处时明确缺失。列表只读，不改变 Bot 记忆检索或跨会话使用规则。
+
+新增受管理员认证保护的 `GET /api/memories/people`（统一人物，分页/搜索）和 `GET /api/memories/conversations`（可按person_id列出参与的会话，最多200个）。`GET /api/memories/{id}/source?kind=memory|summary` 按需读取已保存出处的至多60条消息，限制会话、类型、消息区间；显式个人记忆额外验证作者。来源不明、已丢失或不匹配时返回空，不从邻近消息猜测。已有个人每日摘要缺少会话字段，保留全局人物归属，不能据此回填来源或匹配某个群筛选。图片URL不返回；敏感正文隐藏，长消息限4000字。
+
+人物画像沿用现有本人原话与字段校验，独立于来源筛选显示；点击关系图谱通过 `person` 查询参数定位同一个人物。页面快速切换、筛选、翻页及离开时取消旧请求，出处抽屉只在打开时加载；错误提供重试，界面不加入原理解释或示意文案。
+
 ## 边界
 
 - 归纳结果影响后续快照，不 retroactively 修改当前回答；摘要不等于长期人格事实。
@@ -32,6 +40,8 @@
 ## 验证入口
 
 - [`crates/core/tests/visual_context.rs`](../../../crates/core/tests/visual_context.rs)
+- [`crates/webui/tests/memories_api.rs`](../../../crates/webui/tests/memories_api.rs)
+- [`webui-frontend/tests/memories-flow.spec.js`](../../../webui-frontend/tests/memories-flow.spec.js)
 
 - [`crates/core/tests/bot_context.rs`](../../../crates/core/tests/bot_context.rs)
 - [`crates/core/tests/consolidation.rs`](../../../crates/core/tests/consolidation.rs)

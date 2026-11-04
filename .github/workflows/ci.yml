@@ -43,6 +43,9 @@ jobs:
       - name: Relationship graph browser tests
         working-directory: webui-frontend
         run: npm run test:relations
+      - name: Memory browser tests
+        working-directory: webui-frontend
+        run: npm run test:memories
       - name: Model configuration browser tests
         working-directory: webui-frontend
         run: npm run test:models
