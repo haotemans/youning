@@ -1,7 +1,7 @@
 //! 关系网数据：nodes(persons，确保含 self) + edges(relationship_edges 当前全量值)。
 
 use crate::AppState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
@@ -9,6 +9,40 @@ use sqlx::Row;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::Ordering;
 use yuantuan_core::db::SqliteExt;
+
+/// Loaded on selection: keep the graph's initial response small.
+pub async fn person_detail(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut conn = state.open_db().await.map_err(|e| err(&e.to_string()))?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM persons WHERE person_id=?1)",
+            yuantuan_core::db::params![id],
+            |r| r.try_get(0),
+        )
+        .await
+        .map_err(|e| err(&e.to_string()))?;
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"人物不存在"}))));
+    }
+    let profile = yuantuan_core::memory::profile(&mut conn, &id, i64::MAX)
+        .await
+        .map_err(|e| err(&e.to_string()))?;
+    let visuals = conn.prepare("SELECT m.msg_id,m.chat_id,m.ts,i.status,i.observation,i.image_index FROM message_images i JOIN messages m ON m.msg_id=i.msg_id WHERE m.sender_pid=?1 ORDER BY m.msg_id DESC,i.image_index LIMIT 6").await.map_err(|e|err(&e.to_string()))?
+        .query_map(yuantuan_core::db::params![id],|r|{
+            let raw: Option<String> = r.try_get(4)?;
+            let observation = raw.and_then(|s|serde_json::from_str::<yuantuan_core::vision::Observation>(&s).ok());
+            Ok(json!({"source_msg_id":r.try_get::<i64,_>(0)?,"chat_id":r.try_get::<String,_>(1)?,"ts":r.try_get::<i64,_>(2)?,"status":r.try_get::<String,_>(3)?,"observation":observation,"image_index":r.try_get::<i64,_>(5)?,"identity_confirmed":false}))
+        }).await.map_err(|e|err(&e.to_string()))?.collect::<sqlx::Result<Vec<_>>>().map_err(|e|err(&e.to_string()))?;
+    let events = conn.prepare("SELECT from_pid,to_pid,kind,evidence,created_at FROM relationship_events WHERE from_pid=?1 OR to_pid=?1 ORDER BY id DESC LIMIT 10").await.map_err(|e|err(&e.to_string()))?
+        .query_map(yuantuan_core::db::params![id],|r|Ok(json!({"from":r.try_get::<String,_>(0)?,"to":r.try_get::<String,_>(1)?,"kind":r.try_get::<String,_>(2)?,"evidence":r.try_get::<Option<String>,_>(3)?,"ts":r.try_get::<i64,_>(4)?}))).await.map_err(|e|err(&e.to_string()))?
+        .collect::<sqlx::Result<Vec<_>>>().map_err(|e|err(&e.to_string()))?;
+    Ok(Json(
+        json!({"person_id":id,"profile":profile,"visual_observations":visuals,"relationship_evidence":events}),
+    ))
+}
 
 pub async fn relations(
     State(state): State<AppState>,

@@ -109,12 +109,21 @@ async fn wait_for_done(db_path: &PathBuf, expected: i64) {
     let mut conn = db::connect(db_path).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let done: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'",
-            yuantuan_core::db::params![], |row| row.try_get(0),
-        ).await.unwrap();
-        if done >= expected { return; }
-        assert!(Instant::now() < deadline, "tracer did not persist ConsolidationDone");
+        let done: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='ConsolidationDone'",
+                yuantuan_core::db::params![],
+                |row| row.try_get(0),
+            )
+            .await
+            .unwrap();
+        if done >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tracer did not persist ConsolidationDone"
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
@@ -143,7 +152,8 @@ async fn consolidation_end_to_end() {
             {"person_id":"p_2002","field":"technical_preferences","value":"错误归属","evidence_msg_id":2,"evidence_quote":"文档发你"}
         ],
         "rel_events": [
-            {"from": "p_2001", "to": "p_2002", "kind": "help", "delta_trust": 0.05, "evidence": "小明发文档给阿强"}
+            {"from": "p_2001", "to": "p_2002", "kind": "help", "delta_trust": 0.05, "evidence": "小明发文档给阿强", "evidence_msg_id":2,"evidence_quote":"文档发你"},
+            {"from": "p_2001", "to": "p_2002", "kind": "screenshot_claim", "delta_trust": 0.2, "evidence":"截图推断","evidence_msg_id":2,"evidence_quote":"图中两人是好友"}
         ]
     })
     .to_string();

@@ -22,6 +22,7 @@ pub mod skills;
 pub mod state;
 pub mod supervisor;
 pub mod tools;
+pub mod vision;
 pub mod window;
 
 pub mod plugins;

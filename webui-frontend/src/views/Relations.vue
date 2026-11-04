@@ -48,7 +48,32 @@
               </div>
             </div>
 
-            <div class="edge-section-title">关系明细</div>
+            <div v-if="detailLoading" class="edge-empty" role="status">正在读取人物资料…</div>
+            <div v-else-if="detailError" class="edge-empty" role="alert">{{ detailError }}</div>
+            <template v-else-if="detail">
+              <div class="edge-section-title">人物画像 · 本人原话</div>
+              <div v-for="fact in detail.profile || []" :key="fact.field" class="evidence-item">
+                <div>{{ fact.content }}</div>
+                <blockquote>{{ fact.evidence_quote }}</blockquote>
+                <small>消息 {{ fact.source_msg_id }} · {{ fmtTs(fact.updated_at) }}</small>
+              </div>
+              <div v-if="!detail.profile?.length" class="edge-empty">暂无本人确认的稳定资料</div>
+              <div class="edge-section-title">图片语境 · 分享线索</div>
+              <div v-for="image in detail.visual_observations || []" :key="image.source_msg_id + ':' + image.image_index" class="evidence-item">
+                <div>{{ image.observation?.summary || (image.status === 'failed' ? '图片未能识别' : '尚未完成识图') }}</div>
+                <div v-if="image.observation?.visible_text" class="evidence-quote">图中文字：{{ image.observation.visible_text }}</div>
+                <div v-if="image.observation?.uncertainty" class="evidence-quote">{{ image.observation.uncertainty }}</div>
+                <small>消息 {{ image.source_msg_id }} · {{ fmtTs(image.ts) }} · 分享者不等于图中人物</small>
+              </div>
+              <div v-if="!detail.visual_observations?.length" class="edge-empty">暂无图片线索</div>
+              <div class="edge-section-title">关系依据</div>
+              <div v-for="(event, index) in detail.relationship_evidence || []" :key="index" class="evidence-item">
+                <div>{{ peerName(event.from) }} → {{ peerName(event.to) }}</div>
+                <div class="evidence-quote">{{ event.evidence || '历史记录未提供具体出处' }}</div>
+              </div>
+              <div v-if="!detail.relationship_evidence?.length" class="edge-empty">暂无互动依据</div>
+            </template>
+            <div class="edge-section-title">关系明细 · 互动指标</div>
             <div class="edge-list" v-if="relatedEdges.length">
               <button type="button" v-for="e in relatedEdges" :key="e.from + '→' + e.to" class="edge-item"
                    @click="selectPerson(e.from === sel.id ? e.to : e.from)">
@@ -85,6 +110,9 @@ const loading = ref(true)
 const loadError = ref('')
 /** @type {import('vue').Ref<any>} */
 const sel = ref(null)
+const detail = ref(null)
+const detailLoading = ref(false)
+const detailError = ref('')
 /** @type {import('vue').Ref<{ nodes: any[], edges: any[] }>} */
 const data = ref({ nodes: [], edges: [] })
 const selfQq = ref(0)
@@ -100,6 +128,24 @@ const requests = new AbortController()
 let disposed = false
 let settleTimer
 const avatarJobs = new Set()
+
+watch(() => sel.value?.id, async (id, previous, onCleanup) => {
+  detail.value = null
+  detailError.value = ''
+  detailLoading.value = false
+  if (!id) return
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
+  detailLoading.value = true
+  try {
+    const response = await api.get(`/relations/person/${encodeURIComponent(id)}`, { signal: controller.signal })
+    if (!disposed && !controller.signal.aborted && sel.value?.id === id) detail.value = response.data
+  } catch (error) {
+    if (!disposed && !controller.signal.aborted) detailError.value = '人物资料读取失败，请重新选择节点重试'
+  } finally {
+    if (!disposed && !controller.signal.aborted) detailLoading.value = false
+  }
+})
 
 function destroyGraph() {
   clearTimeout(settleTimer)
@@ -404,6 +450,7 @@ watch(() => ui.dark, () => {
   border-radius: 12px;
 }
 .person-drawer {
+  overflow-y: auto;
   position: absolute;
   top: 16px;
   right: 16px;
@@ -419,6 +466,10 @@ watch(() => ui.dark, () => {
   flex-direction: column;
   z-index: 10;
 }
+.person-drawer > * { flex-shrink: 0; }
+.evidence-item { padding: 10px 0; border-bottom: 1px solid var(--yt-card-border); overflow-wrap: anywhere; font-size: 13px; }
+.evidence-item blockquote, .evidence-quote { margin: 6px 0; color: var(--yt-text-secondary); font-size: 12px; }
+.evidence-item small { color: var(--yt-text-secondary); font-size: 11px; }
 .person-drawer-head {
   display: flex;
   align-items: center;

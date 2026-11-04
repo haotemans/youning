@@ -402,7 +402,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
             gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
             let ctx_cfg = *deps.ctx_cfg.read().unwrap();
-            let snapshot = match crate::context_builder::capture_reply_snapshot(
+            let mut snapshot = match crate::context_builder::capture_reply_snapshot(
                 &deps.db_path,
                 m,
                 cutoff,
@@ -416,6 +416,31 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                     return;
                 }
             };
+            if decision::is_directed(m, &snapshot) {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    crate::vision::observe(&deps.db_path, &gw, m, &snapshot),
+                )
+                .await
+                {
+                    Ok(Ok(false)) => {}
+                    result => {
+                        if !matches!(result, Ok(Ok(true))) {
+                            warn!(chat_id=%m.chat_id,"识图未完成，使用明确标记的缺失/失败语境");
+                        }
+                        if let Ok(updated) = crate::context_builder::capture_reply_snapshot(
+                            &deps.db_path,
+                            m,
+                            cutoff,
+                            &ctx_cfg,
+                        )
+                        .await
+                        {
+                            snapshot = updated;
+                        }
+                    }
+                }
+            }
             let outcome = decision::decide(
                 &deps.db_path,
                 &gw,

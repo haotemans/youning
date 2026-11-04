@@ -94,7 +94,7 @@ async fn mock_napcat(port: u16) {
         "sender": {"user_id": 2001, "nickname": "明", "card": ""},
         "message": [
             {"type": "text", "data": {"text": "私聊测试"}},
-            {"type": "image", "data": {"file": "x.jpg"}}
+            {"type": "image", "data": {"file": "x.jpg", "url":"https://example.test/x.jpg"}}
         ]
     });
     for ev in [g1, g2, p1] {
@@ -211,6 +211,15 @@ async fn ingest_group_and_private_messages() {
     );
 
     // 档案：握手登记机器人 + 两个发言人；QQ 号反查 person 稳定
+    let image_url: String = conn
+        .query_row(
+            "SELECT url FROM message_images WHERE msg_id=3 AND image_index=0",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image_url, "https://example.test/x.jpg");
     let person_count: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM persons",

@@ -283,6 +283,40 @@ async fn start() -> Rig {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn relations_folds_bot_aliases_without_merging_same_name_members_or_history() {
     let rig = start().await;
+    let mut details_db = db::connect(&rig.db_path).await.unwrap();
+    details_db.execute_batch("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts,has_image) VALUES(100,'555666','group','p_2001','我长期使用 Rust 开发',10,1);").await.unwrap();
+    yuantuan_core::memory::update_profile(
+        &mut details_db,
+        "p_2001",
+        "555666",
+        100,
+        100,
+        &yuantuan_core::memory::ProfileUpdate {
+            field: yuantuan_core::memory::ProfileField::TechnicalPreferences,
+            value: "使用 Rust 开发".into(),
+            evidence_msg_id: 100,
+            evidence_quote: "长期使用 Rust 开发".into(),
+        },
+    )
+    .await
+    .unwrap();
+    details_db.execute("INSERT INTO message_images(msg_id,image_index,url,status,observation) VALUES(100,0,'https://example.test/private-url','ready',?1)",yuantuan_core::db::params![json!({"summary":"项目代码截图","visible_text":"Rust","uncertainty":"归属未确认"}).to_string()]).await.unwrap();
+    let (status, detail) = rig.get("/api/relations/person/p_2001").await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["profile"][0]["source_msg_id"], 100);
+    assert_eq!(
+        detail["visual_observations"][0]["identity_confirmed"],
+        false
+    );
+    assert!(!detail.to_string().contains("private-url"));
+    assert_eq!(rig.get("/api/relations/person/missing").await.0, 404);
+    let unauthorized = rig
+        .http
+        .get(format!("{}/api/relations/person/p_2001", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status().as_u16(), 401);
     rig.self_qq
         .store(90001, std::sync::atomic::Ordering::Relaxed);
     let mut conn = db::connect(&rig.db_path).await.unwrap();

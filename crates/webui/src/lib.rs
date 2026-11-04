@@ -45,6 +45,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/memories", get(memories::memories))
         .route("/api/summaries", get(memories::summaries))
         .route("/api/relations", get(relations::relations))
+        .route("/api/relations/person/{id}", get(relations::person_detail))
         .route("/api/config", get(config_api::get_config).post(config_api::post_config))
         .route("/api/config/restart", post(config_api::restart))
         .route("/api/llm/test", post(llm_test::test))

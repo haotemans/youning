@@ -43,6 +43,7 @@ async function openGraph(page, options = {}) {
       if (options.fail) return route.fulfill({ status: 500, json: { error: '数据库暂时不可用' } })
       return route.fulfill({ json: options.empty ? { nodes: [], edges: [] } : options.graph || { nodes, edges } })
     }
+    if (pathname.startsWith('/api/relations/person/') && options.personDetails) return route.fulfill({ json: options.personDetails })
     return route.fulfill({ json: {} })
   })
   await page.goto('/relations')
@@ -71,6 +72,26 @@ test('159 people render without remote avatars and remain interactive', async ({
 test('successful remote avatars progressively replace local placeholders', async ({ page }) => {
   const errors = await openGraph(page, { avatars: true })
   await expect.poll(() => page.evaluate(() => window.remoteDraws)).toBeGreaterThan(0)
+  expect(errors).toEqual([])
+})
+
+test('person evidence loads only on selection and distinguishes image sharing from identity', async ({ page }) => {
+  const requests = []
+  page.on('request', request => { if (request.url().includes('/api/relations/person/')) requests.push(request.url()) })
+  const errors = await openGraph(page, { personDetails: {
+    profile: [{ field: 'technical_preferences', content: '长期使用 Rust', evidence_quote: '我长期使用 Rust 开发', source_msg_id: 12, updated_at: 1700000000 }],
+    visual_observations: [{ source_msg_id: 13, image_index: 0, ts: 1700000000, observation: { summary: '项目代码截图', uncertainty: '归属未确认' } }],
+    relationship_evidence: [{ from: 'p_100001', to: 'self', evidence: '在群中讨论开发问题' }],
+  } })
+  await expect(page.getByText('159 节点 · 247 关系')).toBeVisible()
+  expect(requests).toHaveLength(0)
+  await page.locator('.n-select').click()
+  await page.getByText('人物1', { exact: true }).click()
+  await expect(page.getByText('长期使用 Rust', { exact: true })).toBeVisible()
+  await expect(page.getByText('项目代码截图', { exact: true })).toBeVisible()
+  await expect(page.getByText(/分享者不等于图中人物/)).toBeVisible()
+  await page.screenshot({ path: '../data/artifacts/relations-person-evidence.png', animations: 'disabled' })
+  expect(requests).toHaveLength(1)
   expect(errors).toEqual([])
 })
 
