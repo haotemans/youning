@@ -74,7 +74,7 @@ test('one portrait per person stays primary even with 251 history records', asyn
   await page.getByRole('button', { name: '历史记录', exact: true }).click()
   await expect(page.locator('.memory-record')).toHaveCount(24)
   expect(state.requests.some(r => r.path === '/api/memories' && !r.person)).toBe(true)
-  await page.getByText('人物画像', { exact: true }).click()
+  await page.getByRole('button', { name: '全部画像', exact: true }).click()
   await expect(page.locator('.portrait-card')).toHaveCount(2)
   const initialHistoryRequests = state.requests.filter(r => r.path === '/api/memories').length
   await person(page, '101').click()
@@ -95,7 +95,7 @@ test('one portrait per person stays primary even with 251 history records', asyn
   await expect(page.locator('.memory-records')).toContainText('群聊 200')
   await page.locator('.memory-pagination .n-pagination-item').filter({ hasText: /^2$/ }).click()
   await expect.poll(() => state.requests.some(r => r.path === '/api/memories' && r.page === '2')).toBe(true)
-  await page.getByText('人物画像', { exact: true }).click()
+  await person(page, '101').click()
   await expect(page.locator('.memory-toolbar .n-select')).toHaveCount(0)
   await expect(page.locator('.portrait-record')).toHaveCount(1)
   await expect(page.locator('.memory-record')).toHaveCount(0)

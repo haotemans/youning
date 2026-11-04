@@ -220,7 +220,7 @@ async function loadCurrent() {
 }
 function resetRecords() { page.value = 1; records.value = []; profile.value = []; closeSource(false); void loadCurrent() }
 function choosePerson(person: Person | null) {
-  if (selectedPerson.value?.id === person?.id) return
+  if (selectedPerson.value?.id === person?.id && tab.value === 'profile') return
   selectedPerson.value = person
   tab.value = 'profile'
   void loadConversations(); resetRecords()
