@@ -324,17 +324,22 @@ pub fn spawn_steal_listener_with_rate(
                     if !*enabled.read().unwrap() {
                         continue;
                     }
-                    if m.chat_type != "group" || !m.has_image || m.image_urls.is_empty() {
+                    if m.chat_type != "group"
+                        || m.sender_bot
+                        || m.sender_pid == "self"
+                        || !m.has_image
+                        || m.image_urls.is_empty()
+                    {
                         continue;
                     }
-                    for url in &m.image_urls {
+                    for url in m.image_urls.iter().take(3) {
                         // 每张图独立采样，0.5% 概率入待审
                         let roll: f64 = rand::Rng::random(&mut rand::rng());
                         if roll >= sample_rate {
                             continue;
                         }
                         if let Err(e) = steal_one(&http, &db_path, &memes_dir, url).await {
-                            debug!(error = %e, url = %url, "图片不入待审（下载失败或重复）");
+                            debug!(error = %e, "图片不入待审（下载失败、无效或重复）");
                         }
                     }
                 }
@@ -354,18 +359,47 @@ async fn steal_one(
     memes_dir: &Path,
     url: &str,
 ) -> Result<()> {
-    let resp = http.get(url).send().await.context("下载图片失败")?;
+    let mut conn = crate::db::connect(db_path).await?;
+    let pending: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM meme_library WHERE status='pending'",
+            params![],
+            |r| r.try_get(0),
+        )
+        .await?;
+    anyhow::ensure!(pending < 200, "待审队列已满，暂停采集");
+    drop(conn);
+    let mut resp = http.get(url).send().await.context("下载图片失败")?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {}", resp.status());
     }
     if resp
         .content_length()
-        .map(|n| n > 10 * 1024 * 1024)
+        .map(|n| n > 8 * 1024 * 1024)
         .unwrap_or(false)
     {
-        anyhow::bail!("图片超过 10MB 上限");
+        anyhow::bail!("图片超过 8MB 上限");
     }
-    let bytes = resp.bytes().await.context("读取图片体失败")?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = resp.chunk().await.context("读取图片体失败")? {
+        anyhow::ensure!(
+            bytes.len() + chunk.len() <= 8 * 1024 * 1024,
+            "图片超过 8MB 上限"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let (width, height) = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()?
+        .into_dimensions()?;
+    anyhow::ensure!(
+        width > 0
+            && height > 0
+            && width <= 4096
+            && height <= 4096
+            && u64::from(width) * u64::from(height) <= 8 * 1024 * 1024,
+        "图片尺寸超限"
+    );
+    anyhow::ensure!(compute_dhash(&bytes).is_some(), "图片无法解码");
 
     let md5 = compute_md5(&bytes);
     let mut conn = crate::db::connect(db_path).await?;

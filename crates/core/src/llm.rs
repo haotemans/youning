@@ -483,6 +483,31 @@ impl LlmGateway {
             .await
     }
 
+    /// Locally collected memes use bounded thumbnails, not expired QQ URLs or file paths.
+    /// Shares the same model, cost gate, concurrency and accounting as directed vision.
+    pub async fn chat_with_image_data(
+        &self,
+        system: &str,
+        user: &str,
+        png: &[u8],
+    ) -> Result<String> {
+        use base64::Engine;
+        anyhow::ensure!(
+            png.len() <= 2 * 1024 * 1024
+                && image::guess_format(png).ok() == Some(image::ImageFormat::Png),
+            "图片必须为有界 PNG 缩略图"
+        );
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        );
+        let parts = json!([
+            {"type":"text","text":user},
+            {"type":"image_url","image_url":{"url":url,"detail":"low"}}
+        ]);
+        self.chat_content(Role::BotChat, system, parts, true).await
+    }
+
     async fn chat_content(
         &self,
         role: Role,

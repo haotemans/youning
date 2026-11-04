@@ -51,7 +51,8 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
             .bind(&q.status).bind(&q.category).bind(search).fetch_one(&mut *conn).await?;
         let page = page.min((total - 1).max(0) / page_size + 1);
         let rows = sqlx::query(&format!(
-            "SELECT id, file, category, status, use_count, added_by, created_at, last_used_ts
+            "SELECT id, file, category, status, use_count, added_by, created_at, last_used_ts,
+                (SELECT value FROM state_kv WHERE key='meme_review:' || meme_library.id || ':' || meme_library.md5) AS review
              FROM meme_library {filter} ORDER BY {order} LIMIT ?4 OFFSET ?5"
         ))
         .bind(&q.status).bind(&q.category).bind(search)
@@ -83,6 +84,7 @@ fn row_to_json(r: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Value> {
         "use_count": r.try_get::<i64, _>("use_count")?, "added_by": r.try_get::<String, _>("added_by")?,
         "created_at": r.try_get::<i64, _>("created_at")?,
         "last_used_ts": r.try_get::<Option<i64>, _>("last_used_ts")?,
+        "review": r.try_get::<Option<String>, _>("review")?.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
     }))
 }
 
@@ -172,7 +174,19 @@ async fn apply_one(state: &AppState, id: i64, action: Action, category: Option<&
         }
         sqlx::query("DELETE FROM meme_library WHERE id = ?").bind(id)
             .execute(&mut *conn).await.map_err(db_error)?;
+        sqlx::query("DELETE FROM state_kv WHERE key LIKE ?")
+            .bind(format!("meme_review:{id}:%")).execute(&mut *conn).await.map_err(db_error)?;
     } else {
+        // Batch approval without an explicit category should keep a safe visual suggestion too.
+        let suggested: Option<String> = if matches!(action, Action::Approve) && category.is_none() {
+            sqlx::query_scalar("SELECT json_extract(s.value,'$.category') FROM state_kv s
+                JOIN meme_library m ON s.key='meme_review:' || m.id || ':' || m.md5
+                WHERE m.id=?1 AND json_valid(s.value) AND json_extract(s.value,'$.state')='reviewed'
+                AND json_extract(s.value,'$.kind')='meme' AND json_extract(s.value,'$.safe')=1
+                AND length(json_extract(s.value,'$.category')) BETWEEN 1 AND 40")
+                .bind(id).fetch_optional(&mut *conn).await.map_err(db_error)?
+        } else { None };
+        let category = category.or(suggested.as_deref());
         let result = if matches!(action, Action::Approve) {
             // Unlabeled approvals must leave the internal inbox category.
             sqlx::query("UPDATE meme_library SET status = 'active',

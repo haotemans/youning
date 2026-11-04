@@ -306,6 +306,16 @@ async fn main() -> Result<()> {
         });
     }
 
+    {
+        let db = db_path.clone();
+        let memes = memes_dir.clone();
+        let llm = llm_slot.clone();
+        let enabled = steal_slot.clone();
+        supervisor.spawn("meme_review", move || {
+            yuantuan_core::meme_review::spawn(db.clone(), memes.clone(), llm.clone(), enabled.clone())
+        });
+    }
+
     // i. 夜间归纳调度器（句柄注册：WebUI 改 [consolidation] 后取消旧定时器按新配置重建）
     let consolidation_handle: std::sync::Arc<
         std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,

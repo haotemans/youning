@@ -75,6 +75,14 @@ async fn gallery_filters_sorts_pages_and_preserves_legacy_listing() {
     assert_eq!(first["categories"], json!(["_inbox"]));
     assert_eq!(first["memes"][0]["id"], 26);
     assert_eq!(first["memes"][0]["created_at"], 26);
+    assert!(first["memes"][0]["review"].is_null());
+    {
+        let mut conn = db::connect(&rig.dir.join("yuantuan.db")).await.unwrap();
+        conn.execute("INSERT INTO state_kv(key,value,updated_at) VALUES('meme_review:26:hash26',?1,1)",
+            params![json!({"state":"reviewed","kind":"other","safe":true,"category":"","reason":"软件截图"}).to_string()]).await.unwrap();
+    }
+    let reviewed = rig.get("/api/memes?status=pending&page=1").await;
+    assert_eq!(reviewed["memes"][0]["review"]["reason"], "软件截图");
     let second = rig.get("/api/memes?status=pending&page=2&page_size=24").await;
     assert_eq!(second["memes"].as_array().unwrap().len(), 2);
     assert_eq!(second["memes"][0]["id"], 2);
@@ -99,6 +107,14 @@ async fn gallery_filters_sorts_pages_and_preserves_legacy_listing() {
 #[tokio::test]
 async fn gallery_batch_reports_partial_failures_and_normalizes_categories() {
     let rig = Rig::start().await;
+    {
+        let mut conn = db::connect(&rig.dir.join("yuantuan.db")).await.unwrap();
+        conn.execute("INSERT INTO state_kv(key,value,updated_at) VALUES('meme_review:5:hash5',?1,1)",
+            params![json!({"state":"reviewed","kind":"meme","safe":true,"category":"疑惑","reason":"困惑的回应"}).to_string()]).await.unwrap();
+    }
+    assert_eq!(rig.post("/api/memes/batch", json!({"ids":[5],"action":"approve"})).await.status(), StatusCode::OK);
+    let suggestion = rig.get("/api/memes?status=active&search=5").await;
+    assert_eq!(suggestion["memes"][0]["category"], "疑惑");
     let response = rig.post("/api/memes/batch", json!({"ids":[1,1,2,27,999],"action":"approve"})).await;
     assert_eq!(response.status(), StatusCode::OK);
     let result: Value = response.json().await.unwrap();

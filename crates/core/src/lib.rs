@@ -14,6 +14,7 @@ pub mod llm;
 pub mod mcp;
 pub mod meme;
 pub mod meme_pack;
+pub mod meme_review;
 pub mod memory;
 pub mod napcat_slot;
 pub mod personality;
