@@ -11,8 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Verify feature docs and source ownership
-        run: python3 scripts/check_feature_docs.py
+        with:
+          fetch-depth: 0
+      - name: Verify module docs, links and source ownership
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "$BASE_REF" ]; then
+            python3 scripts/check_feature_docs.py --base "origin/$BASE_REF"
+          else
+            python3 scripts/check_feature_docs.py
+          fi
 
   meme-gallery-ui:
     runs-on: ubuntu-latest
