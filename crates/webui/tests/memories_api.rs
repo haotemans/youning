@@ -105,6 +105,16 @@ async fn people_unify_multiple_groups_and_private_chats_with_exact_paging_and_id
     let r = Rig::start().await;
     let people = r.get("/api/memories/people").await;
     assert_eq!(people["people"].as_array().unwrap().len(), 2);
+    assert_eq!(people["total"], 2);
+    assert_eq!(people["people"][0]["profile"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        people["people"][0]["profile"][0]["content"],
+        "长期使用 Rust"
+    );
+    assert!(people["people"][1]["profile"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(people["people"][0]["id"], "p_101");
     assert_eq!(people["people"][0]["qq"], "101");
     assert_eq!(people["people"][1]["qq"], "202");
@@ -138,6 +148,95 @@ async fn people_unify_multiple_groups_and_private_chats_with_exact_paging_and_id
     assert_eq!(all["memories"].as_array().unwrap().len(), 37);
     let profile = r.get("/api/relations/person/p_101").await;
     assert_eq!(profile["profile"][0]["content"], "长期使用 Rust");
+}
+
+#[tokio::test]
+async fn a_person_has_one_current_portrait_across_conversations_and_new_facts_replace_old_fields() {
+    use yuantuan_core::memory::{self, ProfileField, ProfileUpdate};
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    for (field, value, chat, msg, quote) in [
+        (
+            ProfileField::PreferredName,
+            "小冰猪",
+            "10",
+            2,
+            "私聊称呼我小冰猪",
+        ),
+        (
+            ProfileField::OngoingProjects,
+            "训练 LoRA",
+            "20",
+            3,
+            "我在训练 LoRA",
+        ),
+    ] {
+        memory::update_profile(
+            &mut conn,
+            "p_101",
+            chat,
+            1,
+            5,
+            &ProfileUpdate {
+                field,
+                value: value.into(),
+                evidence_msg_id: msg,
+                evidence_quote: quote.into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    conn.execute("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(5,'20','group','p_101','我现在主要使用 Python',5)",params![]).await.unwrap();
+    let update = ProfileUpdate {
+        field: ProfileField::TechnicalPreferences,
+        value: "主要使用 Python".into(),
+        evidence_msg_id: 5,
+        evidence_quote: "我现在主要使用 Python".into(),
+    };
+    assert!(
+        memory::update_profile(&mut conn, "p_101", "20", 1, 5, &update)
+            .await
+            .unwrap()
+    );
+    let late = ProfileUpdate {
+        field: ProfileField::TechnicalPreferences,
+        value: "长期使用 Rust".into(),
+        evidence_msg_id: 1,
+        evidence_quote: "我长期使用 Rust".into(),
+    };
+    assert!(
+        !memory::update_profile(&mut conn, "p_101", "10", 1, 5, &late)
+            .await
+            .unwrap()
+    );
+    let directory = r.get("/api/memories/people?page_size=1").await;
+    assert_eq!(directory["total"], 2);
+    assert_eq!(directory["people"].as_array().unwrap().len(), 1);
+    let facts = directory["people"][0]["profile"].as_array().unwrap();
+    assert_eq!(facts.len(), 3);
+    assert_eq!(
+        facts
+            .iter()
+            .filter(|f| f["field"] == "technical_preferences")
+            .count(),
+        1
+    );
+    assert!(facts.iter().any(|f| f["content"] == "主要使用 Python"));
+    assert!(!facts.iter().any(|f| f["content"] == "长期使用 Rust"));
+    assert!(facts.iter().any(|f| f["source_msg_id"] == 2));
+    assert_eq!(directory["people"][0]["profile_updated_at"], 5);
+    let singles = memory::profile(&mut conn, "p_101", i64::MAX).await.unwrap();
+    let batches = memory::profiles(&mut conn, &["p_101".into(), "p_202".into()], i64::MAX)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&singles).unwrap(),
+        serde_json::to_value(&batches["p_101"]).unwrap()
+    );
+    assert!(!batches.contains_key("p_202"));
+    let history = r.get("/api/memories?page=1").await;
+    assert_eq!(history["total"], 37);
 }
 
 #[tokio::test]

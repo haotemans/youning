@@ -3,7 +3,7 @@
     <div class="yt-page-head">
       <div class="yt-page-head-left">
         <span class="yt-page-title">记忆库</span>
-        <span class="yt-page-sub mono">{{ counts.memories }} 条记忆 · {{ counts.summaries }} 条摘要</span>
+        <span class="yt-page-sub mono">{{ peopleTotal }} 位人物</span>
       </div>
       <n-button size="small" secondary :loading="loading || peopleLoading" @click="refresh">刷新</n-button>
     </div>
@@ -17,7 +17,7 @@
       <n-card size="small" class="people-panel">
         <div class="people-heading">人物</div>
         <button type="button" class="person-option" :class="{ active: !selectedPerson }" @click="choosePerson(null)">
-          <span class="memory-avatar"><YtIcon name="personality" /></span><span>全部记忆</span>
+          <span class="memory-avatar"><YtIcon name="personality" /></span><span>全部画像</span>
         </button>
         <n-spin :show="peopleLoading">
           <n-alert v-if="peopleError" type="error" class="memory-alert" role="alert">{{ peopleError }} <n-button text size="tiny" @click="loadPeople">重试</n-button></n-alert>
@@ -40,22 +40,36 @@
           <div class="identity-text"><span class="selected-name">{{ selectedPerson.name }}</span><span class="identity-id mono">{{ selectedPerson.qq ? `QQ ${selectedPerson.qq}` : selectedPerson.id }}</span></div>
           <n-button size="small" secondary class="relations-link" @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
         </div>
-        <n-tabs :value="tab" type="line" @update:value="changeTab">
-          <n-tab name="memories">长期记忆 ({{ counts.memories }})</n-tab>
-          <n-tab name="summaries">每日摘要 ({{ counts.summaries }})</n-tab>
-          <n-tab v-if="selectedPerson" name="profile">人物画像</n-tab>
+        <n-tabs v-if="selectedPerson" :value="tab" type="line" @update:value="changeTab">
+          <n-tab name="profile">人物画像</n-tab>
+          <n-tab name="memories">历史记忆</n-tab>
+          <n-tab name="summaries">每日摘要</n-tab>
         </n-tabs>
+        <div v-else class="portrait-heading">人物画像</div>
 
         <n-alert v-if="loadError" type="error" class="memory-alert" role="alert">{{ loadError }} <n-button text size="tiny" @click="loadCurrent">重试</n-button></n-alert>
-        <n-spin :show="loading">
+        <n-spin :show="loading || (!selectedPerson && peopleLoading)">
           <div v-if="tab === 'profile'" class="memory-records">
-            <article v-for="fact in profile" :key="fact.field" class="memory-record profile-record">
-              <n-tag size="small" :bordered="false">{{ profileLabels[fact.field] || fact.field }}</n-tag>
-              <p class="memory-text">{{ fact.content }}</p>
-              <blockquote>{{ fact.evidence_quote }}</blockquote>
-              <span class="record-time">{{ fmtTs(fact.updated_at) }}</span>
+            <article v-if="selectedPerson && profile.length" class="portrait-record">
+              <dl class="portrait-fields"><template v-for="fact in profile" :key="fact.field"><dt>{{ profileLabels[fact.field] || fact.field }}</dt><dd>{{ fact.content }}</dd></template></dl>
+              <n-collapse class="portrait-evidence">
+                <n-collapse-item title="来源依据" name="evidence">
+                  <div v-for="fact in profile" :key="fact.field" class="profile-evidence">
+                    <span class="record-time">{{ profileLabels[fact.field] || fact.field }} · {{ fmtTs(fact.updated_at) }}</span>
+                    <blockquote>{{ fact.evidence_quote }}</blockquote>
+                  </div>
+                </n-collapse-item>
+              </n-collapse>
             </article>
-            <EmptyState v-if="!loading && !loadError && !profile.length" title="暂无人物画像" />
+            <div v-else-if="!selectedPerson" class="portrait-directory">
+              <button v-for="person in people" :key="person.id" type="button" class="portrait-card" @click="choosePerson(person)">
+                <span class="portrait-card-head"><span class="memory-avatar"><img v-if="avatar(person)" :src="avatar(person)" alt="" loading="lazy" referrerpolicy="no-referrer" @error="badAvatars.add(person.id)" /><span v-else>{{ initial(person) }}</span></span><span class="identity-text"><span class="identity-name">{{ person.name }}</span><span class="identity-id mono">{{ person.qq || person.id }}</span></span></span>
+                <span v-if="person.profile?.length" class="portrait-preview">{{ person.profile.map(f => f.content).join('；') }}</span>
+                <span v-else class="record-time">暂无画像</span>
+                <time v-if="person.profile_updated_at" class="record-time">{{ fmtTs(person.profile_updated_at) }}</time>
+              </button>
+            </div>
+            <EmptyState v-if="!loading && !peopleLoading && !loadError && !peopleError && (selectedPerson ? !profile.length : !people.length)" :title="selectedPerson ? '暂无人物画像' : '暂无匹配人物'" />
           </div>
           <div v-else class="memory-records">
             <article v-for="record in records" :key="record.id" class="memory-record">
@@ -109,7 +123,7 @@ import EmptyState from '../components/EmptyState.vue'
 import YtIcon from '../components/YtIcon.vue'
 import mascot from '../assets/mascot.png'
 
-type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string }
+type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string; profile?: Profile[]; profile_updated_at?: number | null }
 type Conversation = { id: string; chat_type: string | null; label: string }
 type Memory = { id: number; owner_type: string; owner_id: string; owner: Person; content: string; source: string; updated_at: number; date?: string; source_msg_id?: number; source_end_msg_id?: number; conversation?: Conversation; group_card?: string }
 type Profile = { field: string; content: string; evidence_quote: string; updated_at: number }
@@ -122,13 +136,13 @@ const conversations = ref<Conversation[]>([])
 const conversationsLoading = ref(false)
 const conversationOptions = computed(() => conversations.value.map(c => ({ label: c.label, value: JSON.stringify([c.chat_type, c.id]) })))
 const people = ref<Person[]>([])
+const peopleTotal = ref(0)
 const selectedPerson = ref<Person | null>(null)
 const peoplePage = ref(1)
 const peopleHasMore = ref(false)
 const peopleLoading = ref(false)
 const peopleError = ref('')
-const tab = ref<Tab>('memories')
-const counts = ref({ memories: 0, summaries: 0 })
+const tab = ref<Tab>('profile')
 const records = ref<Memory[]>([])
 const profile = ref<Profile[]>([])
 const page = ref(1)
@@ -156,7 +170,7 @@ function query(includePerson = true) {
   const p = new URLSearchParams()
   if (includePerson && selectedPerson.value) p.set('person_id', selectedPerson.value.id)
   if (search.value.trim()) p.set('search', search.value.trim())
-  if (conversationKey.value) { const [kind, id] = JSON.parse(conversationKey.value); p.set('chat_id', id); if (kind) p.set('chat_type', kind) }
+  if (tab.value !== 'profile' && conversationKey.value) { const [kind, id] = JSON.parse(conversationKey.value); p.set('chat_id', id); if (kind) p.set('chat_type', kind) }
   return p
 }
 async function loadPeople() {
@@ -167,7 +181,7 @@ async function loadPeople() {
   try {
     const { data } = await api.get(`/memories/people?${q}`, { signal: request.signal })
     if (request.signal.aborted || disposed) return
-    people.value = data.people || []; peopleHasMore.value = !!data.has_more
+    people.value = data.people || []; peopleTotal.value = data.total || 0; peoplePage.value = data.page || 1; peopleHasMore.value = !!data.has_more
   } catch (e) { if (!request.signal.aborted && !disposed) peopleError.value = errorText(e) }
   finally { if (peopleController === request) peopleLoading.value = false }
 }
@@ -190,15 +204,16 @@ async function loadCurrent() {
   const request = listController = new AbortController()
   loading.value = true; loadError.value = ''
   try {
-    if (tab.value === 'profile' && selectedPerson.value) {
-      const { data } = await api.get(`/relations/person/${encodeURIComponent(selectedPerson.value.id)}`, { signal: request.signal })
-      if (!request.signal.aborted && !disposed) profile.value = data.profile || []
+    if (tab.value === 'profile') {
+      if (selectedPerson.value) {
+        const { data } = await api.get(`/relations/person/${encodeURIComponent(selectedPerson.value.id)}`, { signal: request.signal })
+        if (!request.signal.aborted && !disposed) profile.value = data.profile || []
+      }
     } else {
       const q = query(); q.set('page', String(page.value)); q.set('page_size', '24')
       const { data } = await api.get(`/${tab.value}?${q}`, { signal: request.signal })
       if (request.signal.aborted || disposed) return
       records.value = data[tab.value] || []; total.value = data.total || 0; page.value = data.page || 1
-      counts.value = data.counts || { memories: 0, summaries: 0 }
     }
   } catch (e) { if (!request.signal.aborted && !disposed) loadError.value = errorText(e) }
   finally { if (listController === request) loading.value = false }
@@ -207,17 +222,16 @@ function resetRecords() { page.value = 1; records.value = []; profile.value = []
 function choosePerson(person: Person | null) {
   if (selectedPerson.value?.id === person?.id) return
   selectedPerson.value = person
-  tab.value = 'memories'
-  counts.value = { memories: 0, summaries: 0 }
+  tab.value = 'profile'
   void loadConversations(); resetRecords()
 }
-function changeTab(value: Tab) { tab.value = value; resetRecords() }
+function changeTab(value: Tab) { tab.value = value; void loadPeople(); if (value !== 'profile') void loadConversations(); resetRecords() }
 function changePage(value: number) { page.value = value; records.value = []; closeSource(false); void loadCurrent() }
 function changePeoplePage(delta: number) { peoplePage.value += delta; void loadPeople() }
-function refresh() { void loadPeople(); void loadConversations(); resetRecords() }
+function refresh() { void loadPeople(); if (tab.value !== 'profile') void loadConversations(); resetRecords() }
 watch(search, () => {
   listController?.abort(); peopleController?.abort(); closeSource(false); clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { selectedPerson.value = null; tab.value = 'memories'; peoplePage.value = 1; refresh() }, 250)
+  searchTimer = setTimeout(() => { selectedPerson.value = null; tab.value = 'profile'; peoplePage.value = 1; refresh() }, 250)
 })
 watch(conversationKey, () => { peoplePage.value = 1; void loadPeople(); resetRecords() })
 async function loadSource() {
@@ -257,6 +271,19 @@ onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); listControll
 .selected-name { font-size: 18px; font-weight: 600; overflow-wrap: anywhere; }
 .relations-link { margin-left: auto; }
 .memory-records { min-height: 220px; }
+.portrait-heading { padding: 4px 0 16px; font-weight: 600; border-bottom: 1px solid var(--yt-card-border); }
+.portrait-directory { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; padding-top: 18px; }
+.portrait-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--yt-card-border); border-radius: 10px; background: var(--yt-elevated); color: var(--yt-ink-1); text-align: left; font: inherit; cursor: pointer; min-width: 0; }
+.portrait-card:hover { border-color: var(--yt-primary); }
+.portrait-card-head { display: flex; align-items: center; gap: 10px; }
+.portrait-preview { line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.portrait-record { padding-top: 20px; }
+.portrait-fields { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 18px 14px; margin: 0; }
+.portrait-fields dt { color: var(--yt-ink-3); }
+.portrait-fields dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--yt-ink-1); }
+.portrait-evidence { margin-top: 24px; }
+.profile-evidence { padding-bottom: 12px; }
+.profile-evidence blockquote { margin: 8px 0; padding-left: 12px; border-left: 2px solid var(--yt-card-border); color: var(--yt-ink-3); overflow-wrap: anywhere; }
 .memory-record { padding: 20px 0; border-bottom: 1px solid var(--yt-card-border); }
 .memory-record:last-child { border-bottom: 0; }
 .record-owner { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 0; padding: 0; background: transparent; color: var(--yt-ink-2); font: inherit; text-align: left; }
@@ -267,7 +294,6 @@ button.record-owner { cursor: pointer; }
 .memory-pagination, .people-pagination { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding-top: 16px; color: var(--yt-ink-3); font-size: 12px; }
 .memory-alert { margin: 14px 0; }
 .memory-empty-small { padding: 20px 0; color: var(--yt-ink-3); font-size: 12px; text-align: center; }
-.profile-record blockquote { border-left: 2px solid var(--yt-card-border); padding-left: 12px; margin: 10px 0; color: var(--yt-ink-3); overflow-wrap: anywhere; }
 .source-conversation { color: var(--yt-ink-3); margin-bottom: 16px; }
 .source-message { padding: 14px 0; border-bottom: 1px solid var(--yt-card-border); }
 .source-author { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; color: var(--yt-ink-3); font-size: 12px; }
@@ -282,5 +308,8 @@ button.record-owner { cursor: pointer; }
   .selected-person { flex-wrap: wrap; }
   .relations-link { margin-left: 0; }
   .memory-pagination { justify-content: center; }
+  .portrait-directory { grid-template-columns: minmax(0, 1fr); }
+  .portrait-fields { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .portrait-fields dd { margin-bottom: 12px; }
 }
 </style>

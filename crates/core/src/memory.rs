@@ -4,7 +4,7 @@ use crate::db::{params, OptionalExtension};
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,27 +93,48 @@ pub async fn profile(
     person: &str,
     cutoff: i64,
 ) -> Result<Vec<ProfileFact>> {
-    let mut st = conn
-        .prepare(
-            "SELECT p.field,p.content,p.source_msg_id,p.evidence_quote,p.updated_at
-         FROM person_profile_facts p JOIN messages m ON m.msg_id=p.source_msg_id
-         WHERE p.person_id=?1 AND m.sender_pid=p.person_id AND p.source_msg_id<=?2
-           AND instr(m.text,p.evidence_quote)>0 ORDER BY p.field LIMIT 4",
-        )
-        .await?;
-    let rows = st
-        .query_map(params![person, cutoff], |r| {
-            Ok(ProfileFact {
-                field: r.try_get(0)?,
-                content: r.try_get(1)?,
-                source_msg_id: r.try_get(2)?,
-                evidence_quote: r.try_get(3)?,
-                updated_at: r.try_get(4)?,
-            })
-        })
+    Ok(profiles(conn, &[person.to_owned()], cutoff)
         .await?
-        .collect::<sqlx::Result<Vec<_>>>()?;
-    Ok(rows)
+        .remove(person)
+        .unwrap_or_default())
+}
+
+/// One current portrait per identity. Directory reads share profile()'s source checks in one query.
+pub async fn profiles(
+    conn: &mut sqlx::SqliteConnection,
+    people: &[String],
+    cutoff: i64,
+) -> Result<BTreeMap<String, Vec<ProfileFact>>> {
+    ensure!(people.len() <= 96, "每次最多读取96个人物画像");
+    let mut result: BTreeMap<String, Vec<ProfileFact>> = BTreeMap::new();
+    if people.is_empty() {
+        return Ok(result);
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT p.person_id,p.field,p.content,p.source_msg_id,p.evidence_quote,p.updated_at
+         FROM person_profile_facts p JOIN messages m ON m.msg_id=p.source_msg_id
+         WHERE m.sender_pid=p.person_id AND instr(m.text,p.evidence_quote)>0 AND p.source_msg_id<=",
+    );
+    query.push_bind(cutoff).push(" AND p.person_id IN (");
+    let mut ids = query.separated(",");
+    for id in people {
+        ids.push_bind(id);
+    }
+    ids.push_unseparated(")");
+    query.push(" ORDER BY p.person_id,p.field");
+    for row in query.build().fetch_all(&mut *conn).await? {
+        let facts = result.entry(row.try_get("person_id")?).or_default();
+        if facts.len() < 4 {
+            facts.push(ProfileFact {
+                field: row.try_get("field")?,
+                content: row.try_get("content")?,
+                source_msg_id: row.try_get("source_msg_id")?,
+                evidence_quote: row.try_get("evidence_quote")?,
+                updated_at: row.try_get("updated_at")?,
+            });
+        }
+    }
+    Ok(result)
 }
 
 #[derive(Debug, Clone, Serialize)]

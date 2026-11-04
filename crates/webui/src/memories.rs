@@ -192,11 +192,15 @@ pub async fn summaries(State(state): State<AppState>, Query(q): Query<MemQuery>)
     list(state, q, true).await
 }
 
-pub async fn people(State(state): State<AppState>, Query(q): Query<MemQuery>) -> ApiResult {
-    q.validate()?;
-    let mut conn = state.open_db().await.map_err(db_error)?;
-    let mut b=QueryBuilder::<Sqlite>::new("SELECT p.person_id,p.display_name,p.last_seen,
-        (SELECT platform_uid FROM identities WHERE person_id=p.person_id AND platform='qq' ORDER BY id DESC LIMIT 1) AS qq FROM persons p WHERE 1=1");
+fn people_filtered(q: &MemQuery, count: bool) -> QueryBuilder<'static, Sqlite> {
+    let projection = if count {
+        "COUNT(*)"
+    } else {
+        "p.person_id,p.display_name,p.last_seen,
+        (SELECT platform_uid FROM identities WHERE person_id=p.person_id AND platform='qq' ORDER BY id DESC LIMIT 1) AS qq"
+    };
+    let mut b =
+        QueryBuilder::<Sqlite>::new(format!("SELECT {projection} FROM persons p WHERE 1=1"));
     if let Some(chat) = &q.chat_id {
         b.push(
             " AND EXISTS(SELECT 1 FROM messages m WHERE m.sender_pid=p.person_id AND m.chat_id=",
@@ -217,30 +221,55 @@ pub async fn people(State(state): State<AppState>, Query(q): Query<MemQuery>) ->
             .push(")>0 OR EXISTS(SELECT 1 FROM identities i WHERE i.person_id=p.person_id AND instr(i.platform_uid,").push_bind(term.clone()).push(")>0)")
             .push(" OR EXISTS(SELECT 1 FROM member_profiles mp WHERE mp.person_id=p.person_id AND instr(lower(COALESCE(mp.card,'')),").push_bind(term.clone()).push(")>0)")
             .push(" OR EXISTS(SELECT 1 FROM long_memories lm WHERE lm.owner_type='person' AND lm.owner_id=p.person_id AND instr(lower(COALESCE(lm.content,'')),").push_bind(term.clone()).push(")>0)")
-            .push(" OR EXISTS(SELECT 1 FROM summaries s WHERE s.owner_type='person' AND s.owner_id=p.person_id AND instr(lower(COALESCE(s.summary,'')),").push_bind(term).push(")>0))");
+            .push(" OR EXISTS(SELECT 1 FROM summaries s WHERE s.owner_type='person' AND s.owner_id=p.person_id AND instr(lower(COALESCE(s.summary,'')),").push_bind(term.clone()).push(")>0)")
+            .push(" OR EXISTS(SELECT 1 FROM person_profile_facts pf WHERE pf.person_id=p.person_id AND instr(lower(pf.content),").push_bind(term).push(")>0))");
     }
+    b
+}
+
+pub async fn people(State(state): State<AppState>, Query(q): Query<MemQuery>) -> ApiResult {
+    q.validate()?;
+    let mut conn = state.open_db().await.map_err(db_error)?;
+    let mut tx = sqlx::Connection::begin(&mut *conn)
+        .await
+        .map_err(db_error)?;
+    let total: i64 = people_filtered(&q, true)
+        .build_query_scalar()
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(db_error)?;
     let size = q.page_size.unwrap_or(24);
-    let page = q.page.unwrap_or(1);
+    let page = q.page.unwrap_or(1).min((total - 1).max(0) / size + 1);
+    let mut b = people_filtered(&q, false);
     b.push(" ORDER BY p.last_seen DESC,p.person_id LIMIT ")
-        .push_bind(size + 1)
+        .push_bind(size)
         .push(" OFFSET ")
         .push_bind((page - 1) * size);
-    let rows = b.build().fetch_all(&mut *conn).await.map_err(db_error)?;
+    let rows = b.build().fetch_all(&mut *tx).await.map_err(db_error)?;
+    let ids = rows
+        .iter()
+        .map(|r| r.try_get::<String, _>("person_id"))
+        .collect::<sqlx::Result<Vec<_>>>()
+        .map_err(db_error)?;
+    let mut portraits = yuantuan_core::memory::profiles(&mut tx, &ids, i64::MAX)
+        .await
+        .map_err(db_error)?;
     let items = rows
         .iter()
         .take(size as usize)
         .map(|r| -> sqlx::Result<Value> {
-            Ok(identity(
-                &r.try_get::<String, _>("person_id")?,
-                r.try_get("display_name")?,
-                r.try_get("qq")?,
-                "person",
-            ))
+            let id: String = r.try_get("person_id")?;
+            let mut person = identity(&id, r.try_get("display_name")?, r.try_get("qq")?, "person");
+            let facts = portraits.remove(&id).unwrap_or_default();
+            person["profile_updated_at"] = json!(facts.iter().map(|f| f.updated_at).max());
+            person["profile"] = json!(facts);
+            Ok(person)
         })
         .collect::<sqlx::Result<Vec<_>>>()
         .map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
     Ok(Json(
-        json!({"people":items,"page":page,"has_more":rows.len()>size as usize}),
+        json!({"people":items,"page":page,"total":total,"has_more":page*size<total}),
     ))
 }
 

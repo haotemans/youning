@@ -5,8 +5,11 @@ import path from 'node:path'
 const artifacts = path.resolve('../data/artifacts/memories')
 fs.mkdirSync(artifacts, { recursive: true })
 const people = [
-  { id: 'p_101', name: '小冰猪', qq: '101', kind: 'person', avatar_url: 'https://q1.qlogo.cn/g?b=qq&nk=101&s=100' },
-  { id: 'p_202', name: 'SkyLoong', qq: '202', kind: 'person', avatar_url: 'https://q1.qlogo.cn/g?b=qq&nk=202&s=100' },
+  { id: 'p_101', name: '小冰猪', qq: '101', kind: 'person', avatar_url: 'https://q1.qlogo.cn/g?b=qq&nk=101&s=100', profile_updated_at: 1700000000,
+    profile: [{ field: 'technical_preferences', content: '长期使用 Rust', evidence_quote: '我长期使用 Rust', source_msg_id: 1, updated_at: 1700000000 },
+      { field: 'ongoing_projects', content: '正在训练 LoRA', evidence_quote: '我在训练 LoRA', source_msg_id: 3, updated_at: 1700000000 }] },
+  { id: 'p_202', name: 'SkyLoong', qq: '202', kind: 'person', avatar_url: 'https://q1.qlogo.cn/g?b=qq&nk=202&s=100', profile_updated_at: 1700000000,
+    profile: [{ field: 'technical_preferences', content: '使用 Python 测试模型', evidence_quote: '我用 Python 测试模型', source_msg_id: 4, updated_at: 1700000000 }] },
 ]
 const conversations = [
   { id: '100', chat_type: 'group', label: '群聊 100' }, { id: '200', chat_type: 'group', label: '群聊 200' },
@@ -24,9 +27,18 @@ async function openMemories(page, options = {}) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url()), q = url.searchParams
     state.requests.push({ path: url.pathname, person: q.get('person_id'), chat: q.get('chat_id'), page: q.get('page') })
-    if (url.pathname === '/api/memories/people') return route.fulfill({ json: { people, page: 1, has_more: false } })
+    if (url.pathname === '/api/memories/people') {
+      if (state.fail) return route.fulfill({ status: 500, json: { error: '读取失败' } })
+      const term = (q.get('search') || '').toLowerCase()
+      const found = people.filter(p => !term || [p.name, p.qq, ...p.profile.map(f => f.content)].join(' ').toLowerCase().includes(term))
+      return route.fulfill({ json: { people: found, page: 1, total: found.length, has_more: false } })
+    }
     if (url.pathname === '/api/memories/conversations') return route.fulfill({ json: { conversations } })
-    if (url.pathname.startsWith('/api/relations/person/')) return route.fulfill({ json: { profile: [{ field: 'technical_preferences', content: '长期使用 Rust', evidence_quote: '我长期使用 Rust', source_msg_id: 1, updated_at: 1700000000 }] } })
+    if (url.pathname.startsWith('/api/relations/person/')) {
+      const id = url.pathname.split('/').pop()
+      if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
+      return route.fulfill({ json: { profile: people.find(p => p.id === id)?.profile || [] } }).catch(() => {})
+    }
     if (/\/api\/memories\/\d+\/source/.test(url.pathname)) return route.fulfill({ json: { is_window: true, conversation: conversations[0], messages: [{ msg_id: 1, person_id: 'p_101', name: '冰猪', text: '我长期使用 Rust', ts: 1700000000 }] } })
     if (url.pathname === '/api/memories' || url.pathname === '/api/summaries') {
       if (state.fail) return route.fulfill({ status: 500, json: { error: '读取失败' } })
@@ -45,29 +57,42 @@ async function openMemories(page, options = {}) {
     return route.fulfill({ json: {} })
   })
   await page.goto('/memories')
-  if (!state.fail) await expect(page.locator('.memory-record')).toHaveCount(24)
+  if (!state.fail) await expect(page.locator('.portrait-card')).toHaveCount(2)
   return state
 }
 const person = (page, id) => page.locator('.person-option').filter({ hasText: id })
 
-test('identity cards, true counts, paging and unified multi-conversation person records', async ({ page }) => {
+test('one portrait per person stays primary even with 251 history records', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })
   const state = await openMemories(page)
-  await expect(page.getByText('251 条记忆 · 1 条摘要', { exact: true })).toBeVisible()
+  await expect(page.getByText('2 位人物', { exact: true })).toBeVisible()
+  await expect(page.locator('.memory-record')).toHaveCount(0)
+  expect(state.requests.some(r => ['/api/memories', '/api/summaries'].includes(r.path))).toBe(false)
   expect(state.requests.some(r => r.path.startsWith('/api/relations/person/'))).toBe(false)
-  await page.screenshot({ path: path.join(artifacts, 'desktop.png'), fullPage: true })
-  await page.locator('.memory-pagination .n-pagination-item').filter({ hasText: /^2$/ }).click()
-  await expect.poll(() => state.requests.some(r => r.path === '/api/memories' && r.page === '2')).toBe(true)
+  await expect(page.locator('.n-spin-body:visible')).toHaveCount(0)
+  await page.screenshot({ path: path.join(artifacts, 'desktop.png'), fullPage: true, animations: 'disabled' })
   await person(page, '101').click()
   await expect(page.locator('.selected-name')).toHaveText('小冰猪')
+  await expect(page.locator('.portrait-record')).toHaveCount(1)
+  await expect(page.locator('.portrait-record')).toContainText('长期使用 Rust')
+  await expect(page.locator('.portrait-record')).toContainText('正在训练 LoRA')
+  await expect(page.locator('.memory-record')).toHaveCount(0)
+  expect(state.requests.some(r => r.path === '/api/memories')).toBe(false)
+  await page.screenshot({ path: path.join(artifacts, 'person.png'), fullPage: true })
+  await page.getByText('来源依据', { exact: true }).click()
+  await expect(page.locator('.profile-evidence blockquote').first()).toHaveText('我长期使用 Rust')
+  await page.getByText('历史记忆', { exact: true }).click()
+  await expect(page.locator('.memory-record')).toHaveCount(24)
   await expect(page.locator('.memory-record .identity-name').first()).toHaveText('小冰猪')
   await expect(page.locator('.memory-records')).toContainText('私聊 101')
   await expect(page.locator('.memory-records')).toContainText('群聊 100')
   await expect(page.locator('.memory-records')).toContainText('群聊 200')
+  await page.locator('.memory-pagination .n-pagination-item').filter({ hasText: /^2$/ }).click()
+  await expect.poll(() => state.requests.some(r => r.path === '/api/memories' && r.page === '2')).toBe(true)
   await page.getByText('人物画像', { exact: true }).click()
   await expect(page.locator('.memory-toolbar .n-select')).toHaveCount(0)
-  await expect(page.locator('.profile-record')).toContainText('长期使用 Rust')
-  await expect(page.locator('.profile-record blockquote')).toHaveText('我长期使用 Rust')
+  await expect(page.locator('.portrait-record')).toHaveCount(1)
+  await expect(page.locator('.memory-record')).toHaveCount(0)
   await page.getByRole('button', { name: '关系图谱', exact: true }).click()
   await expect(page).toHaveURL(/\/relations\?person=p_101/)
   await expect(page.locator('.person-name')).toHaveText('小冰猪')
@@ -76,6 +101,7 @@ test('identity cards, true counts, paging and unified multi-conversation person 
 test('conversation filter keeps a unified person, and sources load only when opened', async ({ page }) => {
   const state = await openMemories(page)
   await person(page, '101').click()
+  await page.getByText('历史记忆', { exact: true }).click()
   await page.locator('.memory-toolbar .n-select').click()
   await page.locator('.n-base-select-menu').getByText('群聊 100', { exact: true }).click()
   await expect.poll(() => state.requests.some(r => r.path === '/api/memories' && r.person === 'p_101' && r.chat === '100')).toBe(true)
@@ -93,19 +119,20 @@ test('search, late-response isolation, retry and phone/dark layouts', async ({ p
   await person(page, '101').click()
   await person(page, '202').click()
   await expect(page.locator('.selected-name')).toHaveText('SkyLoong')
-  await expect(page.locator('.memory-record .identity-name').first()).toHaveText('SkyLoong')
+  await expect(page.locator('.portrait-record')).toContainText('使用 Python 测试模型')
   await page.waitForTimeout(550)
-  await expect(page.locator('.memory-record .identity-name').first()).toHaveText('SkyLoong')
+  await expect(page.locator('.portrait-record')).toContainText('使用 Python 测试模型')
+  await expect(page.locator('.portrait-record')).not.toContainText('长期使用 Rust')
   await page.getByPlaceholder('搜索昵称、QQ 或记忆内容').fill('不存在的词')
-  await expect(page.getByText('暂无记忆', { exact: true })).toBeVisible()
+  await expect(page.locator('.memory-content').getByText('暂无匹配人物', { exact: true })).toBeVisible()
   await page.getByPlaceholder('搜索昵称、QQ 或记忆内容').fill('')
-  await expect(page.locator('.memory-record')).toHaveCount(24)
+  await expect(page.locator('.portrait-card')).toHaveCount(2)
   state.fail = true
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('读取失败')
   state.fail = false
   await page.getByRole('button', { name: '重试', exact: true }).last().click()
-  await expect(page.locator('.memory-record')).toHaveCount(24)
+  await expect(page.locator('.portrait-card')).toHaveCount(2)
   await page.getByRole('button', { name: '切换主题' }).click()
   await expect(page.locator('html')).toHaveClass(/dark/)
   await expect(page.locator('.n-spin-body:visible')).toHaveCount(0)
