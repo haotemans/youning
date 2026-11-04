@@ -24,9 +24,13 @@ async fn early_success_is_not_delivery_until_server_sequence_arrives() {
 }
 
 async fn reconcile_image(early_success: bool) {
+    // SystemTime can have coarse resolution on Windows; concurrent cases must
+    // never share an artifact directory or clean up each other's image.
+    static NEXT_CASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "yt-delayed-image-{}-{}",
+        "yt-delayed-image-{}-{}-{}",
         std::process::id(),
+        NEXT_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
