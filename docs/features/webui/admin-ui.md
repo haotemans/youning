@@ -1,6 +1,6 @@
 # Web 管理后台与观测
 
-[返回功能索引](README.md) · [返回文档总索引](../README.md)
+[返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
 
 **当前状态：已实现（界面按后端能力受限）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
@@ -19,21 +19,21 @@
 
 ## 对应实现（本页负责的主源码）
 
-- [`crates/webui/src/auth.rs`](../../crates/webui/src/auth.rs)
-- [`crates/webui/src/dashboard.rs`](../../crates/webui/src/dashboard.rs)
-- [`crates/webui/src/events_api.rs`](../../crates/webui/src/events_api.rs)
-- [`crates/webui/src/lib.rs`](../../crates/webui/src/lib.rs)
-- [`crates/webui/src/overview.rs`](../../crates/webui/src/overview.rs)
-- [`crates/webui/src/state.rs`](../../crates/webui/src/state.rs)
-- [`crates/webui/src/static_files.rs`](../../crates/webui/src/static_files.rs)
-- [`crates/webui/src/ws.rs`](../../crates/webui/src/ws.rs)
-- [`webui-frontend/src/views/Dashboard.vue`](../../webui-frontend/src/views/Dashboard.vue)
-- [`webui-frontend/src/views/Login.vue`](../../webui-frontend/src/views/Login.vue)
-- [`webui-frontend/src/views/Trace.vue`](../../webui-frontend/src/views/Trace.vue)
+- [`crates/webui/src/auth.rs`](../../../crates/webui/src/auth.rs)
+- [`crates/webui/src/dashboard.rs`](../../../crates/webui/src/dashboard.rs)
+- [`crates/webui/src/events_api.rs`](../../../crates/webui/src/events_api.rs)
+- [`crates/webui/src/lib.rs`](../../../crates/webui/src/lib.rs)
+- [`crates/webui/src/overview.rs`](../../../crates/webui/src/overview.rs)
+- [`crates/webui/src/state.rs`](../../../crates/webui/src/state.rs)
+- [`crates/webui/src/static_files.rs`](../../../crates/webui/src/static_files.rs)
+- [`crates/webui/src/ws.rs`](../../../crates/webui/src/ws.rs)
+- [`webui-frontend/src/views/Dashboard.vue`](../../../webui-frontend/src/views/Dashboard.vue)
+- [`webui-frontend/src/views/Login.vue`](../../../webui-frontend/src/views/Login.vue)
+- [`webui-frontend/src/views/Trace.vue`](../../../webui-frontend/src/views/Trace.vue)
 
 ## 验证入口
 
-- [`crates/webui/tests/auth_status.rs`](../../crates/webui/tests/auth_status.rs)
-- [`crates/webui/tests/pages_api.rs`](../../crates/webui/tests/pages_api.rs)
+- [`crates/webui/tests/auth_status.rs`](../../../crates/webui/tests/auth_status.rs)
+- [`crates/webui/tests/pages_api.rs`](../../../crates/webui/tests/pages_api.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
