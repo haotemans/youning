@@ -168,7 +168,7 @@ async fn config_hot_apply_full_pass() {
             "reply": { "per_char_ms": 88, "total_budget_ms": 6000, "bubble_cap": 4, "bubble_char_cap": 360 },
             "context": { "budget_chars": 32000, "k": 16, "roster_mem_per": 2 },
             "meme": { "steal_enabled": false },
-            "consolidation": { "enabled": true, "daily_time": "04:30", "run_on_startup": true }
+            "consolidation": { "enabled": true, "daily_time": "04:30", "run_on_startup": true, "portrait_daily_limit":10,"portrait_interval_secs":60 }
         }))
         .await;
     assert_eq!(s, 200, "POST 应 200: {v}");
@@ -279,6 +279,14 @@ async fn config_hot_apply_full_pass() {
         json!("04:30"),
         "GET 回读归纳时刻不一致: {back}"
     );
+    assert_eq!(back["config"]["consolidation"]["portrait_daily_limit"],10);
+    assert_eq!(back["config"]["consolidation"]["portrait_interval_secs"],60);
+    for options in [json!({"portrait_daily_limit":101}),json!({"portrait_interval_secs":0}),json!({"daily_time":"25:00"})] {
+        let (status,_) = rig.post_config(json!({"consolidation":options})).await;
+        assert_eq!(status,400,"无效的夜间限额配置须在写盘前拒绝");
+    }
+    let after=std::fs::read_to_string(&rig.extras.config_path).unwrap();
+    assert!(after.contains("portrait_daily_limit = 10"));
 
     // —— ③b requires_restart 名单：napcat 变更
     let (s, v) = rig

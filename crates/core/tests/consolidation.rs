@@ -193,12 +193,12 @@ async fn consolidation_end_to_end() {
         .unwrap()
         .collect::<sqlx::Result<_>>()
         .unwrap();
-    assert_eq!(profiles, vec![("p_2001".into(), "正在分享文档".into())]);
+    assert!(profiles.is_empty(), "群归纳不能绕过独立画像人数上限");
     let provenance:(String,i64,i64)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'", yuantuan_core::db::params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
     assert_eq!(provenance, ("555666".into(), 1, 30));
     let today: String = conn
         .query_row(
-            "SELECT strftime('%Y-%m-%d','now','localtime')",
+            "SELECT strftime('%Y-%m-%d','now','+8 hours')",
             yuantuan_core::db::params![],
             |r| r.try_get(0),
         )

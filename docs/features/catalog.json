@@ -82,7 +82,8 @@
         "crates/webui/src/memories/activity.rs",
         "webui-frontend/src/views/Memories.vue",
         "crates/core/src/vision.rs",
-        "crates/core/src/memory/refresh.rs"
+        "crates/core/src/memory/refresh.rs",
+        "crates/core/src/memory/nightly.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",

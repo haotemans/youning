@@ -1,12 +1,15 @@
 use serde_json::{json, Value};
 use std::{
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 use yuantuan_core::{
     db::{self, params, SqliteExt},
     llm::LlmGateway,
-    memory::{self, refresh},
+    memory::{self, nightly, refresh},
 };
 
 struct Rig {
@@ -14,6 +17,7 @@ struct Rig {
     path: PathBuf,
     gw: LlmGateway,
     calls: Arc<Mutex<Vec<Value>>>,
+    peak: Arc<AtomicUsize>,
     server: tokio::task::JoinHandle<()>,
 }
 impl Rig {
@@ -30,13 +34,21 @@ impl Rig {
             .unwrap();
         let calls = Arc::new(Mutex::new(Vec::new()));
         let seen = calls.clone();
+        let live = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let peak_seen = peak.clone();
         let app = axum::Router::new().route(
             "/chat/completions",
             axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
                 let output = output.clone();
                 let seen = seen.clone();
+                let live = live.clone();
+                let peak = peak_seen.clone();
                 async move {
+                    peak.fetch_max(live.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(15)).await;
                     seen.lock().unwrap().push(body);
+                    live.fetch_sub(1, Ordering::SeqCst);
                     axum::Json(
                         json!({"choices":[{"message":{"content":output},"finish_reason":"stop"}]}),
                     )
@@ -54,6 +66,7 @@ impl Rig {
             path,
             gw,
             calls,
+            peak,
             server,
         }
     }
@@ -170,7 +183,7 @@ async fn repair_uses_own_group_and_private_messages_preserves_current_and_group_
 }
 
 #[tokio::test]
-async fn nightly_repairs_are_bounded_and_empty_results_do_not_starve_other_people() {
+async fn nightly_quota_survives_restarts_and_empty_results_rotate_to_other_people() {
     let r = Rig::new(json!({"updates":[]}).to_string()).await;
     let mut conn = db::connect(&r.path).await.unwrap();
     for id in 1..=10 {
@@ -183,11 +196,15 @@ async fn nightly_repairs_are_bounded_and_empty_results_do_not_starve_other_peopl
         .unwrap();
         conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group',?1,'普通寒暄不应凭空生成性格',1)",params![pid]).await.unwrap();
     }
-    refresh::missing(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 8);
-    refresh::missing(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 10);
-    refresh::missing(&r.path, &r.gw).await.unwrap();
+    let options = night_options("2026-11-06", 4);
+    nightly::run(&r.path, &r.gw, &options).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 4);
+    assert_eq!(r.peak.load(Ordering::SeqCst), 1);
+    nightly::run(&r.path, &r.gw, &options).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 4);
+    nightly::run(&r.path, &r.gw, &night_options("2026-11-07", 6))
+        .await
+        .unwrap();
     assert_eq!(r.calls.lock().unwrap().len(), 10);
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM person_profile_facts")
@@ -230,7 +247,7 @@ async fn malformed_results_leave_profiles_intact_and_rapid_retries_do_not_call_m
 }
 
 #[tokio::test]
-async fn active_maintenance_updates_existing_portraits_and_requires_new_messages() {
+async fn nightly_updates_existing_portraits_and_requires_new_messages() {
     let r=Rig::new(json!({"updates":[{"field":"technical_preferences","value":"主要使用 Python","evidence_msg_id":2,"evidence_quote":"我现在主要使用 Python"}]}).to_string()).await;
     let mut conn = db::connect(&r.path).await.unwrap();
     conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_a','A',1,2);
@@ -238,56 +255,79 @@ async fn active_maintenance_updates_existing_portraits_and_requires_new_messages
       (1,'g1','group','p_a','我长期使用 Rust',1),(2,'private','private','p_a','我现在主要使用 Python',CAST(strftime('%s','now') AS INTEGER));
       INSERT INTO person_profile_facts(person_id,field,content,source_msg_id,evidence_quote,updated_at)
       VALUES('p_a','technical_preferences','Rust',1,'我长期使用 Rust',1);").await.unwrap();
-    refresh::active(&r.path, &r.gw).await.unwrap();
+    nightly::run(&r.path, &r.gw, &night_options("2026-11-06", 10))
+        .await
+        .unwrap();
     assert_eq!(
         memory::profile(&mut conn, "p_a", i64::MAX).await.unwrap()[0].content,
         "主要使用 Python"
     );
-    let state: String = sqlx::query_scalar("SELECT value FROM state_kv")
-        .fetch_one(&mut *conn)
-        .await
-        .unwrap();
+    let state: String =
+        sqlx::query_scalar("SELECT value FROM state_kv WHERE key='profile_refresh:v1:p_a'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
     let state: Value = serde_json::from_str(&state).unwrap();
     assert_eq!(state["status"], "updated");
     assert_eq!(state["cutoff"], 2);
     assert!(state["completed_at"].as_i64().unwrap() > 0);
     // A fresh pass without new text never calls the model, even after the cooldown.
-    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0)")
+    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:p_a'")
         .await
         .unwrap();
-    refresh::active(&r.path, &r.gw).await.unwrap();
+    nightly::run(&r.path, &r.gw, &night_options("2026-11-07", 10))
+        .await
+        .unwrap();
     assert_eq!(r.calls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
-async fn active_maintenance_is_bounded_fair_and_cools_down_new_messages() {
-    let r = Rig::new(json!({"updates":[]}).to_string()).await;
+async fn failed_nightly_attempts_consume_the_daily_quota() {
+    let r = Rig::new("not json".into()).await;
     let mut conn = db::connect(&r.path).await.unwrap();
-    for id in 1..=6 {
+    for id in 1..=3 {
         let pid = format!("p_{id}");
         conn.execute(
-            "INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES(?1,?1,1,1)",
+            "INSERT INTO persons(person_id,first_seen,last_seen) VALUES(?1,1,1)",
             params![pid],
         )
         .await
         .unwrap();
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group',?1,'普通交流不能凭空补造性格',CAST(strftime('%s','now') AS INTEGER))",params![pid]).await.unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group',?1,'我长期使用 Rust',1)",params![pid]).await.unwrap();
     }
-    refresh::active(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 4);
-    refresh::active(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 6);
-    conn.execute_batch("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group','p_1','又发了一条新消息',CAST(strftime('%s','now') AS INTEGER));").await.unwrap();
-    refresh::active(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 6);
-    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:p_1'").await.unwrap();
-    refresh::active(&r.path, &r.gw).await.unwrap();
-    assert_eq!(r.calls.lock().unwrap().len(), 7);
-    assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM person_profile_facts")
-            .fetch_one(&mut *conn)
-            .await
-            .unwrap(),
-        0
+    let options = night_options("2026-11-06", 2);
+    nightly::run(&r.path, &r.gw, &options).await.unwrap();
+    nightly::run(&r.path, &r.gw, &options).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 2);
+    let used:i64=sqlx::query_scalar("SELECT json_extract(value,'$.used') FROM state_kv WHERE key='profile_nightly:v1:2026-11-06'").fetch_one(&mut *conn).await.unwrap();
+    assert_eq!(used, 2);
+}
+
+fn night_options(date: &str, limit: usize) -> nightly::Options {
+    nightly::Options {
+        date: date.into(),
+        deadline: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            + 3600,
+        limit,
+        interval_secs: 0,
+    }
+}
+
+#[tokio::test]
+async fn simultaneous_explicit_refreshes_use_one_model_at_a_time() {
+    let r = Rig::new(json!({"updates":[]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    conn.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('a',1,1),('b',1,1);
+      INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group','a','我长期使用 Rust',1),('p','private','b','我长期使用 Python',2);").await.unwrap();
+    let (a, b) = tokio::join!(
+        refresh::person(&r.path, &r.gw, "a", true),
+        refresh::person(&r.path, &r.gw, "b", true)
     );
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 2);
+    assert_eq!(r.peak.load(Ordering::SeqCst), 1);
 }

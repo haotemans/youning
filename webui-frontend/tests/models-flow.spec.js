@@ -1,5 +1,26 @@
 import { expect, test } from '@playwright/test'
 
+test('nightly portrait defaults are visible and save with runtime settings', async ({ page }) => {
+  let saved
+  await page.addInitScript(() => localStorage.setItem('yt_token','test-only'))
+  await page.routeWebSocket('**/ws**',()=>{})
+  await page.route('**/api/**', async route => {
+    if (route.request().method()==='POST') { saved=route.request().postDataJSON().config; return route.fulfill({json:{ok:true,applied:['consolidation']}}) }
+    return route.fulfill({json:{config:{consolidation:{enabled:true,daily_time:'03:00',run_on_startup:false}}}})
+  })
+  await page.goto('/params')
+  const card=page.locator('.n-card').filter({hasText:'夜间记忆归纳'})
+  await expect(card.getByText('执行时刻（北京时间）',{exact:true})).toBeVisible()
+  const limit=card.locator('.n-form-item').filter({hasText:'每晚画像人数上限'}).getByRole('textbox')
+  const gap=card.locator('.n-form-item').filter({hasText:'画像间隔（秒）'}).getByRole('textbox')
+  await expect(limit).toHaveValue('10')
+  await expect(gap).toHaveValue('60')
+  await page.getByRole('button',{name:'保存运行参数'}).click()
+  await expect.poll(()=>saved?.consolidation.portrait_daily_limit).toBe(10)
+  expect(saved.consolidation.portrait_interval_secs).toBe(60)
+  expect(saved.consolidation.daily_time).toBe('03:00')
+})
+
 async function openModels(page, { saveError = false, staleReadback = false, testGate, loadGate, loadError = false } = {}) {
   let failNextLoad = loadError
   let stored = {
