@@ -12,8 +12,11 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 
 #[derive(Default, Deserialize)]
 pub struct ActivityQuery {
-    #[serde(flatten)]
-    filters: MemQuery,
+    chat_id: Option<String>,
+    chat_type: Option<String>,
+    search: Option<String>,
+    page: Option<i64>,
+    page_size: Option<i64>,
     date: Option<String>,
     utc_offset_minutes: Option<i64>,
 }
@@ -23,7 +26,15 @@ impl ActivityQuery {
         &self,
         conn: &mut sqlx::SqliteConnection,
     ) -> Result<(), (StatusCode, Json<Value>)> {
-        self.filters.validate()?;
+        MemQuery {
+            chat_id: self.chat_id.clone(),
+            chat_type: self.chat_type.clone(),
+            search: self.search.clone(),
+            page: self.page,
+            page_size: self.page_size,
+            ..Default::default()
+        }
+        .validate()?;
         if self
             .utc_offset_minutes
             .is_some_and(|v| !(-840..=840).contains(&v))
@@ -112,13 +123,13 @@ fn filtered(
             .push(" AND m.ts<")
             .push_bind(start + 86400);
     }
-    if let Some(chat) = &q.filters.chat_id {
+    if let Some(chat) = &q.chat_id {
         b.push(" AND m.chat_id=").push_bind(chat.clone());
     }
-    if let Some(kind) = &q.filters.chat_type {
+    if let Some(kind) = &q.chat_type {
         b.push(" AND m.chat_type=").push_bind(kind.clone());
     }
-    if let Some(term) = q.filters.search.as_ref().filter(|v| !v.trim().is_empty()) {
+    if let Some(term) = q.search.as_ref().filter(|v| !v.trim().is_empty()) {
         b.push(" AND instr(lower(COALESCE(m.text,'')),")
             .push_bind(term.trim().to_lowercase())
             .push(")>0");
@@ -154,12 +165,8 @@ pub async fn messages(
         .fetch_one(&mut *tx)
         .await
         .map_err(db_error)?;
-    let size = q.filters.page_size.unwrap_or(24);
-    let page = q
-        .filters
-        .page
-        .unwrap_or(1)
-        .min((total - 1).max(0) / size + 1);
+    let size = q.page_size.unwrap_or(24);
+    let page = q.page.unwrap_or(1).min((total - 1).max(0) / size + 1);
     let mut b = filtered(&id, &q, start, false);
     b.push(" ORDER BY m.ts DESC,m.msg_id DESC LIMIT ")
         .push_bind(size)
