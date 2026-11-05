@@ -477,7 +477,63 @@ impl LlmGateway {
                     && url.len() <= 4096,
                 "图片地址无效"
             );
-            parts.push(json!({"type":"image_url","image_url":{"url":url,"detail":"low"}}));
+            // Some compatible providers silently treat remote URLs as text. Fetch
+            // the actual pixels here so an inaccessible/expired link fails locally.
+            let _permit = self.concurrency.acquire().await?;
+            let mut response = self
+                .http
+                .get(url)
+                .timeout(Duration::from_secs(8))
+                .send()
+                .await?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "图片下载 HTTP {}",
+                response.status()
+            );
+            const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+            anyhow::ensure!(
+                response
+                    .content_length()
+                    .is_none_or(|n| n <= MAX_IMAGE_BYTES as u64),
+                "图片超过8MB"
+            );
+            let mut bytes = Vec::new();
+            while let Some(chunk) = response.chunk().await? {
+                anyhow::ensure!(bytes.len() + chunk.len() <= MAX_IMAGE_BYTES, "图片超过8MB");
+                bytes.extend_from_slice(&chunk);
+            }
+            let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
+                let mut reader =
+                    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+                let mut limits = image::Limits::default();
+                limits.max_image_width = Some(4096);
+                limits.max_image_height = Some(4096);
+                limits.max_alloc = Some(32 * 1024 * 1024);
+                reader.limits(limits);
+                let img = reader.decode()?;
+                let img = if img.width() > 1024 || img.height() > 1024 {
+                    img.thumbnail(1024, 1024)
+                } else {
+                    img
+                };
+                let mut out = std::io::Cursor::new(Vec::new());
+                img.write_to(&mut out, image::ImageFormat::Png)?;
+                if out.get_ref().len() > 2 * 1024 * 1024 {
+                    out = std::io::Cursor::new(Vec::new());
+                    img.thumbnail(640, 640)
+                        .write_to(&mut out, image::ImageFormat::Png)?;
+                }
+                anyhow::ensure!(out.get_ref().len() <= 2 * 1024 * 1024, "图片编码超过2MB");
+                Ok(out.into_inner())
+            })
+            .await??;
+            use base64::Engine;
+            let data = format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(png)
+            );
+            parts.push(json!({"type":"image_url","image_url":{"url":data,"detail":"auto"}}));
         }
         self.chat_content(Role::BotChat, system, json!(parts), true)
             .await
