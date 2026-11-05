@@ -511,7 +511,12 @@ impl LlmGateway {
                 limits.max_image_height = Some(4096);
                 limits.max_alloc = Some(32 * 1024 * 1024);
                 reader.limits(limits);
-                let img = reader.decode()?.thumbnail(1024, 1024);
+                let img = reader.decode()?;
+                let img = if img.width() > 1024 || img.height() > 1024 {
+                    img.thumbnail(1024, 1024)
+                } else {
+                    img
+                };
                 let mut out = std::io::Cursor::new(Vec::new());
                 img.write_to(&mut out, image::ImageFormat::Png)?;
                 if out.get_ref().len() > 2 * 1024 * 1024 {
