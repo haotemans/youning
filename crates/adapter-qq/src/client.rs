@@ -248,6 +248,20 @@ fn forward_request(
 mod forward_tests {
     use super::*;
     use yuantuan_core::reply_engine::ChatType;
+    #[tokio::test]
+    async fn request_frames_are_persisted_once_before_handshake_and_never_become_chat_messages() {
+        let root=std::env::temp_dir().join(format!("yt-request-frame-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();let path=root.join("db.sqlite");
+        let mut conn=yuantuan_core::db::connect(&path).await.unwrap();yuantuan_core::db::migrate(&mut conn).await.unwrap();
+        let bus=EventBus::new(8);let mut rx=bus.subscribe();let pending=Default::default();let self_ids=SelfMsgIds::default();
+        let event=json!({"post_type":"request","request_type":"friend","self_id":100,"user_id":456,"flag":"friend-flag","comment":"想添加好友"});
+        handle_frame(&event,&bus,&path,0,&pending,&self_ids).await.unwrap();
+        assert!(matches!(rx.try_recv().unwrap(),yuantuan_core::event::Event::MembershipRequestReceived{..}));
+        handle_frame(&event,&bus,&path,100,&pending,&self_ids).await.unwrap();assert!(rx.try_recv().is_err());
+        assert!(handle_frame(&event,&bus,&path,200,&pending,&self_ids).await.is_err());
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM membership_requests").fetch_one(&mut *conn).await.unwrap(),1);
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM messages").fetch_one(&mut *conn).await.unwrap(),0);
+    }
     #[test]
     fn forward_actions_use_real_bot_identity_and_the_correct_chat_target() {
         let nodes = json!([{"type":"node","data":{"uin":"spoof","name":"spoof","content":[{"type":"video","data":{"file":"file:///video.mp4"}}]}}]);
@@ -281,6 +295,13 @@ pub(crate) async fn handle_frame(
         return Ok(());
     }
     match v.get("post_type").and_then(|t| t.as_str()) {
+        Some("request") => {
+            let request_bot=if self_qq>0 {self_qq}else{v["self_id"].as_u64().unwrap_or(0)};
+            if let Some(request)=yuantuan_core::membership::ingest(db_path,v,request_bot).await? {
+                bus.publish(yuantuan_core::event::Event::MembershipRequestReceived {request_id:request.id,chat_id:request.chat_id().to_owned()});
+            }
+            Ok(())
+        }
         Some("meta_event") => Ok(()),
         Some("message") | Some("message_sent") => {
             crate::ingest::ingest_message(v, bus, db_path, self_qq, self_ids).await

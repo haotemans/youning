@@ -16,6 +16,7 @@ pub mod meme;
 pub mod meme_pack;
 pub mod meme_review;
 pub mod memory;
+pub mod membership;
 pub mod napcat_slot;
 pub mod personality;
 pub mod prefilter;

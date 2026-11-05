@@ -8,7 +8,7 @@
 
 ## 后续迁移说明（2026-10-09）
 
-当前迁移版本为 V7；本页下方继续保留 V0.1 基线。V5 新增任务调度/列表索引；2026-10-10 的 V6 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 增加：
+当前迁移版本为 V10；本页下方继续保留 V0.1 基线。V5 新增任务调度/列表索引；2026-10-10 的 V6 按 [ADR-0008](../adr/0008-grounded-bot-context.md) 增加：
 
 同日按 [ADR-0010](../adr/0010-sqlx-sqlite-access.md) 将驱动迁移为 SQLx；SQLite 文件、迁移 SQL 和 user_version 保持不变，不新增 V8 或 `_sqlx_migrations`。连接池、事务、异步 API 与备份契约见[异步访问参考](sqlite-access.md)。
 
@@ -23,6 +23,8 @@ V7 按 [ADR-0009](../adr/0009-semantic-participation-policy.md) 增加 `messages
 Decision 输入新增 dialogue、active_tasks 和场景负载；输出新增 assessment、reply_mode；事件 JSON 新增 policy。它们不是数据库新增表，当前契约见[语义参与框架](decision-framework.md)，不应只依赖下方 V0.1 示例判断现行字段。
 
 每步迁移使用 `BEGIN IMMEDIATE`，取得写锁后重新读取 `user_version`；V4 的列存在性检查、加列、索引和版本更新位于同一事务。迁移失败一起回滚，多个连接启动时串行推进版本。任务创建、收尾及事件序号语义见[Agent 持久化参考](message-flow-rules.md#agent-任务执行与持久化2026-10-09-加固)。
+
+V8 保存人设回复示例，V9 保存原消息关联的图片语境。V10 新增持久好友/入群申请表 `membership_requests`，以 `(bot_qq,request_type,group_id,sub_type,flag)` 去重；保存待审/评估中/提交中/已同意/已拒绝/待确认状态、申请理由、审核资料、自动评估次数和时间。仅新增业务表及索引，不重写旧消息、画像、群聊记忆或摘要；失败回滚与V9数据保留有回归测试。具体审核契约见[主理人](../features/extensions/plugins/moderator.md)。
 
 ---
 

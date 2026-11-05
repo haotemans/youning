@@ -308,6 +308,30 @@ const MIGRATIONS: [(&str, &str); 9] = [
         );
     "#,
     ),
+    (
+        "V0.10 好友及入群申请持久审核队列",
+        r#"
+        CREATE TABLE IF NOT EXISTS membership_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_qq TEXT NOT NULL,
+          request_type TEXT NOT NULL CHECK(request_type IN ('friend','group')),
+          sub_type TEXT NOT NULL,
+          group_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          flag TEXT NOT NULL,
+          comment TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          note TEXT NOT NULL DEFAULT '',
+          assessment TEXT,
+          reviewed_at INTEGER NOT NULL DEFAULT 0,
+          auto_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(bot_qq,request_type,group_id,sub_type,flag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_membership_pending ON membership_requests(bot_qq,status,reviewed_at,id);
+        "#,
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {

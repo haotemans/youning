@@ -262,6 +262,11 @@ struct Services {
 }
 #[async_trait]
 impl HostServices for Services {
+    async fn membership(&self, ctx: &ToolCtx, action: MembershipAction) -> Result<Value> {
+        if self.id != "moderator" { bail!("此插件不能管理好友或入群申请"); }
+        self.moderation.as_ref().context("QQ申请审核服务未启用")?
+            .membership(ctx,action,&self.policy.config,self.policy.allowed_chats.as_deref()).await
+    }
     async fn moderate(&self, ctx: &ToolCtx, action: ModerationAction) -> Result<()> {
         if self
             .policy

@@ -6,6 +6,7 @@ use sqlx::Row;
 use std::{path::PathBuf, sync::Arc};
 use yuantuan_core::db::{self, params, OptionalExtension, SqliteExt};
 use yuantuan_plugin_api::{GroupModeration, ModerationAction, ToolCtx};
+mod membership;
 
 pub fn moderation_service(
     handle: AdapterHandle,
@@ -26,6 +27,10 @@ struct Service {
 }
 #[async_trait]
 impl GroupModeration for Service {
+    async fn membership(&self, ctx:&ToolCtx,action:yuantuan_plugin_api::MembershipAction,policy:&Value,allowed:Option<&[String]>)->Result<Value> {
+        let sender=self.handle.sender().await.context("QQ适配器当前未连接NapCat")?;
+        membership::execute(&Client{sender,bot_qq:self.handle.self_qq()},&self.db,ctx,action,policy,allowed,self.super_admin_qq).await
+    }
     async fn execute(&self, ctx: &ToolCtx, action: ModerationAction) -> Result<()> {
         let sender = self
             .handle

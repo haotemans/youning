@@ -1,8 +1,10 @@
 //! Stable source-level contract for compiled Rust plugins; not a dynamic-library ABI.
 mod skills;
 mod tools;
+mod membership;
 pub use skills::*;
 pub use tools::*;
+pub use membership::*;
 
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -99,12 +101,18 @@ pub enum ModerationAction {
 #[async_trait]
 pub trait GroupModeration: Send + Sync {
     async fn execute(&self, ctx: &ToolCtx, action: ModerationAction) -> Result<()>;
+    async fn membership(&self, _ctx: &ToolCtx, _action: MembershipAction, _policy: &Value, _allowed_chats: Option<&[String]>) -> Result<Value> {
+        bail!("适配器尚未提供申请审核服务")
+    }
 }
 
 /// Host services are scoped to one plugin. Call context is supplied by the host.
 /// Native Rust code is trusted code: this interface is not an OS sandbox.
 #[async_trait]
 pub trait HostServices: Send + Sync {
+    async fn membership(&self, _ctx: &ToolCtx, _action: MembershipAction) -> Result<Value> {
+        bail!("宿主未提供申请审核服务")
+    }
     async fn moderate(&self, _ctx: &ToolCtx, _action: ModerationAction) -> Result<()> {
         bail!("宿主未提供群管理服务")
     }

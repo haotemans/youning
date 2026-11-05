@@ -79,6 +79,9 @@ jobs:
 
       - name: 全量测试（mock WS/LLM、SQLx 存储，不依赖外部服务）
         run: |
+          cargo test --locked -p yuantuan-plugin-moderator
+          cargo test --locked -p yuantuan-adapter-qq --lib moderation
+          cargo test --locked -p yuantuan-core --test membership
           cargo test --locked -p yuantuan-webui --test memes_api
           cargo test --locked --workspace
 
