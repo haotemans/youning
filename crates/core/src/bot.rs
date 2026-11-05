@@ -418,7 +418,8 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             };
             if decision::is_directed(m, &snapshot) {
                 match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
+                    // Up to three bounded 40s image observations, plus DB work.
+                    std::time::Duration::from_secs(125),
                     crate::vision::observe(&deps.db_path, &gw, m, &snapshot),
                 )
                 .await

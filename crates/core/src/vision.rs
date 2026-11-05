@@ -120,7 +120,7 @@ pub async fn observe(
         let user = json!({"message":snapshot.anchor,"source_msg_id":target,"quoted_messages":snapshot.quoted_messages,
             "person_context":snapshot.participants.iter().filter(|p|p["person_id"]==msg.sender_pid).chain(snapshot.participants.iter().filter(|p|p["person_id"]!=msg.sender_pid)).take(8).collect::<Vec<_>>(),"relationships":snapshot.relationships}).to_string();
         let result = tokio::time::timeout(
-            Duration::from_secs(25),
+            Duration::from_secs(40),
             llm.chat_with_images(PROMPT, &user, &[url]),
         )
         .await;
