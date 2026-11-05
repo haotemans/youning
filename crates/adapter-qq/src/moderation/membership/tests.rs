@@ -356,3 +356,49 @@ async fn missing_rules_invites_and_changed_rule_evidence_are_never_auto_approved
         .is_err());
     assert_eq!(c.writes(), 0);
 }
+
+#[tokio::test]
+async fn pending_lists_bound_payload_size_and_leave_full_evidence_for_details() {
+    let d = db().await;
+    let c = Fake::new();
+    let mut conn = db::connect(&d.0).await.unwrap();
+    for n in 0..25 {
+        let id = add(&d.0, "group", 42, &format!("long-{n}")).await;
+        conn.execute(
+            "UPDATE membership_requests SET comment=?2,note=?3,assessment=?4 WHERE id=?1",
+            params![
+                id,
+                "长申请理由".repeat(400),
+                "审核说明".repeat(100),
+                "完整审核资料".repeat(500)
+            ],
+        )
+        .await
+        .unwrap();
+    }
+    let list = run(
+        &c,
+        &d,
+        &ctx("p_123", "group", "42"),
+        Action::List {
+            kind: "group".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let rows = list.as_array().unwrap();
+    assert_eq!(rows.len(), 20);
+    assert!(rows
+        .iter()
+        .all(|r| r["comment"].as_str().unwrap().chars().count() <= 100
+            && r["note"].as_str().unwrap().chars().count() <= 100
+            && r["assessment"].is_null()
+            && r.get("flag").is_none()));
+    assert!(serde_json::to_vec(&list).unwrap().len() < 32_000);
+    let full = queue::load(&d.0, rows[0]["id"].as_i64().unwrap())
+        .await
+        .unwrap();
+    assert!(full.comment.chars().count() > 100);
+    assert!(full.assessment.is_some());
+    assert_eq!(c.writes(), 0);
+}

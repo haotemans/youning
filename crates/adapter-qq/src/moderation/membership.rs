@@ -241,10 +241,16 @@ pub(super) async fn execute(
         };
         authorize(client, ctx, &sample, allowed, owner).await?;
         let mut conn = db::connect(path).await?;
-        let rows=sqlx::query("SELECT * FROM membership_requests WHERE bot_qq=?1 AND request_type=?2 AND (?3='friend' OR group_id=?4) AND status IN ('pending','assessing','processing','uncertain') ORDER BY id DESC LIMIT 30").bind(bot.to_string()).bind(kind).bind(kind).bind(&ctx.chat_id).fetch_all(&mut *conn).await?;
+        let rows=sqlx::query("SELECT * FROM membership_requests WHERE bot_qq=?1 AND request_type=?2 AND (?3='friend' OR group_id=?4) AND status IN ('pending','assessing','processing','uncertain') ORDER BY id DESC LIMIT 20").bind(bot.to_string()).bind(kind).bind(kind).bind(&ctx.chat_id).fetch_all(&mut *conn).await?;
         return Ok(json!(rows
             .iter()
-            .map(Request::from_row)
+            .map(|row| {
+                let mut request = Request::from_row(row)?;
+                request.comment = request.comment.chars().take(100).collect();
+                request.note = request.note.chars().take(100).collect();
+                request.assessment = None;
+                Ok(request)
+            })
             .collect::<sqlx::Result<Vec<_>>>()?));
     }
     if let Action::AddFriend { user_id, remark } = &action {

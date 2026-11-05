@@ -237,7 +237,7 @@ impl Handler {
                                 "#{} QQ {} · {}\n{}{}",
                                 r["id"],
                                 r["user_id"].as_str().unwrap_or(""),
-                                r["status"].as_str().unwrap_or("待审"),
+                                status_label(&r["status"]),
                                 r["comment"]
                                     .as_str()
                                     .unwrap_or("")
@@ -264,7 +264,7 @@ impl Handler {
                     .as_u64()
                     .map(|n| n.to_string())
                     .unwrap_or("未知".into()),
-                result["request"]["status"].as_str().unwrap_or("未知")
+                status_label(&result["request"]["status"])
             ),
             Op::Approve | Op::AddFriend => {
                 if result["status"] == "already_friend" {
@@ -350,3 +350,14 @@ impl Skill for Handler {
 
 #[cfg(test)]
 mod tests;
+
+fn status_label(value: &Value) -> &'static str {
+    match value.as_str().unwrap_or("") {
+        "pending" => "待审",
+        "assessing" => "评估中",
+        "processing" | "uncertain" => "待确认",
+        "approved" => "已同意",
+        "rejected" => "已拒绝",
+        _ => "未知",
+    }
+}
