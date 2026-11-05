@@ -129,6 +129,12 @@ pub async fn run_once(deps: &ConsolidationDeps) {
         outcomes.push(outcome);
     }
 
+    if let Some(gateway) = &deps.llm {
+        if let Err(e) = crate::memory::refresh::missing(&deps.db_path, gateway).await {
+            warn!(error=%e, "缺失人物画像补整理失败，群聊归纳结果保留");
+        }
+    }
+
     deps.bus
         .publish(Event::ConsolidationDone(ConsolidationDonePayload {
             date: today.clone(),
@@ -441,7 +447,7 @@ Schema：
   "chat_summary": "本日群摘要一段话（时间线索引用，100 字内）",
   "person_facts": [{"person_id": "p_xxx", "fact": "关于此人的一条提炼事实（陈述句）"}],
   "group_facts": ["关于本群长期值得记住的事实（陈述句；即群话题摘要）"],
-  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–80字"}],
+  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style|interests","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–240字"}],
   "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据", "evidence_msg_id":100,"evidence_quote":"from 本人的逐字原话，4–240字"}]
 }
 

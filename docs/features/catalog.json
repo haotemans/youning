@@ -80,14 +80,16 @@
         "crates/core/src/memory.rs",
         "crates/webui/src/memories.rs",
         "webui-frontend/src/views/Memories.vue",
-        "crates/core/src/vision.rs"
+        "crates/core/src/vision.rs",
+        "crates/core/src/memory/refresh.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
         "crates/core/tests/consolidation.rs",
         "crates/core/tests/visual_context.rs",
         "crates/webui/tests/memories_api.rs",
-        "webui-frontend/tests/memories-flow.spec.js"
+        "webui-frontend/tests/memories-flow.spec.js",
+        "crates/core/tests/profile_refresh.rs"
       ],
       "module": "core"
     },

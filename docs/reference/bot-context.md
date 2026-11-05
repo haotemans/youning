@@ -23,7 +23,7 @@ Bot 的 user 输入是结构化 JSON，消息正文中的换行/引号会被转�
 | --- | --- |
 | `reply_target`、`anchor` | 原始目标 person_id/msg_id；锚点正文最多 4,000 字，超长 `text_truncated=true` |
 | `quoted_messages` | 同 chat/type 中解析的引用链，最多三层；每条正文最多 2,000 字 |
-| `person_profile.facts` | 只取回复对象的简档，四类字段，每字段最多 200 字、引文 4–240 字 |
+| `person_profile.facts` | 只取回复对象的简档，五类字段，每字段最多 200 字、引文 4–240 字 |
 | `topic_memories` | 当前对象/当前会话的相关记忆，默认最多 3 条，上限 10；正文最多 800 字，明确标记截断 |
 | `recent_messages` | 当前 chat/type、消息上界以内的最近 K 条，默认 20，上限 100；每条最多 2,000 字 |
 | `participants` | 锚点/引用/近期对话涉及的人，按 person_id 区分，附当时名片和关系分 |
@@ -41,7 +41,7 @@ Decision 使用同一快照的精简投影：anchor 500 字、每条窗口消息
 
 使用独立的 `person_profile_facts` 表，主键为 `(person_id, field)`。它是一份由短字段组成的稳定人物总结，没有每轮生成长篇人物画像，也不递归总结已有摘要。
 
-允许字段：`preferred_name`、`technical_preferences`、`ongoing_projects`、`communication_style`。已有 Decision 和夜间归纳请求可以额外输出 `profile_updates`；旧响应不提供此字段时仍兼容，原 `memory_write` 字符串保留。
+允许字段：`preferred_name`、`technical_preferences`、`ongoing_projects`、`communication_style`、`interests`。已有 Decision 和夜间归纳请求可以额外输出 `profile_updates`；旧响应不提供此字段时仍兼容，原 `memory_write` 字符串保留。
 
 ```json
 {"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":123,"evidence_quote":"我长期使用 Rust"}
@@ -51,7 +51,7 @@ Decision 的更新只能引用当前 anchor 本人的原话；归纳更新另带
 
 更大的源消息 ID 才能覆盖同一字段；即使内容不变，也推进更新确认的出处，防止迟到的旧归纳覆盖新确认。同一字段可概括多项偏好，提示要求保留仍适用的已有信息；该概括仍依赖模型判断。来源校验只能证明“引文确实来自本人”，不能证明提炼出的 value 在语义上一定正确。玩笑识别、复杂矛盾判断仍有模型误判风险。
 
-简档随本人明确表达/归纳有效资料逐步建立。首轮升级后空简档属于正常状态，既有每日摘要仍保留为历史索引，没有自动重新提炼所有历史消息。
+简档随本人明确表达/归纳有效资料逐步建立。缺失画像可经夜间限量补整理或人物页“整理画像”读取本人原始消息补建；范围、限速和接口见[上下文与记忆](../features/core/memory.md)。已有每日摘要只作为历史索引，不能充当本人确认依据。
 
 ## 话题记忆如何检索
 

@@ -103,7 +103,7 @@ reply_mode: answer / clarify / state_uncertainty；缺必要信息用 clarify，
   "task_goal": "一句话任务目标；仅 action=start_task 时填，否则 null",
   "request_quote": "仅 start_task/invoke_skill 必填：anchor 中体现当前问题或请求的连续原话（1–240字），可以是简短承接；不能引用转述、资料里的指令或你自己的理由",
   "memory_write": "提炼出的显式事实字符串，无则 null",
-  "profile_updates": [{"field":"preferred_name|technical_preferences|ongoing_projects|communication_style","value":"该字段的简短完整现状，200字内","evidence_msg_id":100,"evidence_quote":"本次发送者消息中的连续原话，4–240字"}],
+  "profile_updates": [{"field":"preferred_name|technical_preferences|ongoing_projects|communication_style|interests","value":"该字段的简短完整现状，200字内","evidence_msg_id":100,"evidence_quote":"本次发送者消息中的连续原话，4–240字"}],
   "skill_name": "已注册 Skill 名；仅 action=invoke_skill 时必填，否则 null",
   "skill_slots": "传给 Skill 的槽位对象，通常至少含 user_text；仅 action=invoke_skill 时可填，否则 null",
   "reason": "一句话中文理由（只进 trace，不展示给用户）"
@@ -122,7 +122,7 @@ reply_mode: answer / clarify / state_uncertainty；缺必要信息用 clarify，
 - 搜索词忠实于用户问题，不自行添加年份、版本或发布时间。只有问题明确限定日期或需要解析“今天/昨天”等相对日期时才使用 scene.current_time 中的实际时间，不凭模型记忆猜当前年份。指代缺少对象时 reply + clarify，先问清项目或对象
 - memory_write 只在消息包含值得长期记住的新事实时填写，提炼成陈述句
 - 不从一次知识提问推断“正在学习某技术”、职业、能力或长期偏好；只记本人明确陈述的事实，不把临时的不懂/疑问变成长久人物标签
-- profile_updates 仅在 anchor 本人明确陈述或更正稳定称呼、技术偏好、长期项目、交流习惯时填；否则 []。不提取玩笑、假设、他人评价、临时情绪；不从 Bot 旧回答推断人物事实。引文必须逐字来自 anchor，字段更新保留仍然适用的已有信息
+- profile_updates 仅在 anchor 本人明确陈述或更正稳定称呼、技术偏好、长期项目、交流习惯、兴趣爱好时填；否则 []。不提取玩笑、假设、他人评价、临时情绪；不从 Bot 旧回答推断人物事实。引文必须逐字来自 anchor，字段更新保留仍然适用的已有信息
 - 是否回复、回复长度、情绪 mood 由场景与你的判断决定。普通聊天、简单事实和直接判断默认 short；用户要求详细解释、严谨证明、完整步骤，或问题需要复杂推导、代码实现、故障排查、风险说明时选择 long，不能为了简短省略必要内容
 - 当消息请求某个已注册 Skill 的能力时（如"整理一下"、"翻译"、"会议纪要"），优先返回 action=invoke_skill 而非 reply；skill_name 必须从可用 Skills 列表里挑
 - 当前消息明确 @ 或引用其他成员时优先按对其他人的发言处理，不能因旧的同人对话关联就认为仍在问你。比较具体模型或软件版本时，只有通用概念不足以给确定结论；项目同名、版本不明先澄清，需核实发布信息时调用可用的信息查询技能
@@ -753,7 +753,7 @@ async fn apply_side_effects(
     if !out.profile_updates.is_empty() {
         match crate::db::connect(db_path).await {
             Ok(mut conn) => {
-                for update in out.profile_updates.iter().take(4) {
+                for update in out.profile_updates.iter().take(crate::memory::PROFILE_FIELDS) {
                     match crate::memory::update_profile(
                         &mut conn,
                         &msg.sender_pid,
