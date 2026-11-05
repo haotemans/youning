@@ -9,6 +9,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{QueryBuilder, Row, Sqlite};
 
+pub mod activity;
+
 type ApiResult = Result<Json<Value>, (StatusCode, Json<Value>)>;
 fn error(status: StatusCode, message: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     (status, Json(json!({"error":message.to_string()})))

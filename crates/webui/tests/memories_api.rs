@@ -101,6 +101,145 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn original_messages_are_paginated_and_use_real_local_day_boundaries() {
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    conn.execute_batch(
+        "DELETE FROM summaries;
+       INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts,has_image) VALUES
+       (5,'20','group','p_101','当天最后一条',57599,0),
+       (6,'20','group','p_101','次日第一条',57600,0),
+       (7,'10','private','p_101','',100,1),
+       (8,'10','group','p_101','我的密码是 secret-value',101,0),
+       (9,'10','group','p_101','长消息',102,0),
+       (10,'10','unknown','p_101','未知来源不展示',103,0);",
+    )
+    .await
+    .unwrap();
+    conn.execute(
+        "UPDATE messages SET text=?1 WHERE msg_id=9",
+        params!["长".repeat(4100)],
+    )
+    .await
+    .unwrap();
+    let day=r.get("/api/memories/people/p_101/messages?date=1970-01-01&utc_offset_minutes=480&page_size=96").await;
+    assert_eq!(day["total"], 7);
+    assert!(!day.to_string().contains("次日第一条"));
+    assert!(!day.to_string().contains("secret-value"));
+    assert!(!day.to_string().contains("未知来源"));
+    let rows = day["messages"].as_array().unwrap();
+    assert_eq!(rows[0]["msg_id"], 5);
+    let large = rows.iter().find(|m| m["msg_id"] == 9).unwrap();
+    assert_eq!(large["text"].as_str().unwrap().chars().count(), 4000);
+    assert_eq!(large["text_truncated"], true);
+    assert_eq!(
+        rows.iter().find(|m| m["msg_id"] == 7).unwrap()["has_image"],
+        true
+    );
+    let next = r
+        .get("/api/memories/people/p_101/messages?date=1970-01-02&utc_offset_minutes=480")
+        .await;
+    assert_eq!(next["total"], 1);
+    assert_eq!(next["messages"][0]["msg_id"], 6);
+    let private = r
+        .get("/api/memories/people/p_101/messages?chat_id=10&chat_type=private")
+        .await;
+    assert_eq!(private["total"], 2);
+    assert!(private["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["conversation"]["chat_type"] == "private"));
+    let page1 = r
+        .get("/api/memories/people/p_101/messages?page_size=2")
+        .await;
+    let page2 = r
+        .get("/api/memories/people/p_101/messages?page_size=2&page=2")
+        .await;
+    assert_eq!(page1["total"], 8);
+    assert_ne!(
+        page1["messages"][0]["msg_id"],
+        page2["messages"][0]["msg_id"]
+    );
+    let search = r
+        .get("/api/memories/people/p_101/messages?search=Rust")
+        .await;
+    assert_eq!(search["total"], 1);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM state_kv WHERE key LIKE 'profile_refresh:%'"
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn activity_exposes_unprocessed_messages_without_pretending_the_portrait_changed() {
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    conn.execute_batch("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES
+      (5,'10','group','p_101','今天的真实消息',CAST(strftime('%s','now') AS INTEGER)),
+      (6,'10','private','p_101','今天的私聊消息',CAST(strftime('%s','now') AS INTEGER));
+      INSERT INTO state_kv(key,value,updated_at) VALUES('profile_refresh:v1:p_101','{\"attempt\":100,\"cutoff\":3,\"status\":\"no_evidence\",\"completed_at\":101}',101);").await.unwrap();
+    let activity = r
+        .get("/api/memories/people/p_101/activity?utc_offset_minutes=480")
+        .await;
+    assert_eq!(activity["today_count"], 2);
+    assert_eq!(activity["total"], 5);
+    assert_eq!(activity["pending"], true);
+    assert_eq!(activity["profile_refresh"]["completed_at"], 101);
+    assert_eq!(
+        r.get("/api/relations/person/p_101").await["profile"][0]["updated_at"],
+        1
+    );
+    for suffix in ["messages", "activity"] {
+        assert_eq!(
+            r.http
+                .get(format!("{}/api/memories/people/p_101/{suffix}", r.base))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            r.http
+                .get(format!("{}/api/memories/people/missing/{suffix}", r.base))
+                .bearer_auth(&r.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+    for query in [
+        "date=2026-02-30",
+        "utc_offset_minutes=99999",
+        "page_size=1000",
+        "chat_type=unknown",
+    ] {
+        assert_eq!(
+            r.http
+                .get(format!(
+                    "{}/api/memories/people/p_101/messages?{query}",
+                    r.base
+                ))
+                .bearer_auth(&r.token)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn profile_refresh_requires_session_existing_person_and_configured_model() {
     let r = Rig::start().await;
     let endpoint = format!("{}/api/memories/people/p_101/refresh", r.base);

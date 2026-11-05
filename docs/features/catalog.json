@@ -79,6 +79,7 @@
         "crates/core/src/context_builder.rs",
         "crates/core/src/memory.rs",
         "crates/webui/src/memories.rs",
+        "crates/webui/src/memories/activity.rs",
         "webui-frontend/src/views/Memories.vue",
         "crates/core/src/vision.rs",
         "crates/core/src/memory/refresh.rs"

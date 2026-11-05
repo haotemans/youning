@@ -41,8 +41,16 @@
           <n-button v-if="selectedPerson.id !== 'self'" size="small" secondary class="relations-link" :loading="refreshingProfile" :disabled="refreshingProfile" @click="refreshProfile">整理画像</n-button>
           <n-button size="small" secondary @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
         </div>
+        <div v-if="selectedPerson && activity" class="person-activity">
+          <n-button text size="small" type="primary" @click="showToday">今天 {{ activity.today_count }} 条发言</n-button>
+          <span v-if="activity.last_seen">最近发言 {{ fmtTs(activity.last_seen) }}</span>
+          <span>最近整理 {{ activity.profile_refresh.completed_at ? fmtTs(activity.profile_refresh.completed_at) : '尚未整理' }}</span>
+          <n-tag size="tiny" :bordered="false">{{ refreshState }}</n-tag>
+        </div>
+        <n-alert v-if="activityError" type="error" class="memory-alert">{{ activityError }} <n-button text size="tiny" @click="loadActivity">重试</n-button></n-alert>
         <n-tabs v-if="selectedPerson || tab !== 'profile'" :value="tab" type="line" @update:value="changeTab">
           <n-tab name="profile">人物画像</n-tab>
+          <n-tab v-if="selectedPerson" name="messages">原始发言</n-tab>
           <n-tab name="memories">历史记忆</n-tab>
           <n-tab name="summaries">每日摘要</n-tab>
         </n-tabs>
@@ -50,6 +58,10 @@
 
         <n-alert v-if="loadError" type="error" class="memory-alert" role="alert">{{ loadError }} <n-button text size="tiny" @click="loadCurrent">重试</n-button></n-alert>
         <n-alert v-if="profileNotice && tab === 'profile'" :type="profileRefreshFailed ? 'error' : 'info'" class="memory-alert">{{ profileNotice }}</n-alert>
+        <div v-if="tab === 'messages'" class="message-filters">
+          <label>日期 <input v-model="messagesDate" type="date" aria-label="发言日期" @change="resetRecords" /></label>
+          <n-button text size="small" @click="messagesDate = null; resetRecords()">全部日期</n-button>
+        </div>
         <n-spin :show="loading || (!selectedPerson && peopleLoading)">
           <div v-if="tab === 'profile'" class="memory-records">
             <article v-if="selectedPerson && profile.length" class="portrait-record">
@@ -73,6 +85,15 @@
             </div>
             <EmptyState v-if="!loading && !peopleLoading && !loadError && !peopleError && (selectedPerson ? !profile.length : !people.length)" :title="selectedPerson ? '暂无人物画像' : '暂无匹配人物'" />
           </div>
+          <div v-else-if="tab === 'messages'" class="message-records">
+            <article v-for="message in messages" :key="message.msg_id" class="memory-record message-record">
+              <div class="record-meta"><n-tag size="tiny" :bordered="false">{{ message.conversation?.label }}</n-tag><time>{{ fmtTs(message.ts) }}</time></div>
+              <p class="memory-text">{{ message.text || (message.has_image ? '图片消息' : '非文本消息') }}</p>
+              <span v-if="message.text && message.has_image" class="record-time">附图片</span>
+              <span v-if="message.text_truncated" class="record-time">正文已截取前 4000 字</span>
+            </article>
+            <EmptyState v-if="!loading && !loadError && !messages.length" title="暂无发言" />
+          </div>
           <div v-else class="memory-records">
             <article v-for="record in records" :key="record.id" class="memory-record">
               <button v-if="record.owner_type !== 'chat'" type="button" class="record-owner" @click="choosePerson(record.owner)">
@@ -80,7 +101,7 @@
                 <span class="identity-name">{{ record.owner.name }}</span><span class="record-qq mono">{{ record.owner.qq || record.owner_id }}</span>
               </button>
               <div v-else class="record-owner"><span class="memory-avatar small"><YtIcon name="chat" :size="15" /></span><span class="identity-name">{{ record.conversation?.label || record.owner.name }}</span></div>
-              <p class="memory-text">{{ record.content }}</p>
+              <p class="memory-text">{{ displayContent(record) }}</p>
               <div class="record-meta">
                 <n-tag size="tiny" :bordered="false">{{ sourceLabel(record) }}</n-tag>
                 <span>{{ record.conversation?.label || '来源未记录' }}</span>
@@ -130,7 +151,9 @@ type Conversation = { id: string; chat_type: string | null; label: string }
 type Memory = { id: number; owner_type: string; owner_id: string; owner: Person; content: string; source: string; updated_at: number; date?: string; source_msg_id?: number; source_end_msg_id?: number; conversation?: Conversation; group_card?: string }
 type Profile = { field: string; content: string; evidence_quote: string; updated_at: number }
 type Source = { conversation?: Conversation; is_window?: boolean; has_more?: boolean; messages: { msg_id: number; person_id: string; name?: string; text: string; ts: number; has_image: boolean }[] }
-type Tab = 'memories' | 'summaries' | 'profile'
+type Message = { msg_id: number; text: string; ts: number; has_image: boolean; text_truncated?: boolean; conversation?: Conversation }
+type Activity = { today_count: number; last_seen?: number; pending: boolean; profile_refresh: { status?: string; attempt?: number; completed_at?: number } }
+type Tab = 'memories' | 'summaries' | 'profile' | 'messages'
 const router = useRouter()
 const search = ref('')
 const conversationKey = ref<string | null>(null)
@@ -146,6 +169,10 @@ const peopleLoading = ref(false)
 const peopleError = ref('')
 const tab = ref<Tab>('profile')
 const records = ref<Memory[]>([])
+const messages = ref<Message[]>([])
+const messagesDate = ref<string | null>(localDate())
+const activity = ref<Activity | null>(null)
+const activityError = ref('')
 const profile = ref<Profile[]>([])
 const refreshingProfile = ref(false)
 const profileNotice = ref('')
@@ -165,6 +192,8 @@ let peopleController: AbortController | undefined
 let conversationController: AbortController | undefined
 let sourceController: AbortController | undefined
 let refreshController: AbortController | undefined
+let activityController: AbortController | undefined
+let activityTimer: ReturnType<typeof setInterval> | undefined
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 const profileLabels: Record<string, string> = { preferred_name: '称呼', technical_preferences: '技术偏好', ongoing_projects: '进行中的项目', communication_style: '交流偏好', interests: '兴趣爱好' }
@@ -172,6 +201,28 @@ function avatar(p: Person) { return badAvatars.has(p.id) ? undefined : p.id === 
 function initial(p: Person) { return Array.from(p.name || '?')[0] }
 function errorText(e: any) { return e.response?.data?.error || '加载失败，请重试' }
 function sourceLabel(r: Memory) { return r.source_end_msg_id ? '窗口归纳' : r.source === 'explicit' && r.source_msg_id ? '消息记忆' : r.source === 'consolidation' ? '自动归纳' : '历史记忆' }
+function displayContent(r: Memory) { return tab.value === 'summaries' && /^今日发言\s*\d+\s*条[。.]?$/.test(r.content.trim()) ? r.content.replace(/^今日发言/, '归纳窗口内发言') : r.content }
+function localDate() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` }
+function timezone() { return String(-new Date().getTimezoneOffset()) }
+const refreshState = computed(() => {
+  const a = activity.value, status = a?.profile_refresh.status
+  if (status === 'running' && (a?.profile_refresh.attempt || 0) > Date.now() / 1000 - 300) return '整理中'
+  if (status === 'failed') return '整理失败'
+  if (a?.pending) return '有新发言待整理'
+  return status === 'no_evidence' ? '暂无可确认新资料' : a?.profile_refresh.completed_at ? '已整理' : '尚未整理'
+})
+async function loadActivity() {
+  activityController?.abort()
+  const id = selectedPerson.value?.id
+  if (!id) { activity.value = null; activityError.value = ''; return }
+  const request = activityController = new AbortController()
+  activityError.value = ''
+  try {
+    const { data } = await api.get(`/memories/people/${encodeURIComponent(id)}/activity?utc_offset_minutes=${timezone()}`, { signal: request.signal })
+    if (!disposed && !request.signal.aborted && selectedPerson.value?.id === id) activity.value = data
+  } catch (e) { if (!disposed && !request.signal.aborted) activityError.value = errorText(e) }
+}
+function showToday() { messagesDate.value = localDate(); conversationKey.value = null; changeTab('messages') }
 function query(includePerson = true) {
   const p = new URLSearchParams()
   if (includePerson && selectedPerson.value) p.set('person_id', selectedPerson.value.id)
@@ -215,6 +266,12 @@ async function loadCurrent() {
         const { data } = await api.get(`/relations/person/${encodeURIComponent(selectedPerson.value.id)}`, { signal: request.signal })
         if (!request.signal.aborted && !disposed) profile.value = data.profile || []
       }
+    } else if (tab.value === 'messages' && selectedPerson.value) {
+      const q = query(); q.set('page', String(page.value)); q.set('page_size', '24'); q.set('utc_offset_minutes', timezone())
+      if (messagesDate.value) q.set('date', messagesDate.value)
+      const { data } = await api.get(`/memories/people/${encodeURIComponent(selectedPerson.value.id)}/messages?${q}`, { signal: request.signal })
+      if (request.signal.aborted || disposed) return
+      messages.value = data.messages || []; total.value = data.total || 0; page.value = data.page || 1
     } else {
       const q = query(); q.set('page', String(page.value)); q.set('page_size', '24')
       const { data } = await api.get(`/${tab.value}?${q}`, { signal: request.signal })
@@ -224,7 +281,7 @@ async function loadCurrent() {
   } catch (e) { if (!request.signal.aborted && !disposed) loadError.value = errorText(e) }
   finally { if (listController === request) loading.value = false }
 }
-function resetRecords() { page.value = 1; records.value = []; profile.value = []; closeSource(false); void loadCurrent() }
+function resetRecords() { page.value = 1; records.value = []; messages.value = []; profile.value = []; closeSource(false); void loadCurrent() }
 async function refreshProfile() {
   const id = selectedPerson.value?.id
   if (!id || refreshingProfile.value) return
@@ -235,6 +292,7 @@ async function refreshProfile() {
     if (disposed || request.signal.aborted || selectedPerson.value?.id !== id) return
     profileNotice.value = data.status === 'updated' ? '画像已更新' : data.status === 'unchanged' ? '近期已整理，请稍后重试' : '未找到可确认的新资料'
     void loadPeople()
+    void loadActivity()
     if (tab.value === 'profile') await loadCurrent()
   } catch (e) {
     if (!disposed && !request.signal.aborted && selectedPerson.value?.id === id) { profileNotice.value = errorText(e); profileRefreshFailed.value = true }
@@ -243,17 +301,21 @@ async function refreshProfile() {
 function choosePerson(person: Person | null) {
   if (selectedPerson.value?.id === person?.id && tab.value === 'profile') return
   selectedPerson.value = person
+  activity.value = null; messagesDate.value = localDate(); void loadActivity()
   profileNotice.value = ''; profileRefreshFailed.value = false
   tab.value = 'profile'
   void loadConversations(); resetRecords()
 }
 function changeTab(value: Tab) { tab.value = value; void loadPeople(); if (value !== 'profile') void loadConversations(); resetRecords() }
-function changePage(value: number) { page.value = value; records.value = []; closeSource(false); void loadCurrent() }
+function changePage(value: number) { page.value = value; records.value = []; messages.value = []; closeSource(false); void loadCurrent() }
 function changePeoplePage(delta: number) { peoplePage.value += delta; void loadPeople() }
-function refresh() { void loadPeople(); if (tab.value !== 'profile') void loadConversations(); resetRecords() }
+function refresh() { void loadPeople(); void loadActivity(); if (tab.value !== 'profile') void loadConversations(); resetRecords() }
 watch(search, () => {
   listController?.abort(); peopleController?.abort(); closeSource(false); clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => { selectedPerson.value = null; if (tab.value !== 'profile') tab.value = 'memories'; peoplePage.value = 1; refresh() }, 250)
+  searchTimer = setTimeout(() => {
+    if (tab.value === 'messages' && selectedPerson.value) { resetRecords(); return }
+    selectedPerson.value = null; if (tab.value !== 'profile') tab.value = 'memories'; peoplePage.value = 1; refresh()
+  }, 250)
 })
 watch(conversationKey, () => { peoplePage.value = 1; void loadPeople(); resetRecords() })
 async function loadSource() {
@@ -269,13 +331,22 @@ async function loadSource() {
 }
 function showSource(record: Memory) { sourceRecord = { id: record.id, kind: tab.value === 'summaries' ? 'summary' : 'memory' }; sourceOpen.value = true; void loadSource() }
 function closeSource(value: boolean) { sourceOpen.value = value; if (!value) { sourceController?.abort(); sourceData.value = null; sourceError.value = ''; sourceLoading.value = false } }
-onMounted(refresh)
-onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort(); refreshController?.abort() })
+onMounted(() => {
+  refresh()
+  activityTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible' || !selectedPerson.value || refreshingProfile.value || loading.value) return
+    void loadActivity()
+    if (tab.value === 'profile' || (tab.value === 'messages' && page.value === 1)) void loadCurrent()
+  }, 60000)
+})
+onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); clearInterval(activityTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort(); refreshController?.abort(); activityController?.abort() })
 </script>
 
 <style scoped>
 .memory-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(180px, 300px); gap: 12px; }
 .memory-toolbar.profile-toolbar { grid-template-columns: minmax(0, 1fr); }
+.person-activity, .message-filters { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 12px 0; color: var(--yt-ink-3); font-size: 12px; }
+.message-filters input { background: var(--yt-card-bg); color: var(--yt-ink-2); border: 1px solid var(--yt-card-border); border-radius: 6px; padding: 5px 8px; font: inherit; }
 .memory-layout { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 18px; align-items: start; }
 .people-panel, .memory-content { min-width: 0; }
 .people-heading { color: var(--yt-ink-3); font-size: 12px; margin-bottom: 10px; }

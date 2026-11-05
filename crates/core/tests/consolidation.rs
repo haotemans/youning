@@ -240,7 +240,10 @@ async fn consolidation_end_to_end() {
         !p2_sum.contains("手机") && !p2_sum.contains("13800001111"),
         "敏感内容泄露: {p2_sum}"
     );
-    assert!(p2_sum.contains("今日发言"), "应回退计数保底: {p2_sum}");
+    assert!(
+        p2_sum.contains("归纳窗口内发言"),
+        "应回退窗口计数: {p2_sum}"
+    );
 
     // 2. long_memories：正常 fact 落库；两个敏感陷阱被拒
     let ok_fact: i64 = conn
