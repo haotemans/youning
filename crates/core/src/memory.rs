@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod refresh;
+
+pub const PROFILE_FIELDS: usize = 5;
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileField {
@@ -13,6 +17,7 @@ pub enum ProfileField {
     TechnicalPreferences,
     OngoingProjects,
     CommunicationStyle,
+    Interests,
 }
 
 impl ProfileField {
@@ -22,6 +27,7 @@ impl ProfileField {
             Self::TechnicalPreferences => "technical_preferences",
             Self::OngoingProjects => "ongoing_projects",
             Self::CommunicationStyle => "communication_style",
+            Self::Interests => "interests",
         }
     }
 }
@@ -124,7 +130,7 @@ pub async fn profiles(
     query.push(" ORDER BY p.person_id,p.field");
     for row in query.build().fetch_all(&mut *conn).await? {
         let facts = result.entry(row.try_get("person_id")?).or_default();
-        if facts.len() < 4 {
+        if facts.len() < PROFILE_FIELDS {
             facts.push(ProfileFact {
                 field: row.try_get("field")?,
                 content: row.try_get("content")?,

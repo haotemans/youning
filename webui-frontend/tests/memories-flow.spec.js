@@ -16,7 +16,7 @@ const conversations = [
   { id: '101', chat_type: 'private', label: '私聊 101' },
 ]
 async function openMemories(page, options = {}) {
-  const state = { requests: [], fail: !!options.fail, slowPerson: options.slowPerson, rows: Array.from({ length: 251 }, (_, i) => {
+  const state = { requests: [], fail: !!options.fail, slowPerson: options.slowPerson, refreshed: false, refreshFail: false, rows: Array.from({ length: 251 }, (_, i) => {
     const person = i % 2 ? people[1] : people[0]
     return { id: i + 1, owner_id: person.id, owner_type: 'person', owner: person, content: `${person.name} 的训练记录 ${i + 1}`,
       source: 'consolidation', updated_at: 1700000000 + i, source_msg_id: 1, source_end_msg_id: 3, conversation: conversations[i % 3] }
@@ -27,6 +27,12 @@ async function openMemories(page, options = {}) {
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url()), q = url.searchParams
     state.requests.push({ path: url.pathname, person: q.get('person_id'), chat: q.get('chat_id'), page: q.get('page') })
+    if (/\/api\/memories\/people\/[^/]+\/refresh$/.test(url.pathname)) {
+      expect(route.request().method()).toBe('POST')
+      if (state.refreshFail) return route.fulfill({ status: 503, json: { error: '未配置 Decision 模型' } })
+      state.refreshed = true
+      return route.fulfill({ json: { status: 'updated', updated_fields: 1, inspected_messages: 80 } })
+    }
     if (url.pathname === '/api/memories/people') {
       if (state.fail) return route.fulfill({ status: 500, json: { error: '读取失败' } })
       const term = (q.get('search') || '').toLowerCase()
@@ -37,7 +43,7 @@ async function openMemories(page, options = {}) {
     if (url.pathname.startsWith('/api/relations/person/')) {
       const id = url.pathname.split('/').pop()
       if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
-      return route.fulfill({ json: { profile: people.find(p => p.id === id)?.profile || [] } }).catch(() => {})
+      return route.fulfill({ json: { profile: [...(people.find(p => p.id === id)?.profile || []), ...(state.refreshed && id === 'p_101' ? [{ field: 'interests', content: '喜欢玩明日方舟', evidence_quote: '我喜欢玩明日方舟', updated_at: 1700000000 }] : [])] } }).catch(() => {})
     }
     if (/\/api\/memories\/\d+\/source/.test(url.pathname)) return route.fulfill({ json: { is_window: true, conversation: conversations[0], messages: [{ msg_id: 1, person_id: 'p_101', name: '冰猪', text: '我长期使用 Rust', ts: 1700000000 }] } })
     if (url.pathname === '/api/memories' || url.pathname === '/api/summaries') {
@@ -61,6 +67,20 @@ async function openMemories(page, options = {}) {
   return state
 }
 const person = (page, id) => page.locator('.person-option').filter({ hasText: id })
+
+test('portrait refresh is explicit, reloads the selected person and preserves the portrait on failure', async ({ page }) => {
+  const state = await openMemories(page)
+  await person(page, '101').click()
+  await expect(page.locator('.portrait-record')).toContainText('长期使用 Rust')
+  expect(state.requests.some(r => r.path.endsWith('/refresh'))).toBe(false)
+  await page.getByRole('button', { name: '整理画像', exact: true }).click()
+  await expect(page.locator('.portrait-record')).toContainText('兴趣爱好')
+  await expect(page.locator('.portrait-record')).toContainText('喜欢玩明日方舟')
+  state.refreshFail = true
+  await page.getByRole('button', { name: '整理画像', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('未配置 Decision 模型')
+  await expect(page.locator('.portrait-record')).toContainText('长期使用 Rust')
+})
 
 test('one portrait per person stays primary even with 251 history records', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })

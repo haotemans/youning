@@ -1,4 +1,4 @@
-//! Read-only memory browsing, unified people, conversation filters and source messages.
+//! Memory browsing, unified people, sources and explicit portrait refresh.
 use crate::AppState;
 use axum::{
     extract::{Path, Query, State},
@@ -352,4 +352,46 @@ pub async fn source(
     Ok(Json(
         json!({"messages":messages,"has_more":rows.len()>60,"conversation":conversation(Some(chat),Some(kind)),"is_window":end.is_some()}),
     ))
+}
+
+/// Explicit administrator action; browsing remains read-only and never starts a model call.
+pub async fn refresh_profile(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut conn = state
+        .open_db()
+        .await
+        .map_err(|_| db_error("数据库读取失败"))?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM persons WHERE person_id=?1 AND person_id<>'self')",
+    )
+    .bind(&id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|_| db_error("人物读取失败"))?;
+    drop(conn);
+    if !exists {
+        return Err((StatusCode::NOT_FOUND, Json(json!({"error":"人物不存在"}))));
+    }
+    let gateway = state
+        .extras
+        .llm_slot
+        .read()
+        .unwrap()
+        .clone()
+        .filter(|g| g.role(yuantuan_core::llm::Role::Decision).is_some())
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error":"未配置 Decision 模型"})),
+            )
+        })?;
+    let result = yuantuan_core::memory::refresh::person(&state.db_path, &gateway, &id, true)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error=%e,"人物画像整理失败");
+            db_error("画像整理失败，请稍后重试")
+        })?;
+    Ok(Json(json!(result)))
 }

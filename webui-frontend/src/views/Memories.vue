@@ -38,7 +38,8 @@
         <div v-if="selectedPerson" class="selected-person">
           <span class="memory-avatar large"><img v-if="avatar(selectedPerson)" :src="avatar(selectedPerson)" alt="" referrerpolicy="no-referrer" @error="badAvatars.add(selectedPerson.id)" /><span v-else>{{ initial(selectedPerson) }}</span></span>
           <div class="identity-text"><span class="selected-name">{{ selectedPerson.name }}</span><span class="identity-id mono">{{ selectedPerson.qq ? `QQ ${selectedPerson.qq}` : selectedPerson.id }}</span></div>
-          <n-button size="small" secondary class="relations-link" @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
+          <n-button v-if="selectedPerson.id !== 'self'" size="small" secondary class="relations-link" :loading="refreshingProfile" :disabled="refreshingProfile" @click="refreshProfile">整理画像</n-button>
+          <n-button size="small" secondary @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
         </div>
         <n-tabs v-if="selectedPerson || tab !== 'profile'" :value="tab" type="line" @update:value="changeTab">
           <n-tab name="profile">人物画像</n-tab>
@@ -48,6 +49,7 @@
         <div v-else class="portrait-heading"><span>人物画像</span><n-button text size="small" @click="changeTab('memories')">历史记录</n-button></div>
 
         <n-alert v-if="loadError" type="error" class="memory-alert" role="alert">{{ loadError }} <n-button text size="tiny" @click="loadCurrent">重试</n-button></n-alert>
+        <n-alert v-if="profileNotice && tab === 'profile'" :type="profileRefreshFailed ? 'error' : 'info'" class="memory-alert">{{ profileNotice }}</n-alert>
         <n-spin :show="loading || (!selectedPerson && peopleLoading)">
           <div v-if="tab === 'profile'" class="memory-records">
             <article v-if="selectedPerson && profile.length" class="portrait-record">
@@ -145,6 +147,9 @@ const peopleError = ref('')
 const tab = ref<Tab>('profile')
 const records = ref<Memory[]>([])
 const profile = ref<Profile[]>([])
+const refreshingProfile = ref(false)
+const profileNotice = ref('')
+const profileRefreshFailed = ref(false)
 const page = ref(1)
 const total = ref(0)
 const loading = ref(false)
@@ -159,9 +164,10 @@ let listController: AbortController | undefined
 let peopleController: AbortController | undefined
 let conversationController: AbortController | undefined
 let sourceController: AbortController | undefined
+let refreshController: AbortController | undefined
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
-const profileLabels: Record<string, string> = { preferred_name: '称呼', technical_preferences: '技术偏好', ongoing_projects: '进行中的项目', communication_style: '交流偏好' }
+const profileLabels: Record<string, string> = { preferred_name: '称呼', technical_preferences: '技术偏好', ongoing_projects: '进行中的项目', communication_style: '交流偏好', interests: '兴趣爱好' }
 function avatar(p: Person) { return badAvatars.has(p.id) ? undefined : p.id === 'self' ? mascot : p.avatar_url || undefined }
 function initial(p: Person) { return Array.from(p.name || '?')[0] }
 function errorText(e: any) { return e.response?.data?.error || '加载失败，请重试' }
@@ -219,9 +225,25 @@ async function loadCurrent() {
   finally { if (listController === request) loading.value = false }
 }
 function resetRecords() { page.value = 1; records.value = []; profile.value = []; closeSource(false); void loadCurrent() }
+async function refreshProfile() {
+  const id = selectedPerson.value?.id
+  if (!id || refreshingProfile.value) return
+  const request = refreshController = new AbortController()
+  refreshingProfile.value = true; profileNotice.value = ''; profileRefreshFailed.value = false
+  try {
+    const { data } = await api.post(`/memories/people/${encodeURIComponent(id)}/refresh`, {}, { signal: request.signal, timeout: 120000 })
+    if (disposed || request.signal.aborted || selectedPerson.value?.id !== id) return
+    profileNotice.value = data.status === 'updated' ? '画像已更新' : data.status === 'unchanged' ? '近期已整理，请稍后重试' : '未找到可确认的新资料'
+    void loadPeople()
+    if (tab.value === 'profile') await loadCurrent()
+  } catch (e) {
+    if (!disposed && !request.signal.aborted && selectedPerson.value?.id === id) { profileNotice.value = errorText(e); profileRefreshFailed.value = true }
+  } finally { refreshingProfile.value = false }
+}
 function choosePerson(person: Person | null) {
   if (selectedPerson.value?.id === person?.id && tab.value === 'profile') return
   selectedPerson.value = person
+  profileNotice.value = ''; profileRefreshFailed.value = false
   tab.value = 'profile'
   void loadConversations(); resetRecords()
 }
@@ -248,7 +270,7 @@ async function loadSource() {
 function showSource(record: Memory) { sourceRecord = { id: record.id, kind: tab.value === 'summaries' ? 'summary' : 'memory' }; sourceOpen.value = true; void loadSource() }
 function closeSource(value: boolean) { sourceOpen.value = value; if (!value) { sourceController?.abort(); sourceData.value = null; sourceError.value = ''; sourceLoading.value = false } }
 onMounted(refresh)
-onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort() })
+onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort(); refreshController?.abort() })
 </script>
 
 <style scoped>

@@ -44,6 +44,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/meme-file/{id}", get(memes::file))
         .route("/api/memories", get(memories::memories))
         .route("/api/memories/people", get(memories::people))
+        .route("/api/memories/people/{id}/refresh", post(memories::refresh_profile))
         .route("/api/memories/conversations", get(memories::conversations))
         .route("/api/memories/{id}/source", get(memories::source))
         .route("/api/summaries", get(memories::summaries))

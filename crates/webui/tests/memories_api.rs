@@ -101,6 +101,38 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn profile_refresh_requires_session_existing_person_and_configured_model() {
+    let r = Rig::start().await;
+    let endpoint = format!("{}/api/memories/people/p_101/refresh", r.base);
+    assert_eq!(
+        r.http.post(&endpoint).send().await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        r.http
+            .post(format!("{}/api/memories/people/missing/refresh", r.base))
+            .bearer_auth(&r.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        r.http
+            .post(&endpoint)
+            .bearer_auth(&r.token)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    let profile = r.get("/api/relations/person/p_101").await;
+    assert_eq!(profile["profile"][0]["content"], "长期使用 Rust");
+}
+
+#[tokio::test]
 async fn people_unify_multiple_groups_and_private_chats_with_exact_paging_and_identity() {
     let r = Rig::start().await;
     let people = r.get("/api/memories/people").await;
