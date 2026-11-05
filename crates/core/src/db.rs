@@ -255,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 9] = [
+const MIGRATIONS: &[(&str, &str)] = &[
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
