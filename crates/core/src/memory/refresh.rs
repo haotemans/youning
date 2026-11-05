@@ -46,7 +46,7 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
-/// Explicit admin refresh or nightly repair. Never copies legacy summaries into confirmed facts.
+/// Admin refresh or bounded background maintenance, using original messages only.
 pub async fn person(
     path: &Path,
     gw: &LlmGateway,
@@ -65,7 +65,7 @@ pub async fn person(
         .await?;
     ensure!(exists, "人物不存在");
     let current = profile(&mut conn, person, i64::MAX).await?;
-    let rows = sqlx::query("SELECT msg_id,chat_id,chat_type,text,ts FROM messages WHERE sender_pid=?1 AND length(trim(COALESCE(text,'')))>=4 ORDER BY ts DESC,msg_id DESC LIMIT 160")
+    let rows = sqlx::query("SELECT msg_id,chat_id,chat_type,text,ts FROM messages WHERE sender_pid=?1 AND chat_type IN ('group','private') AND length(trim(COALESCE(text,'')))>=4 ORDER BY ts DESC,msg_id DESC LIMIT 160")
         .bind(person).fetch_all(&mut *conn).await?;
     let cutoff = rows
         .iter()
@@ -103,14 +103,16 @@ pub async fn person(
     let claimed = conn
         .execute(
             "INSERT INTO state_kv(key,value,updated_at) VALUES(?1,?2,?3)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+         ON CONFLICT(key) DO UPDATE SET value=json_set(
+           CASE WHEN json_valid(state_kv.value) THEN state_kv.value ELSE '{}' END,
+           '$.attempt',?3,'$.status','running'),updated_at=excluded.updated_at
          WHERE CASE WHEN json_valid(state_kv.value) THEN
            COALESCE(json_extract(state_kv.value,'$.attempt'),0) <= ?3 - 300
            AND (?4 OR COALESCE(json_extract(state_kv.value,'$.cutoff'),0) < ?5)
          ELSE 1 END",
             params![
                 key,
-                json!({"attempt":attempt,"cutoff":0}).to_string(),
+                json!({"attempt":attempt,"cutoff":0,"status":"running"}).to_string(),
                 attempt,
                 force,
                 cutoff
@@ -126,7 +128,7 @@ pub async fn person(
             "UPDATE state_kv SET value=?2,updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
             params![
                 key,
-                json!({"attempt":attempt,"cutoff":cutoff}).to_string(),
+                json!({"attempt":attempt,"cutoff":cutoff,"status":"no_evidence","completed_at":attempt,"inspected_messages":0,"updated_fields":0}).to_string(),
                 attempt
             ],
         )
@@ -134,65 +136,101 @@ pub async fn person(
         return Ok(result("no_evidence", 0));
     }
     drop(conn); // No reserved connection or SQL transaction while awaiting a model.
-    let user = json!({"person_id":person,"current_profile":current,"messages":sources}).to_string();
-    let raw = gw
-        .chat(Role::Decision, SYSTEM, &user, true)
-        .await
-        .context("人物画像提炼失败")?;
-    let trimmed = raw.trim();
-    let body = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-        .and_then(|s| s.trim().strip_suffix("```"))
-        .unwrap_or(trimmed)
-        .trim();
-    let output: Output = serde_json::from_str(body).context("人物画像结果格式无效")?;
-    ensure!(
-        output.updates.len() <= super::PROFILE_FIELDS,
-        "画像字段过多"
-    );
-    let mut conn = db::connect(path).await?;
-    let mut tx = conn.transaction().await?;
-    let mut written = 0;
-    for update in &output.updates {
-        let Some(source) = sources.iter().find(|s| {
-            s.msg_id == update.evidence_msg_id && s.text.contains(update.evidence_quote.trim())
-        }) else {
-            continue;
-        };
-        match update_profile(
-            &mut tx,
-            person,
-            &source.chat_id,
-            source.msg_id,
-            source.msg_id,
-            update,
+    let extracted: Result<RefreshResult> = async {
+        let user = json!({"person_id":person,"current_profile":current,"messages":sources}).to_string();
+        let raw = gw
+            .chat(Role::Decision, SYSTEM, &user, true)
+            .await
+            .context("人物画像提炼失败")?;
+        let trimmed = raw.trim();
+        let body = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .and_then(|s| s.trim().strip_suffix("```"))
+            .unwrap_or(trimmed)
+            .trim();
+        let output: Output = serde_json::from_str(body).context("人物画像结果格式无效")?;
+        ensure!(
+            output.updates.len() <= super::PROFILE_FIELDS,
+            "画像字段过多"
+        );
+        let mut conn = db::connect(path).await?;
+        let mut tx = conn.transaction().await?;
+        let mut written = 0;
+        for update in &output.updates {
+            let Some(source) = sources.iter().find(|s| {
+                s.msg_id == update.evidence_msg_id && s.text.contains(update.evidence_quote.trim())
+            }) else {
+                continue;
+            };
+            match update_profile(
+                &mut tx,
+                person,
+                &source.chat_id,
+                source.msg_id,
+                source.msg_id,
+                update,
+            )
+            .await
+            {
+                Ok(true) => written += 1,
+                Ok(false) => (),
+                Err(e) => tracing::warn!(error=%e, "人物画像整理条目未通过来源校验"),
+            }
+        }
+        tx.execute(
+            "UPDATE state_kv SET value=?2,updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
+            params![
+                key,
+                json!({"attempt":attempt,"cutoff":cutoff,"status":if written>0 {"updated"} else {"no_evidence"},"completed_at":now(),"inspected_messages":sources.len(),"updated_fields":written}).to_string(),
+                attempt
+            ],
         )
-        .await
-        {
-            Ok(true) => written += 1,
-            Ok(false) => (),
-            Err(e) => tracing::warn!(error=%e, "人物画像整理条目未通过来源校验"),
+        .await?;
+        tx.commit().await?;
+        Ok(result(
+            if written > 0 {
+                "updated"
+            } else {
+                "no_evidence"
+            },
+            written,
+        ))
+    }
+    .await;
+    if extracted.is_err() {
+        let mut conn = db::connect(path).await?;
+        conn.execute("UPDATE state_kv SET value=json_set(value,'$.status','failed'),updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?2",
+            params![key,attempt,now()]).await?;
+    }
+    extracted
+}
+
+/// Four active people per pass, oldest attempt first. Existing portraits also evolve.
+/// An hourly automatic cooldown bounds cost; no new eligible text means no model call.
+pub async fn active(path: &Path, gw: &LlmGateway) -> Result<()> {
+    if gw.role(Role::Decision).is_none() {
+        return Ok(());
+    }
+    let mut conn = db::connect(path).await?;
+    let ids = sqlx::query_scalar::<_,String>(
+        "SELECT m.sender_pid FROM messages m
+         LEFT JOIN state_kv s ON s.key=?1||m.sender_pid
+         WHERE m.sender_pid<>'self' AND m.chat_type IN ('group','private')
+           AND length(trim(COALESCE(m.text,'')))>=4
+         GROUP BY m.sender_pid
+         HAVING MAX(m.ts)>=?2-604800
+           AND MAX(m.msg_id)>COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff'),0)
+           AND COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.attempt'),0)<=?2-3600
+         ORDER BY COALESCE(s.updated_at,0),MAX(m.ts) DESC,m.sender_pid LIMIT 4")
+        .bind(PREFIX).bind(now()).fetch_all(&mut *conn).await?;
+    drop(conn);
+    for id in ids {
+        if let Err(e) = person(path, gw, &id, false).await {
+            tracing::warn!(person_id=%id,error=%e,"活跃人物画像整理失败，保留现有资料");
         }
     }
-    tx.execute(
-        "UPDATE state_kv SET value=?2,updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
-        params![
-            key,
-            json!({"attempt":attempt,"cutoff":cutoff}).to_string(),
-            attempt
-        ],
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(result(
-        if written > 0 {
-            "updated"
-        } else {
-            "no_evidence"
-        },
-        written,
-    ))
+    Ok(())
 }
 
 /// Repair at most eight missing portraits per night; successful empty results need new messages.
@@ -204,7 +242,7 @@ pub async fn missing(path: &Path, gw: &LlmGateway) -> Result<()> {
     let ids = sqlx::query_scalar::<_,String>(
         "SELECT m.sender_pid FROM messages m
          LEFT JOIN state_kv s ON s.key=?1||m.sender_pid
-         WHERE m.sender_pid<>'self' AND length(trim(COALESCE(m.text,'')))>=4
+         WHERE m.sender_pid<>'self' AND m.chat_type IN ('group','private') AND length(trim(COALESCE(m.text,'')))>=4
            AND NOT EXISTS(SELECT 1 FROM person_profile_facts p JOIN messages source ON source.msg_id=p.source_msg_id WHERE p.person_id=m.sender_pid AND source.sender_pid=p.person_id AND instr(source.text,p.evidence_quote)>0)
          GROUP BY m.sender_pid HAVING MAX(m.msg_id)>COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff'),0)
          ORDER BY MAX(m.msg_id) DESC LIMIT 8")

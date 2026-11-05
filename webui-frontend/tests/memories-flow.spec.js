@@ -40,6 +40,17 @@ async function openMemories(page, options = {}) {
       return route.fulfill({ json: { people: found, page: 1, total: found.length, has_more: false } })
     }
     if (url.pathname === '/api/memories/conversations') return route.fulfill({ json: { conversations } })
+    if (url.pathname.endsWith('/activity')) return route.fulfill({ json: { today_count: 11, last_seen: 1700000100, pending: !state.refreshed, profile_refresh: state.refreshed ? { completed_at: 1700000200, status: 'updated' } : {} } })
+    if (/\/api\/memories\/people\/[^/]+\/messages$/.test(url.pathname)) {
+      const id = url.pathname.split('/').at(-2)
+      if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
+      if (state.fail) return route.fulfill({ status: 500, json: { error: '发言读取失败' } })
+      let rows = Array.from({ length: 27 }, (_, i) => ({ msg_id: i + 1, text: i === 0 ? '' : `${id} 的原始发言 ${i + 1}`, has_image: i === 0, ts: 1700000000 + i, conversation: conversations[i % 3] }))
+      if (q.get('chat_id')) rows = rows.filter(m => m.conversation.id === q.get('chat_id'))
+      if (q.get('search')) rows = rows.filter(m => m.text.includes(q.get('search')))
+      const current = Number(q.get('page') || 1), total = rows.length
+      return route.fulfill({ json: { messages: rows.slice((current - 1) * 24, current * 24), total, page: current, page_size: 24 } }).catch(() => {})
+    }
     if (url.pathname.startsWith('/api/relations/person/')) {
       const id = url.pathname.split('/').pop()
       if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
@@ -54,7 +65,7 @@ async function openMemories(page, options = {}) {
       rows.sort((a, b) => b.id - a.id)
       const counts = { memories: rows.length, summaries: rows.length ? 1 : 0 }
       const summary = url.pathname === '/api/summaries'
-      if (summary) rows = rows.length ? [{ ...rows[0], summary: '今日讨论训练参数', content: '今日讨论训练参数', date: '2026-11-04' }] : []
+      if (summary) rows = rows.length ? [{ ...rows[0], summary: state.summaryContent || '今日讨论训练参数', content: state.summaryContent || '今日讨论训练参数', date: '2026-11-04' }] : []
       const total = rows.length, size = Number(q.get('page_size') || 24), current = Math.min(Number(q.get('page') || 1), Math.max(1, Math.ceil(total / size)))
       if (q.get('person_id') === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
       return route.fulfill({ json: { [summary ? 'summaries' : 'memories']: rows.slice((current - 1) * size, current * size), total, counts, page: current, page_size: size } }).catch(() => {})
@@ -80,6 +91,52 @@ test('portrait refresh is explicit, reloads the selected person and preserves th
   await page.getByRole('button', { name: '整理画像', exact: true }).click()
   await expect(page.getByRole('alert')).toHaveText('未配置 Decision 模型')
   await expect(page.locator('.portrait-record')).toContainText('长期使用 Rust')
+})
+
+test('real activity opens original speech with day, conversation, paging and retry controls', async ({ page }) => {
+  const state = await openMemories(page)
+  await person(page, '101').click()
+  await expect(page.locator('.person-activity')).toContainText('今天 11 条发言')
+  await expect(page.locator('.person-activity')).toContainText('尚未整理')
+  expect(state.requests.some(r => r.path.endsWith('/messages'))).toBe(false)
+  await page.getByRole('button', { name: '今天 11 条发言', exact: true }).click()
+  await expect(page.locator('.message-record')).toHaveCount(24)
+  await expect(page.locator('.message-records')).toContainText('图片消息')
+  await expect(page.locator('.message-records')).toContainText('p_101 的原始发言')
+  await page.locator('.memory-pagination .n-pagination-item').filter({ hasText: /^2$/ }).click()
+  await expect(page.locator('.message-record')).toHaveCount(3)
+  await page.getByRole('button', { name: '全部日期', exact: true }).click()
+  await expect(page.getByLabel('发言日期')).toHaveValue('')
+  await expect(page.locator('.message-record')).toHaveCount(24)
+  await page.locator('.memory-toolbar .n-select').click()
+  await page.locator('.n-base-select-menu').getByText('私聊 101', { exact: true }).click()
+  await expect(page.locator('.message-record')).toHaveCount(9)
+  await expect(page.locator('.message-records')).not.toContainText('群聊 100')
+  state.fail = true
+  await page.getByRole('button', { name: '刷新', exact: true }).click()
+  await expect(page.getByRole('alert').filter({ hasText: '发言读取失败' })).toBeVisible()
+  state.fail = false
+  await page.getByRole('alert').filter({ hasText: '发言读取失败' }).getByRole('button', { name: '重试' }).click()
+  await expect(page.locator('.message-record')).toHaveCount(9)
+  await page.setViewportSize({ width: 390, height: 844 })
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true)
+  await page.screenshot({ path: path.join(artifacts, 'messages-mobile.png'), fullPage: true })
+})
+
+test('switching people cancels old speech, and old window counts are labelled honestly', async ({ page }) => {
+  const state = await openMemories(page, { slowPerson: 'p_101' })
+  await person(page, '101').click()
+  await page.getByText('原始发言', { exact: true }).click()
+  await person(page, '202').click()
+  await page.getByText('原始发言', { exact: true }).click()
+  await expect(page.locator('.message-records')).toContainText('p_202 的原始发言')
+  await page.waitForTimeout(550)
+  await expect(page.locator('.message-records')).not.toContainText('p_101 的原始发言')
+  // The old record remains stored; only its misleading display label is corrected.
+  state.summaryContent = '今日发言 22 条。'
+  await page.getByText('每日摘要', { exact: true }).click()
+  await expect(page.locator('.memory-record')).toContainText('归纳窗口内发言 22 条。')
+  await expect(page.locator('.memory-record')).not.toContainText('今日发言')
 })
 
 test('one portrait per person stays primary even with 251 history records', async ({ page }) => {

@@ -206,6 +206,15 @@ async fn malformed_results_leave_profiles_intact_and_rapid_retries_do_not_call_m
         INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group','p_a','我长期使用 Rust',1);
         INSERT INTO person_profile_facts(person_id,field,content,source_msg_id,evidence_quote,updated_at) VALUES('p_a','technical_preferences','Rust',1,'我长期使用 Rust',1);").await.unwrap();
     assert!(refresh::person(&r.path, &r.gw, "p_a", true).await.is_err());
+    let state: String =
+        sqlx::query_scalar("SELECT value FROM state_kv WHERE key='profile_refresh:v1:p_a'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&state).unwrap()["status"],
+        "failed"
+    );
     assert_eq!(
         refresh::person(&r.path, &r.gw, "p_a", true)
             .await
@@ -217,5 +226,68 @@ async fn malformed_results_leave_profiles_intact_and_rapid_retries_do_not_call_m
     assert_eq!(
         memory::profile(&mut conn, "p_a", i64::MAX).await.unwrap()[0].content,
         "Rust"
+    );
+}
+
+#[tokio::test]
+async fn active_maintenance_updates_existing_portraits_and_requires_new_messages() {
+    let r=Rig::new(json!({"updates":[{"field":"technical_preferences","value":"主要使用 Python","evidence_msg_id":2,"evidence_quote":"我现在主要使用 Python"}]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_a','A',1,2);
+      INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES
+      (1,'g1','group','p_a','我长期使用 Rust',1),(2,'private','private','p_a','我现在主要使用 Python',CAST(strftime('%s','now') AS INTEGER));
+      INSERT INTO person_profile_facts(person_id,field,content,source_msg_id,evidence_quote,updated_at)
+      VALUES('p_a','technical_preferences','Rust',1,'我长期使用 Rust',1);").await.unwrap();
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(
+        memory::profile(&mut conn, "p_a", i64::MAX).await.unwrap()[0].content,
+        "主要使用 Python"
+    );
+    let state: String = sqlx::query_scalar("SELECT value FROM state_kv")
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+    let state: Value = serde_json::from_str(&state).unwrap();
+    assert_eq!(state["status"], "updated");
+    assert_eq!(state["cutoff"], 2);
+    assert!(state["completed_at"].as_i64().unwrap() > 0);
+    // A fresh pass without new text never calls the model, even after the cooldown.
+    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0)")
+        .await
+        .unwrap();
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn active_maintenance_is_bounded_fair_and_cools_down_new_messages() {
+    let r = Rig::new(json!({"updates":[]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    for id in 1..=6 {
+        let pid = format!("p_{id}");
+        conn.execute(
+            "INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES(?1,?1,1,1)",
+            params![pid],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group',?1,'普通交流不能凭空补造性格',CAST(strftime('%s','now') AS INTEGER))",params![pid]).await.unwrap();
+    }
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 4);
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 6);
+    conn.execute_batch("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group','p_1','又发了一条新消息',CAST(strftime('%s','now') AS INTEGER));").await.unwrap();
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 6);
+    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:p_1'").await.unwrap();
+    refresh::active(&r.path, &r.gw).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 7);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM person_profile_facts")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        0
     );
 }

@@ -67,16 +67,31 @@ pub struct ConsolidationDeps {
 pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
     tokio::spawn(async move {
         let deps = Arc::new(deps);
-        if deps.cfg.run_on_startup {
-            info!("consolidation run_on_startup 调试项开启：立即执行一次");
-            run_once(&deps).await;
-        }
-        loop {
-            let wait = secs_until_next(&deps.db_path, &deps.cfg.daily_time).await;
-            info!(hours = wait / 3600, daily_time = %deps.cfg.daily_time, "夜间归纳下次执行倒计时");
-            tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
-            run_once(&deps).await;
-        }
+        let nightly = async {
+            if deps.cfg.run_on_startup {
+                info!("consolidation run_on_startup 调试项开启：立即执行一次");
+                run_once(&deps).await;
+            }
+            loop {
+                let wait = secs_until_next(&deps.db_path, &deps.cfg.daily_time).await;
+                info!(hours = wait / 3600, daily_time = %deps.cfg.daily_time, "夜间归纳下次执行倒计时");
+                tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
+                run_once(&deps).await;
+            }
+        };
+        let portraits = async {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            loop {
+                if let Some(gateway) = &deps.llm {
+                    if let Err(e) = crate::memory::refresh::active(&deps.db_path, gateway).await {
+                        warn!(error=%e,"活跃人物画像整理失败");
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(600)).await;
+            }
+        };
+        // Both futures belong to this handle; shutdown cancels model work as well.
+        tokio::join!(nightly, portraits);
     })
 }
 
@@ -550,7 +565,7 @@ async fn write_distilled(
             .filter(|f| &f.person_id == pid)
             .map(|f| f.fact.as_str())
             .collect();
-        let fallback = format!("今日发言 {msg_count} 条。");
+        let fallback = format!("归纳窗口内发言 {msg_count} 条。");
         let summary = if facts.is_empty() {
             fallback
         } else {
