@@ -66,6 +66,45 @@ impl Drop for Rig {
 }
 
 #[tokio::test]
+async fn refresh_excludes_sensitive_text_and_cannot_cite_messages_outside_the_loaded_window() {
+    let r = Rig::new(json!({"updates":[
+        {"field":"interests","value":"喜欢玩明日方舟","evidence_msg_id":1,"evidence_quote":"我喜欢玩明日方舟"},
+        {"field":"preferred_name","value":"不应写入","evidence_msg_id":169,"evidence_quote":"我的密码不应该入模"}
+    ]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    conn.execute(
+        "INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_a','A',1,170)",
+        params![],
+    )
+    .await
+    .unwrap();
+    for id in 1..=170 {
+        let text = match id {
+            1 => "我喜欢玩明日方舟",
+            169 => "我的密码不应该入模",
+            _ => "只是一条普通的讨论消息",
+        };
+        conn.execute("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(?1,'g','group','p_a',?2,?1)",params![id,text]).await.unwrap();
+    }
+    let result = refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
+    assert_eq!(result.status, "no_evidence");
+    assert_eq!(result.inspected_messages, 159);
+    assert!(memory::profile(&mut conn, "p_a", i64::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+    let calls = r.calls.lock().unwrap();
+    let input: Value =
+        serde_json::from_str(calls[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert!(!input.to_string().contains("我的密码不应该入模"));
+    assert!(input["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|m| m["msg_id"].as_i64().unwrap() > 1));
+}
+
+#[tokio::test]
 async fn repair_uses_own_group_and_private_messages_preserves_current_and_group_history() {
     let r=Rig::new(json!({"updates":[
         {"field":"technical_preferences","value":"长期使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"},
@@ -75,7 +114,7 @@ async fn repair_uses_own_group_and_private_messages_preserves_current_and_group_
         {"field":"ongoing_projects","value":"旧的项目描述","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}
     ]}).to_string()).await;
     let mut conn = db::connect(&r.path).await.unwrap();
-    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_a','同名',1,5),('p_b','同名',1,3);
+    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_a','同名',1,5),('p_b','同名',1,3),('self','云团',1,4);
         INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES
         (1,'g1','group','p_a','我长期使用 Rust',1),(2,'g1','private','p_a','我喜欢玩明日方舟',2),
         (3,'g2','group','p_b','请叫我小明',3),(4,'g2','group','self','机器人旧回答',4),
