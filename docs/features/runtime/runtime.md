@@ -10,7 +10,7 @@
 
 - `yuantuan` 包仍是运行时二进制名称；攸宁是项目名称。入口依次加载配置、数据迁移、插件、QQ、任务、定时归纳和 WebUI。
 - `Supervisor` 管理长期后台任务的异常与重启；数据库与外部服务的关闭顺序有明确边界。
-- 发布包内嵌 Vue 构建产物，Linux/Windows 的 Release 构建由 GitHub Actions 完成。
+- 发布包内嵌 Vue 构建产物；常规 Linux 测试和构建由 GitHub Actions 完成，Windows 在本地验证。Windows Actions 打包仅在 `v*` 发布标签触发时执行。
 
 启动时先安装内置云团图包，再扫描管理员图库；注册采集监听和限速视觉审核后台任务，复用可热更新的 LLM/steal 槽位。审核失败保持待审，不阻塞消息管线；图包安装标记保留管理员后续删除和分类调整。
 

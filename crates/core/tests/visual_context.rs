@@ -63,7 +63,8 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
             let url = parts[1]["image_url"]["url"].as_str().unwrap();
             let content = if url.ends_with("fail.png") {"invalid output".to_owned()} else {
                 assert_eq!(url,"https://example.test/project.png");
-                json!({"summary":"一张代码项目截图","visible_text":"Rust project","uncertainty":"不能确认项目归属"}).to_string()
+                // The live compatible provider returns fenced JSON despite json_object.
+                format!("```json\n{}\n```", json!({"summary":"一张代码项目截图","visible_text":"Rust project","uncertainty":"不能确认项目归属"}))
             };
             axum::Json(json!({"choices":[{"message":{"content":content},"finish_reason":"stop"}]}))
         }

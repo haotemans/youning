@@ -23,6 +23,14 @@ pub struct Observation {
 }
 
 fn parse(raw: &str) -> Result<Observation> {
+    let raw = raw.trim();
+    // Compatible providers may wrap JSON even when json_object was requested.
+    // Strip only a complete outer fence; prose and malformed JSON still fail.
+    let raw = raw
+        .strip_prefix("```")
+        .and_then(|rest| rest.strip_suffix("```"))
+        .map(|body| body.strip_prefix("json").unwrap_or(body).trim())
+        .unwrap_or(raw);
     let o: Observation = serde_json::from_str(raw)?;
     ensure!(
         !o.summary.trim().is_empty()
@@ -116,10 +124,23 @@ pub async fn observe(
             llm.chat_with_images(PROMPT, &user, &[url]),
         )
         .await;
-        let observation = match result {
-            Ok(Ok(raw)) => parse(&raw).ok(),
-            _ => None,
+        let (observation, failure) = match result {
+            Ok(Ok(raw)) => match parse(&raw) {
+                Ok(observation) => (Some(observation), None),
+                Err(_) => (None, Some("invalid_observation")),
+            },
+            Ok(Err(_)) => (None, Some("provider_request")),
+            Err(_) => (None, Some("timeout")),
         };
+        if let Some(failure) = failure {
+            // Provider errors can echo signed URLs or private image content.
+            tracing::warn!(
+                msg_id = target,
+                image_index = index,
+                failure,
+                "图片观察失败"
+            );
+        }
         let status = if observation.is_some() {
             "ready"
         } else {
@@ -130,4 +151,33 @@ pub async fn observe(
         changed = true;
     }
     Ok(changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_plain_and_fenced_json_without_relaxing_observation_validation() {
+        let valid = json!({"summary":"两半石榴","visible_text":"","uncertainty":""}).to_string();
+        for raw in [
+            valid.clone(),
+            format!(" \n```json\n{valid}\n```\n "),
+            format!("```\n{valid}\n```"),
+        ] {
+            assert_eq!(parse(&raw).unwrap().summary, "两半石榴");
+        }
+        for raw in [
+            format!("这是结果：{valid}"),
+            format!("```json\n{valid}"),
+            format!("```json\n{valid}\n``` trailing"),
+            format!("```json\n{valid}\n```\n```json\n{valid}\n```"),
+            "```json\n{\"summary\":\"\",\"visible_text\":\"\",\"uncertainty\":\"\"}\n```".into(),
+            "```json\n{\"summary\":\"图片\",\"visible_text\":\"\",\"uncertainty\":\"\",\"extra\":true}\n```".into(),
+            format!("```json\n{}\n```", json!({"summary":"图".repeat(401),"visible_text":"","uncertainty":""})),
+            format!("```json\n{}\n```", json!({"summary":"图片","visible_text":"api_key=sk-test","uncertainty":""})),
+        ] {
+            assert!(parse(&raw).is_err(), "accepted invalid observation: {raw}");
+        }
+    }
 }
