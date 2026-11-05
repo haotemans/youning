@@ -402,3 +402,30 @@ async fn pending_lists_bound_payload_size_and_leave_full_evidence_for_details() 
     assert!(full.assessment.is_some());
     assert_eq!(c.writes(), 0);
 }
+
+#[tokio::test]
+async fn admission_topics_exclude_private_chat_id_collisions_mixed_windows_and_unknown_sources() {
+    let d = db().await;
+    let c = Fake::new();
+    let id = add(&d.0, "group", 42, "topic-scope").await;
+    let mut conn = db::connect(&d.0).await.unwrap();
+    conn.execute_batch("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('p_topic','T',1,3);
+        INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES
+        (1,'42','group','p_topic','群内讨论绘画',1),(2,'42','private','p_topic','私人计划',2),(3,'42','group','p_topic','群内讨论模型',3);
+        INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at,source_chat_id,source_msg_id,source_end_msg_id) VALUES
+        ('chat','42','可信群内话题','consolidation',1,1,'42',1,1),
+        ('chat','42','私聊中的个人计划','consolidation',2,2,'42',2,2),
+        ('chat','42','含私聊的混合窗口','consolidation',3,3,'42',1,3),
+        ('chat','42','无出处旧材料','legacy',4,4,NULL,NULL,NULL);").await.unwrap();
+    let input = run(
+        &c,
+        &d,
+        &ctx("self", "group", "42"),
+        Action::AutoInspect { id },
+    )
+    .await
+    .unwrap();
+    assert_eq!(input["group_topics"], json!(["可信群内话题"]));
+    assert!(!input.to_string().contains("私聊中的个人计划"));
+    assert_eq!(c.writes(), 0);
+}

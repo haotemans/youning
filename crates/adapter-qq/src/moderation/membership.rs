@@ -336,7 +336,12 @@ pub(super) async fn execute(
                 params![id, assessment.to_string()],
             )
             .await?;
-            let topics:Vec<String>=sqlx::query_scalar::<_,String>("SELECT content FROM long_memories WHERE owner_type='chat' AND owner_id=?1 ORDER BY updated_at DESC LIMIT 3").bind(&r.group_id).fetch_all(&mut *conn).await?.into_iter().filter(|s|!yuantuan_core::consolidation::is_sensitive(s)).map(|s|s.chars().take(300).collect()).collect();
+            let topics:Vec<String>=sqlx::query_scalar::<_,String>("SELECT lm.content FROM long_memories lm
+                WHERE lm.owner_type='chat' AND lm.owner_id=?1 AND lm.source_chat_id=?1
+                AND EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=lm.source_msg_id AND m.chat_id=?1 AND m.chat_type='group')
+                AND (lm.source_end_msg_id IS NULL OR (lm.source_end_msg_id>=lm.source_msg_id AND EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=lm.source_end_msg_id AND m.chat_id=?1 AND m.chat_type='group')))
+                AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.chat_id=?1 AND m.chat_type<>'group' AND m.msg_id BETWEEN lm.source_msg_id AND COALESCE(lm.source_end_msg_id,lm.source_msg_id))
+                ORDER BY lm.updated_at DESC LIMIT 3").bind(&r.group_id).fetch_all(&mut *conn).await?.into_iter().filter(|s|!yuantuan_core::consolidation::is_sensitive(s)).map(|s|s.chars().take(300).collect()).collect();
             Ok(json!({"request":r,"applicant":applicant,"rule":rule,"group_topics":topics}))
         }
         Action::Defer { reason, .. } => {
