@@ -191,15 +191,7 @@ impl Default for ContextSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ConsolidationSection {
-    pub enabled: bool,
-    /// 每日执行时刻（本地 HH:MM）
-    pub daily_time: String,
-    /// 调试用：启动后立即执行一次
-    pub run_on_startup: bool,
-}
+pub type ConsolidationSection = yuantuan_core::consolidation::ConsolidationCfg;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -242,16 +234,6 @@ impl Default for PrefilterSection {
             window_secs: 60,
             self_msg_cap: 12,
             decision_cost_per_min: 30,
-        }
-    }
-}
-
-impl Default for ConsolidationSection {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            daily_time: "03:00".into(),
-            run_on_startup: false,
         }
     }
 }
@@ -344,11 +326,14 @@ k = 20
 roster_mem_per = 3
 
 [consolidation]
-# 夜间归纳（架构七章）；daily_time 为本地 HH:MM
+# 夜间归纳；daily_time 为北京时间 HH:MM
 enabled = true
 daily_time = "03:00"
 # 调试用：启动后立即执行一次（生产保持 false）
 run_on_startup = false
+# 每晚画像整理人数（0关闭）与每人完成后的等待秒数
+portrait_daily_limit = 10
+portrait_interval_secs = 60
 
 [meme]
 # 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）
@@ -420,5 +405,6 @@ pub fn load_or_default(path: &str) -> Result<Config> {
         .with_context(|| format!("读取配置文件失败: {path}"))?;
     let cfg: Config = toml::from_str(&text)
         .with_context(|| format!("解析配置文件失败: {path}"))?;
+    cfg.consolidation.validate()?;
     Ok(cfg)
 }

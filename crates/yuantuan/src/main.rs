@@ -327,11 +327,7 @@ async fn main() -> Result<()> {
                 llm: llm.clone(),
                 bus: bus.clone(),
                 self_qq: self_qq.clone(),
-                cfg: yuantuan_core::consolidation::ConsolidationCfg {
-                    enabled: cfg.consolidation.enabled,
-                    daily_time: cfg.consolidation.daily_time.clone(),
-                    run_on_startup: cfg.consolidation.run_on_startup,
-                },
+                cfg: cfg.consolidation.clone(),
             },
         );
         *consolidation_handle.lock().unwrap() = Some(h);

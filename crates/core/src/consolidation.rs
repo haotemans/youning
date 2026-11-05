@@ -36,11 +36,14 @@ const WINDOW: i64 = 500;
 const MENTION_DELTA_PER: f64 = 0.01;
 const MENTION_DELTA_CAP: f64 = 0.05;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct ConsolidationCfg {
     pub enabled: bool,
     pub daily_time: String,
     pub run_on_startup: bool,
+    pub portrait_daily_limit: usize,
+    pub portrait_interval_secs: u64,
 }
 
 impl Default for ConsolidationCfg {
@@ -49,7 +52,24 @@ impl Default for ConsolidationCfg {
             enabled: true,
             daily_time: "03:00".into(),
             run_on_startup: false,
+            portrait_daily_limit: 10,
+            portrait_interval_secs: 60,
         }
+    }
+}
+
+impl ConsolidationCfg {
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            parse_hhmm(&self.daily_time).is_some(),
+            "每日执行时刻须为 HH:MM"
+        );
+        anyhow::ensure!(self.portrait_daily_limit <= 100, "画像每日人数须为0至100");
+        anyhow::ensure!(
+            (60..=3600).contains(&self.portrait_interval_secs),
+            "画像间隔须为60至3600秒"
+        );
+        Ok(())
     }
 }
 
@@ -67,55 +87,49 @@ pub struct ConsolidationDeps {
 pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
     tokio::spawn(async move {
         let deps = Arc::new(deps);
-        let nightly = async {
-            if deps.cfg.run_on_startup {
-                info!("consolidation run_on_startup 调试项开启：立即执行一次");
-                run_once(&deps).await;
-            }
-            loop {
-                let wait = secs_until_next(&deps.db_path, &deps.cfg.daily_time).await;
-                info!(hours = wait / 3600, daily_time = %deps.cfg.daily_time, "夜间归纳下次执行倒计时");
-                tokio::time::sleep(Duration::from_secs(wait.max(1))).await;
-                run_once(&deps).await;
-            }
-        };
-        let portraits = async {
-            tokio::time::sleep(Duration::from_secs(60)).await;
-            loop {
+        if let Err(e) = deps.cfg.validate() {
+            warn!(error=%e,"夜间归纳配置无效");
+            return;
+        }
+        if deps.cfg.run_on_startup {
+            run_once(&deps).await;
+        }
+        loop {
+            let (start, end) = night_window(now_secs(), &deps.cfg.daily_time);
+            if (start..end).contains(&now_secs()) {
                 if let Some(gateway) = &deps.llm {
-                    if let Err(e) = crate::memory::refresh::active(&deps.db_path, gateway).await {
-                        warn!(error=%e,"活跃人物画像整理失败");
+                    let options = crate::memory::nightly::Options {
+                        date: today_str(&deps.db_path).await,
+                        deadline: end,
+                        limit: deps.cfg.portrait_daily_limit,
+                        interval_secs: deps.cfg.portrait_interval_secs,
+                    };
+                    if let Err(e) =
+                        crate::memory::nightly::run(&deps.db_path, gateway, &options).await
+                    {
+                        warn!(error=%e,"夜间人物画像整理失败，保留现有资料");
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(600)).await;
+                // Group memory and portrait model work share this serial scheduler.
+                run_once(&deps).await;
             }
-        };
-        // Both futures belong to this handle; shutdown cancels model work as well.
-        tokio::join!(nightly, portraits);
+            let (start, _) = night_window(now_secs(), &deps.cfg.daily_time);
+            let next = if start > now_secs() {
+                start
+            } else {
+                start + 86400
+            };
+            tokio::time::sleep(Duration::from_secs((next - now_secs()).max(1) as u64)).await;
+        }
     })
 }
 
-/// 距下一次 daily_time（本地 HH:MM）的秒数；用 SQL 的 localtime 换算避免引时区依赖
-async fn secs_until_next(db_path: &Path, daily_time: &str) -> u64 {
+/// Beijing time, independent of host/container TZ. Resume only within a three-hour night window.
+fn night_window(now: i64, daily_time: &str) -> (i64, i64) {
     let (h, m) = parse_hhmm(daily_time).unwrap_or((3, 0));
-    let now = now_secs();
-    let midnight: i64 = async {
-        let mut c = crate::db::connect(db_path).await.ok()?;
-        c.query_row(
-            "SELECT CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
-            crate::db::params![],
-            |r| r.try_get(0),
-        )
-        .await
-        .ok()
-    }
-    .await
-    .unwrap_or(now - now % 86400);
-    let mut target = midnight + (h as i64) * 3600 + (m as i64) * 60;
-    if target <= now {
-        target += 86400;
-    }
-    (target - now) as u64
+    let midnight = (now + 28800).div_euclid(86400) * 86400 - 28800;
+    let start = midnight + h as i64 * 3600 + m as i64 * 60;
+    (start, start + 10800)
 }
 
 fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
@@ -142,12 +156,6 @@ pub async fn run_once(deps: &ConsolidationDeps) {
     for chat_id in &chat_ids {
         let outcome = process_chat(deps, chat_id, &today).await;
         outcomes.push(outcome);
-    }
-
-    if let Some(gateway) = &deps.llm {
-        if let Err(e) = crate::memory::refresh::missing(&deps.db_path, gateway).await {
-            warn!(error=%e, "缺失人物画像补整理失败，群聊归纳结果保留");
-        }
     }
 
     deps.bus
@@ -246,7 +254,7 @@ async fn process_chat(
     // 当日零新消息的 chat 跳过
     let midnight: i64 = conn
         .query_row(
-            "SELECT CAST(strftime('%s','now','localtime','start of day','utc') AS INTEGER)",
+            "SELECT CAST(strftime('%s','now','+8 hours','start of day','-8 hours') AS INTEGER)",
             crate::db::params![],
             |r| r.try_get(0),
         )
@@ -424,15 +432,6 @@ struct DistillOut {
     group_facts: Vec<String>,
     #[serde(default)]
     rel_events: Vec<RelEvent>,
-    #[serde(default)]
-    profile_updates: Vec<PersonProfileUpdate>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PersonProfileUpdate {
-    person_id: String,
-    #[serde(flatten)]
-    update: crate::memory::ProfileUpdate,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,7 +461,6 @@ Schema：
   "chat_summary": "本日群摘要一段话（时间线索引用，100 字内）",
   "person_facts": [{"person_id": "p_xxx", "fact": "关于此人的一条提炼事实（陈述句）"}],
   "group_facts": ["关于本群长期值得记住的事实（陈述句；即群话题摘要）"],
-  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style|interests","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–240字"}],
   "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据", "evidence_msg_id":100,"evidence_quote":"from 本人的逐字原话，4–240字"}]
 }
 
@@ -471,7 +469,7 @@ Schema：
 - rel_events 的 delta_trust 取值 -0.2 ~ 0.2；没有可信依据就留空数组
 - 识图观察仅帮助理解讨论，不是人物确认。图片里的昵称、聊天、表情和人物不能变成当前群真实身份/关系；不依据外貌提取性格、职业、健康、亲密关系。画像和关系更新须有本人原消息文字的逐字引文，不能引用 OCR/识图摘要；只分享了一张图，不据此更新画像或关系。
 - 严禁在输出中包含任何敏感信息（密码、密钥、证件号、手机号等）
-- profile_updates 只从对应人物本人的明确陈述中提取；不要把玩笑、临时计划、猜测、别人评价或云团旧回答写成人物简档。没依据就 []，不使用每日摘要续写简档
+- 不输出人物画像，画像由另一个限额串行队列从本人原话整理；这里的 person_facts 仅保留为历史记忆
 "#;
 
 async fn distill(
@@ -629,21 +627,6 @@ async fn write_distilled(
         facts_written += 1;
     }
 
-    for p in d.profile_updates.iter().take(100) {
-        if let Err(e) = crate::memory::update_profile(
-            &mut tx,
-            &p.person_id,
-            chat_id,
-            outcome.msg_start,
-            outcome.msg_end,
-            &p.update,
-        )
-        .await
-        {
-            warn!(error=%e,"归纳人物简档未通过来源校验");
-        }
-    }
-
     // rel_events → relationship_events + edges(trust)
     for ev in &d.rel_events {
         let Some(source_id) = ev
@@ -711,7 +694,7 @@ async fn today_str(db_path: &Path) -> String {
     async {
         let mut c = crate::db::connect(db_path).await.ok()?;
         c.query_row(
-            "SELECT strftime('%Y-%m-%d','now','localtime')",
+            "SELECT strftime('%Y-%m-%d','now','+8 hours')",
             crate::db::params![],
             |r| r.try_get::<String, _>(0),
         )
@@ -777,6 +760,40 @@ pub fn is_sensitive(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nightly_defaults_and_beijing_window_are_bounded() {
+        let cfg = ConsolidationCfg::default();
+        assert_eq!(cfg.daily_time, "03:00");
+        assert_eq!(cfg.portrait_daily_limit, 10);
+        assert_eq!(cfg.portrait_interval_secs, 60);
+        assert!(cfg.validate().is_ok());
+        let legacy: ConsolidationCfg =
+            serde_json::from_value(serde_json::json!({"daily_time":"03:00"})).unwrap();
+        assert_eq!(legacy.portrait_daily_limit, 10);
+        assert_eq!(legacy.portrait_interval_secs, 60);
+        // Unix day boundary is 08:00 Beijing; 03:00 is 18,000 seconds earlier.
+        assert_eq!(night_window(0, "03:00"), (-18000, -7200));
+        assert_eq!(night_window(86400, "03:00"), (68400, 79200));
+        assert!(ConsolidationCfg {
+            portrait_interval_secs: 0,
+            ..cfg.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(ConsolidationCfg {
+            portrait_daily_limit: 101,
+            ..cfg.clone()
+        }
+        .validate()
+        .is_err());
+        assert!(ConsolidationCfg {
+            daily_time: "25:00".into(),
+            ..cfg
+        }
+        .validate()
+        .is_err());
+    }
 
     #[test]
     fn sensitive_keywords_hit() {

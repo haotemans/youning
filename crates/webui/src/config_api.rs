@@ -159,6 +159,11 @@ pub async fn post_config(
         let mut cfg_clean = cfg.clone();
         let orig = read_toml_as_json(&state.extras.config_path).unwrap_or_else(|| json!({}));
         unmask_in_place(&mut cfg_clean, &orig);
+        if let Some(section) = cfg_clean.get("consolidation") {
+            let options: yuantuan_core::consolidation::ConsolidationCfg = serde_json::from_value(section.clone())
+                .map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":format!("归纳配置错误: {e}")}))))?;
+            options.validate().map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":e.to_string()}))))?;
+        }
         let toml_text = to_toml_text(&cfg_clean)?;
         let back: toml::Value = toml::from_str(&toml_text).map_err(|e| {
             (
@@ -288,16 +293,8 @@ pub async fn post_config(
 
         // [consolidation] → 取消旧定时器，按新配置重建（句柄注册表在 Extras）
         if let Some(cs) = back.get("consolidation") {
-            let enabled = cs.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
-            let daily_time = cs
-                .get("daily_time")
-                .and_then(|v| v.as_str())
-                .unwrap_or("03:00")
-                .to_string();
-            let run_on_startup = cs
-                .get("run_on_startup")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
+            let options: yuantuan_core::consolidation::ConsolidationCfg = cs.clone().try_into().map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":format!("归纳配置错误: {e}")}))))?;
+            let enabled = options.enabled;
             if let Some(old) = state.extras.consolidation.lock().unwrap().take() {
                 old.abort();
             }
@@ -308,11 +305,7 @@ pub async fn post_config(
                         llm: state.extras.llm_slot.read().unwrap().clone(),
                         bus: state.extras.bus.clone(),
                         self_qq: state.extras.self_qq.clone(),
-                        cfg: yuantuan_core::consolidation::ConsolidationCfg {
-                            enabled,
-                            daily_time,
-                            run_on_startup,
-                        },
+                        cfg: options,
                     },
                 );
                 *state.extras.consolidation.lock().unwrap() = Some(h);

@@ -7,6 +7,7 @@ use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod refresh;
+pub mod nightly;
 
 pub const PROFILE_FIELDS: usize = 5;
 

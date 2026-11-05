@@ -24,10 +24,16 @@
                 <n-form-item label="启用定时归纳">
                   <n-switch v-model:value="f.consolidation.enabled" />
                 </n-form-item>
-                <n-form-item label="每日执行时刻">
+                <n-form-item label="执行时刻（北京时间）">
                   <n-time-picker :formatted-value="f.consolidation.daily_time" format="HH:mm"
                                  value-format="HH:mm" style="width: 160px"
                                  @update:formatted-value="(v) => (f.consolidation.daily_time = v || '03:00')" />
+                </n-form-item>
+                <n-form-item label="每晚画像人数上限">
+                  <n-input-number v-model:value="f.consolidation.portrait_daily_limit" :min="0" :max="100" :precision="0" style="width: 160px" />
+                </n-form-item>
+                <n-form-item label="画像间隔（秒）">
+                  <n-input-number v-model:value="f.consolidation.portrait_interval_secs" :min="60" :max="3600" :precision="0" style="width: 160px" />
                 </n-form-item>
                 <n-form-item label="启动时立即执行">
                   <n-switch v-model:value="f.consolidation.run_on_startup" />
@@ -127,7 +133,7 @@ const ok = ref(false)
 const restartList = ref([])
 
 const f = ref({
-  consolidation: { enabled: true, daily_time: '03:00', run_on_startup: false },
+  consolidation: { enabled: true, daily_time: '03:00', run_on_startup: false, portrait_daily_limit: 10, portrait_interval_secs: 60 },
   context: { budget_chars: 40000, k: 20, roster_mem_per: 3 },
   reply: {
     first_delay_min_ms: 300, first_delay_max_ms: 800, base_delay_ms: 600,
