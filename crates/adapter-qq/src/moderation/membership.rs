@@ -330,7 +330,7 @@ pub(super) async fn execute(
                 params![id, assessment.to_string()],
             )
             .await?;
-            let topics:Vec<String>=sqlx::query_scalar("SELECT content FROM long_memories WHERE owner_type='chat' AND owner_id=?1 ORDER BY updated_at DESC LIMIT 3").bind(&r.group_id).fetch_all(&mut *conn).await?.into_iter().filter(|s|!yuantuan_core::consolidation::is_sensitive(s)).map(|s|s.chars().take(300).collect()).collect();
+            let topics:Vec<String>=sqlx::query_scalar::<_,String>("SELECT content FROM long_memories WHERE owner_type='chat' AND owner_id=?1 ORDER BY updated_at DESC LIMIT 3").bind(&r.group_id).fetch_all(&mut *conn).await?.into_iter().filter(|s|!yuantuan_core::consolidation::is_sensitive(s)).map(|s|s.chars().take(300).collect()).collect();
             Ok(json!({"request":r,"applicant":applicant,"rule":rule,"group_topics":topics}))
         }
         Action::Defer { reason, .. } => {
