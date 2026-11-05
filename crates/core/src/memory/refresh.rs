@@ -102,8 +102,8 @@ pub async fn person(
     // Atomic lease across API/nightly runs. Failures/cancellation expire after five minutes.
     let claimed = conn
         .execute(
-            "INSERT INTO state_kv(key,value) VALUES(?1,?2)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            "INSERT INTO state_kv(key,value,updated_at) VALUES(?1,?2,?3)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
          WHERE CASE WHEN json_valid(state_kv.value) THEN
            COALESCE(json_extract(state_kv.value,'$.attempt'),0) <= ?3 - 300
            AND (?4 OR COALESCE(json_extract(state_kv.value,'$.cutoff'),0) < ?5)
@@ -123,7 +123,7 @@ pub async fn person(
     }
     if sources.is_empty() {
         conn.execute(
-            "UPDATE state_kv SET value=?2 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
+            "UPDATE state_kv SET value=?2,updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
             params![
                 key,
                 json!({"attempt":attempt,"cutoff":cutoff}).to_string(),
@@ -176,7 +176,7 @@ pub async fn person(
         }
     }
     tx.execute(
-        "UPDATE state_kv SET value=?2 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
+        "UPDATE state_kv SET value=?2,updated_at=?3 WHERE key=?1 AND json_extract(value,'$.attempt')=?3",
         params![
             key,
             json!({"attempt":attempt,"cutoff":cutoff}).to_string(),
