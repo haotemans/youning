@@ -13,6 +13,8 @@ pub mod event;
 pub mod llm;
 pub mod mcp;
 pub mod meme;
+pub mod meme_pack;
+pub mod meme_review;
 pub mod memory;
 pub mod napcat_slot;
 pub mod personality;
@@ -22,6 +24,7 @@ pub mod skills;
 pub mod state;
 pub mod supervisor;
 pub mod tools;
+pub mod vision;
 pub mod window;
 
 pub mod plugins;

@@ -13,7 +13,7 @@
         <n-tab name="pending">待审队列 ({{ counts.pending }})</n-tab>
         <n-tab name="active">已入库 ({{ counts.active }})</n-tab>
       </n-tabs>
-      <p class="gallery-help">{{ status === 'pending' ? '审核群聊采集的图片，填写分类后入库。不填分类时归入 misc。' : '按分类整理机器人可用的表情包，点击图片查看原图。' }}</p>
+      <p class="gallery-help">{{ status === 'pending' ? '采集后会逐张识别：明确合适的表情自动分类入库，截图、普通图片或判断不准的留待人工审核。可修改建议分类；留空时归入 misc。' : '已入库表情会按情绪和聊天语境选用，避免连续重复；点击图片查看原图。' }}</p>
 
       <div class="meme-filter">
         <n-input v-model:value="search" clearable :maxlength="100" :disabled="busy" placeholder="搜索文件名、分类或编号" />
@@ -53,6 +53,10 @@
               <n-tag size="tiny" :bordered="false" type="info">{{ m.category === '_inbox' ? '待分类' : m.category || 'misc' }}</n-tag>
               <span class="mono">{{ m.use_count }} 次使用</span>
             </div>
+            <div v-if="m.review" class="meme-review" :data-review-state="m.review.state">
+              <span>{{ reviewLabel(m.review) }}</span>
+              <span v-if="m.review.reason">：{{ m.review.reason }}</span>
+            </div>
             <n-input v-model:value="drafts[m.id]" size="small" :maxlength="40" :disabled="busy || loading" :placeholder="status === 'pending' ? '入库分类（默认 misc）' : '修改分类'" :input-props="{ 'aria-label': `表情包 ${m.id} 分类` }" />
             <div class="meme-actions">
               <n-button size="small" type="primary" secondary :loading="busyId === m.id" :disabled="busy || loading || (status === 'active' && (!drafts[m.id]?.trim() || drafts[m.id].trim() === m.category))" @click="runSingle(m, status === 'pending' ? 'approve' : 'category')">{{ status === 'pending' ? '入库' : '保存分类' }}</n-button>
@@ -80,7 +84,16 @@ import { api } from '../api'
 import EmptyState from '../components/EmptyState.vue'
 import MemeImage from '../components/MemeImage.vue'
 
-type Meme = { id: number; file: string; category: string; use_count: number; added_by: string }
+type Review = { state: string; kind?: string; safe?: boolean; category?: string; reason?: string; confidence?: number }
+type Meme = { id: number; file: string; category: string; use_count: number; added_by: string; review?: Review | null }
+
+function reviewLabel(review: Review) {
+  if (review.state === 'processing') return '正在识别'
+  if (review.state === 'failed') return '识别未完成'
+  if (review.safe === false) return '不建议使用'
+  if (review.kind === 'other') return '非表情图片'
+  return review.kind === 'meme' ? '表情用途已识别' : '需要人工判断'
+}
 type Action = 'approve' | 'category' | 'reject'
 const items = ref<Meme[]>([])
 const counts = ref({ pending: 0, active: 0 })
@@ -124,7 +137,11 @@ async function load() {
     counts.value = data.counts
     categories.value = data.categories
     selected.value = selected.value.filter(id => items.value.some(m => m.id === id))
-    for (const m of items.value) if (!(m.id in drafts.value)) drafts.value[m.id] = status.value === 'pending' ? '' : m.category
+    for (const m of items.value) if (!(m.id in drafts.value)) {
+      drafts.value[m.id] = status.value === 'pending'
+        ? (m.review?.state === 'reviewed' && m.review.safe && m.review.kind === 'meme' ? m.review.category || '' : '')
+        : m.category
+    }
   } catch (e) {
     if (!request.signal.aborted) {
       items.value = []
@@ -208,6 +225,7 @@ onBeforeUnmount(() => { controller?.abort(); clearTimeout(searchTimer) })
 .meme-card-head :deep(.n-tag) { margin-left: auto; }
 .meme-preview { background: var(--yt-surface); border: 1px solid var(--yt-card-border); border-radius: 8px; padding: 6px; }
 .meme-filename { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; font-size: 12px; color: var(--yt-ink-3); }
+.meme-review { font-size: 12px; color: var(--yt-ink-3); overflow-wrap: anywhere; }
 .meme-meta { display: flex; justify-content: space-between; align-items: center; gap: 6px; font-size: 12px; color: var(--yt-ink-3); }
 .meme-meta :deep(.n-tag) { max-width: 60%; overflow: hidden; }
 .meme-actions { display: flex; gap: 8px; align-items: center; }

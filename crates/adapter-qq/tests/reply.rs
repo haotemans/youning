@@ -201,6 +201,7 @@ async fn mock_napcat(
 
     // 读 action 并回执
     let mut seq = 900i64;
+    let mut history = Vec::new();
     while let Some(Ok(frame)) = r.next().await {
         let Message::Text(t) = frame else { continue };
         let v: Value = match serde_json::from_str(&t) {
@@ -208,12 +209,29 @@ async fn mock_napcat(
             Err(_) => continue,
         };
         let action = v["action"].as_str().unwrap_or("");
-        if action == "send_group_msg" || action == "send_private_msg" {
+        if action == "get_group_msg_history" {
+            w.lock()
+                .await
+                .send(Message::Text(
+                    json!({"retcode":0,"data":{"messages":history},"echo":v["echo"]})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        } else if action == "send_group_msg" || action == "send_private_msg" {
             captures
                 .lock()
                 .unwrap()
                 .push((Instant::now(), v["params"]["message"].clone()));
             seq += 1;
+            let mut segments = v["params"]["message"].clone();
+            for segment in segments.as_array_mut().unwrap() {
+                if segment["type"] == "image" {
+                    segment["data"]["file_size"] = json!(1);
+                }
+            }
+            history.push(json!({"group_id":v["params"]["group_id"],"user_id":SELF_QQ,"time":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),"message_id":seq,"real_seq":seq,"message":segments}));
             let echo = v["echo"].as_str().unwrap_or("").to_string();
             let first = captures.lock().unwrap().len() == 1;
             let _ = w

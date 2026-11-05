@@ -255,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 8] = [
+const MIGRATIONS: [(&str, &str); 9] = [
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
@@ -294,6 +294,20 @@ const MIGRATIONS: [(&str, &str); 8] = [
         "CREATE INDEX IF NOT EXISTS idx_msg_reply_anchor ON messages(reply_anchor_id,msg_id);",
     ),
     ("V0.8 人设版本保存一问一答回复示例", "SELECT 1;"),
+    (
+        "V0.9 图片语境及可追溯识图记录",
+        r#"
+        CREATE TABLE IF NOT EXISTS message_images (
+            msg_id INTEGER NOT NULL REFERENCES messages(msg_id) ON DELETE CASCADE,
+            image_index INTEGER NOT NULL,
+            url TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            observation TEXT,
+            observed_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(msg_id,image_index)
+        );
+    "#,
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {

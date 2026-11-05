@@ -13,6 +13,26 @@
 - 当前记忆检索主要是词项匹配，并非向量数据库；上下文预算主要按字符数近似，不是严格 token 预算。
 - 管理页可查看记忆和摘要，但查看、归纳、验证事实是不同步骤。
 
+定向请求的图片和引用可进入视觉观察，复用缓存、成本闸和并发限制；原消息、本人资料、互动关系共同提供语境，观察再进入回复快照及每日归纳。截图/OCR 不是本人原话或真实关系证据，人物画像和关系增量仍校验对应人物、原消息及引文。
+
+记忆库管理页复用当前面板组件与配色，默认按头像、昵称和 QQ 展示一人一份当前画像，页头统计人物数量；进入人物先展示其综合资料，五类字段归在同一份记录内，来源依据默认折叠。左侧支持按昵称、QQ、群名片、画像及历史内容搜索，不按群复制人物。历史记忆及每日摘要在选择人物后主动打开才读取，原有大量历史材料不作为多份画像展示。会话仅筛选历史来源；全局画像综合各群和私聊中通过本人原话校验的当前字段，同字段由较新的有效原话更新，迟到旧资料不覆盖。群自身的记忆保留会话归属，不按群成员批量分配给个人。头像缺失时显示名字首字，未获取群名时显示会话类型和编号。
+
+`GET /api/memories`、`GET /api/summaries` 保留 `owner_type/owner_id/limit`，增加 `person_id/chat_id/chat_type/search/page/page_size`；分页每页默认24、最多96条，响应包含真实筛选总数和记忆/摘要计数，避免把截取的200条当全库数量。空内容、字面null/undefined不展示，原记录保留。列表展示消息记忆、窗口归纳、历史记忆等来源标签，旧记录没有出处时明确缺失。列表只读，不改变 Bot 记忆检索或跨会话使用规则。
+
+新增受管理员认证保护的 `GET /api/memories/people`（统一人物，分页/搜索）和 `GET /api/memories/conversations`（可按person_id列出参与的会话，最多200个）。`GET /api/memories/{id}/source?kind=memory|summary` 按需读取已保存出处的至多60条消息，限制会话、类型、消息区间；显式个人记忆额外验证作者。来源不明、已丢失或不匹配时返回空，不从邻近消息猜测。已有个人每日摘要缺少会话字段，保留全局人物归属，不能据此回填来源或匹配某个群筛选。图片URL不返回；敏感正文隐藏，长消息限4000字。
+
+人物画像沿用现有本人原话与字段校验，独立于来源筛选显示；点击关系图谱通过 `person` 查询参数定位同一个人物。页面快速切换、筛选、翻页及离开时取消旧请求，出处抽屉只在打开时加载；错误提供重试，界面不加入原理解释或示意文案。
+
+`GET /api/memories/people` 返回真实人物总数、每人的当前 `profile` 与 `profile_updated_at`。最多96人的画像在一次批量查询内读取，与单人读取共用原作者、原文引文和消息上界校验。没有已确认资料时显示暂无画像，不把旧归纳材料拼成已确认画像；历史资料继续保存供追溯，仅浏览页面不会调用模型重新总结。
+
+全局画像目录保留“历史记录”次级入口，用于按会话浏览群自身的记忆与成员历史，返回画像页不继续展示历史明细；历史搜索保留在历史视图。默认入口仍为一人一份画像，不自动读取这些明细。
+
+历史视图中点击侧栏的同一人物或“全部画像”，也会返回对应画像，不必先切换到其他人物。
+
+人物画像还支持 `interests`（兴趣爱好）。历史人物记忆不会直接转抄成已确认画像：夜间归纳结束后每轮最多补整理8位缺失画像的人，读取该人物跨群与私聊的最近160条有效长度原始文本，单条最多512字、总计最多32000字；敏感原文跳过。仅有发言数量、提问或普通寒暄不必产生画像。每字段必须绑定本轮实际读取的本人消息及逐字引文，复用原有写入校验和较新来源优先规则，失败不清空现有字段，不改群聊记忆、摘要或关系记录。
+
+人物页提供“整理画像”，显式调用受 session 保护的 `POST /api/memories/people/{id}/refresh`；无人物返回404，未配置 Decision 返回503，模型/数据库失败保留当前画像并提示重试。整理使用现有 Decision 网关的限速、并发与超时，每次最多一次模型调用，同人物通过数据库原子领取限制5分钟内重复调用；进度及更新时间保存在现有 `state_kv`，后台对没有新有效消息的已整理人物不重复提炼。空结果保留空缺，不补造性格。读取/浏览接口不触发付费调用；仍保留历史记录页。该功能由 mock 与浏览器测试验证，不代表已部署或真实模型语义验收。
+
 ## 边界
 
 - 归纳结果影响后续快照，不 retroactively 修改当前回答；摘要不等于长期人格事实。
@@ -22,12 +42,19 @@
 
 - [`crates/core/src/consolidation.rs`](../../../crates/core/src/consolidation.rs)
 - [`crates/core/src/context_builder.rs`](../../../crates/core/src/context_builder.rs)
+- [`crates/core/src/vision.rs`](../../../crates/core/src/vision.rs)
 - [`crates/core/src/memory.rs`](../../../crates/core/src/memory.rs)
+- [`crates/core/src/memory/refresh.rs`](../../../crates/core/src/memory/refresh.rs)
 - [`crates/webui/src/memories.rs`](../../../crates/webui/src/memories.rs)
 - [`webui-frontend/src/views/Memories.vue`](../../../webui-frontend/src/views/Memories.vue)
 
 ## 验证入口
 
+- [`crates/core/tests/visual_context.rs`](../../../crates/core/tests/visual_context.rs)
+- [`crates/webui/tests/memories_api.rs`](../../../crates/webui/tests/memories_api.rs)
+- [`webui-frontend/tests/memories-flow.spec.js`](../../../webui-frontend/tests/memories-flow.spec.js)
+
+- [`crates/core/tests/profile_refresh.rs`](../../../crates/core/tests/profile_refresh.rs)
 - [`crates/core/tests/bot_context.rs`](../../../crates/core/tests/bot_context.rs)
 - [`crates/core/tests/consolidation.rs`](../../../crates/core/tests/consolidation.rs)
 

@@ -11,6 +11,11 @@ async function openGallery(page, options = {}) {
     items: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, file: i < 26 ? `_inbox/待审${i + 1}.png` : `开心/开心${i + 1}.png`, category: i < 26 ? '_inbox' : '开心', status: i < 26 ? 'pending' : 'active', added_by: 'steal', use_count: i, created_at: i })),
     reads: [], writes: [], images: [], failLoad: options.failLoad, failWrite: options.failWrite, failImage: options.failImage, partial: options.partial,
   }
+  if (options.reviews) {
+    state.items.find(m => m.id === 26).review = { state: 'reviewed', kind: 'meme', safe: true, category: '疑惑', reason: '适合表达困惑', confidence: 0.7 }
+    state.items.find(m => m.id === 25).review = { state: 'reviewed', kind: 'other', safe: true, category: '', reason: '软件截图' }
+    state.items.find(m => m.id === 24).review = { state: 'reviewed', kind: 'meme', safe: false, category: '疑惑', reason: '含敏感内容' }
+  }
   await page.addInitScript(() => {
     localStorage.setItem('yt_token', 'test-only')
     window.galleryUrls = { created: [], revoked: [] }
@@ -71,6 +76,18 @@ async function openGallery(page, options = {}) {
 }
 
 function card(page, id) { return page.locator('.meme-card').filter({ has: page.getByText(`#${id}`, { exact: true }) }) }
+
+test('collected images show judgments and only suitable memes suggest a category', async ({ page }) => {
+  const state = await openGallery(page, { reviews: true })
+  await expect(card(page, 26)).toContainText('表情用途已识别：适合表达困惑')
+  await expect(card(page, 26).getByRole('textbox', { name: '表情包 26 分类' })).toHaveValue('疑惑')
+  await expect(card(page, 25)).toContainText('非表情图片：软件截图')
+  await expect(card(page, 25).getByRole('textbox', { name: '表情包 25 分类' })).toHaveValue('')
+  await expect(card(page, 24)).toContainText('不建议使用')
+  await expect(card(page, 24).getByRole('textbox', { name: '表情包 24 分类' })).toHaveValue('')
+  await card(page, 26).getByRole('button', { name: '入库', exact: true }).click()
+  expect(state.writes[0].category).toBe('疑惑')
+})
 
 test('pagination, search, category and usage sorting with visible previews', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 })

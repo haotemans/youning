@@ -20,6 +20,7 @@ use crate::event::{ChatConsolidationOutcome, ConsolidationDonePayload, Event, Ev
 use crate::llm::{LlmGateway, Role};
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -126,6 +127,12 @@ pub async fn run_once(deps: &ConsolidationDeps) {
     for chat_id in &chat_ids {
         let outcome = process_chat(deps, chat_id, &today).await;
         outcomes.push(outcome);
+    }
+
+    if let Some(gateway) = &deps.llm {
+        if let Err(e) = crate::memory::refresh::missing(&deps.db_path, gateway).await {
+            warn!(error=%e, "缺失人物画像补整理失败，群聊归纳结果保留");
+        }
     }
 
     deps.bus
@@ -264,7 +271,15 @@ async fn process_chat(
         outcome.status = "llm_unavailable".into();
         return outcome;
     }
-    let distill = match distill(deps.llm.as_ref().unwrap(), chat_id, &rows).await {
+    let visuals = conn.prepare("SELECT i.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id WHERE m.chat_id=?1 AND i.status='ready' AND i.msg_id BETWEEN ?2 AND ?3 ORDER BY i.msg_id DESC LIMIT 6").await
+        .ok();
+    let visuals: Vec<Value> = if let Some(mut stmt) = visuals {
+        stmt.query_map(params![chat_id,outcome.msg_start,outcome.msg_end], |r| Ok(json!({"source_msg_id":r.try_get::<i64,_>(0)?,"observation":r.try_get::<String,_>(1)?}))).await
+            .map(|rows| rows.filter_map(|r|r.ok()).collect()).unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let distill = match distill(deps.llm.as_ref().unwrap(), chat_id, &rows, &visuals).await {
         Some(d) => d,
         None => {
             warn!(chat_id, "LLM 提炼两轮校验失败，本 chat 本轮跳过");
@@ -419,6 +434,10 @@ struct RelEvent {
     delta_trust: f64,
     #[serde(default)]
     evidence: String,
+    #[serde(default)]
+    evidence_msg_id: Option<i64>,
+    #[serde(default)]
+    evidence_quote: String,
 }
 
 const DISTILL_SYSTEM: &str = r#"你是云团夜间归纳的提炼器。输入是一个会话窗口的消息流水（每行：昵称(person_id): 内容），输出严格 JSON，不要任何其他文字。
@@ -428,18 +447,24 @@ Schema：
   "chat_summary": "本日群摘要一段话（时间线索引用，100 字内）",
   "person_facts": [{"person_id": "p_xxx", "fact": "关于此人的一条提炼事实（陈述句）"}],
   "group_facts": ["关于本群长期值得记住的事实（陈述句；即群话题摘要）"],
-  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–80字"}],
-  "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据"}]
+  "profile_updates": [{"person_id":"p_xxx","field":"preferred_name|technical_preferences|ongoing_projects|communication_style|interests","value":"本人明确表达的稳定资料，200字内","evidence_msg_id":100,"evidence_quote":"对应消息内逐字连续原话，4–240字"}],
+  "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据", "evidence_msg_id":100,"evidence_quote":"from 本人的逐字原话，4–240字"}]
 }
 
 规则：
 - 只提炼长期有意义的事实（偏好、关系、正在进行的事），日常寒暄不进 facts
 - rel_events 的 delta_trust 取值 -0.2 ~ 0.2；没有可信依据就留空数组
+- 识图观察仅帮助理解讨论，不是人物确认。图片里的昵称、聊天、表情和人物不能变成当前群真实身份/关系；不依据外貌提取性格、职业、健康、亲密关系。画像和关系更新须有本人原消息文字的逐字引文，不能引用 OCR/识图摘要；只分享了一张图，不据此更新画像或关系。
 - 严禁在输出中包含任何敏感信息（密码、密钥、证件号、手机号等）
 - profile_updates 只从对应人物本人的明确陈述中提取；不要把玩笑、临时计划、猜测、别人评价或云团旧回答写成人物简档。没依据就 []，不使用每日摘要续写简档
 "#;
 
-async fn distill(gw: &LlmGateway, chat_id: &str, rows: &[MsgRow]) -> Option<DistillOut> {
+async fn distill(
+    gw: &LlmGateway,
+    chat_id: &str,
+    rows: &[MsgRow],
+    visuals: &[Value],
+) -> Option<DistillOut> {
     let mut user = String::from("消息流水（最新 500 条窗口，按时间序）：\n");
     for r in rows {
         let text: String = r.text.chars().take(80).collect();
@@ -448,6 +473,10 @@ async fn distill(gw: &LlmGateway, chat_id: &str, rows: &[MsgRow]) -> Option<Dist
             r.msg_id, r.nickname, r.sender_pid, text
         ));
     }
+    user.push_str(&format!(
+        "\n图片观察（非本人确认，仅为辅助语境）：{}",
+        json!(visuals)
+    ));
     let first = gw
         .chat(Role::Decision, DISTILL_SYSTEM, &user, true)
         .await
@@ -602,6 +631,26 @@ async fn write_distilled(
 
     // rel_events → relationship_events + edges(trust)
     for ev in &d.rel_events {
+        let Some(source_id) = ev
+            .evidence_msg_id
+            .filter(|id| (outcome.msg_start..=outcome.msg_end).contains(id))
+        else {
+            continue;
+        };
+        let quote = ev.evidence_quote.trim();
+        if !(4..=240).contains(&quote.chars().count())
+            || ev.from == "self"
+            || ev.from == ev.to
+            || is_sensitive(quote)
+        {
+            continue;
+        }
+        let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=?1 AND m.chat_id=?2 AND m.sender_pid=?3 AND instr(m.text,?4)>0)
+            AND EXISTS(SELECT 1 FROM messages WHERE chat_id=?2 AND sender_pid=?5 AND msg_id<=?6)",
+            params![source_id,chat_id,ev.from,quote,ev.to,outcome.msg_end], |r|r.try_get(0)).await?;
+        if !valid {
+            continue;
+        }
         if !ev.delta_trust.is_finite() {
             continue;
         }
@@ -610,11 +659,7 @@ async fn write_distilled(
             warn!(chat_id, "rel_event evidence 命中敏感拒收");
             continue;
         }
-        let evidence = if ev.evidence.is_empty() {
-            format!("夜间归纳提炼 msg {}-{}", outcome.msg_start, outcome.msg_end)
-        } else {
-            ev.evidence.clone()
-        };
+        let evidence = format!("{}（消息 {source_id}，本人原话：{quote}）", ev.evidence);
         tx.execute(
             "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at)
              VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",

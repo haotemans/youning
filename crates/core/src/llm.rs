@@ -454,6 +454,67 @@ impl LlmGateway {
         user: &str,
         json_mode: bool,
     ) -> Result<String> {
+        self.chat_content(role, system, json!(user), json_mode)
+            .await
+    }
+
+    /// Image parts share the existing role, rate limiter, concurrency and usage accounting.
+    pub async fn chat_with_images(
+        &self,
+        system: &str,
+        user: &str,
+        images: &[String],
+    ) -> Result<String> {
+        anyhow::ensure!((1..=3).contains(&images.len()), "识图每次限 1–3 张");
+        let mut parts = vec![json!({"type":"text","text":user})];
+        for url in images {
+            let parsed = reqwest::Url::parse(url)?;
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https")
+                    && parsed.host_str().is_some()
+                    && parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && url.len() <= 4096,
+                "图片地址无效"
+            );
+            parts.push(json!({"type":"image_url","image_url":{"url":url,"detail":"low"}}));
+        }
+        self.chat_content(Role::BotChat, system, json!(parts), true)
+            .await
+    }
+
+    /// Locally collected memes use bounded thumbnails, not expired QQ URLs or file paths.
+    /// Shares the same model, cost gate, concurrency and accounting as directed vision.
+    pub async fn chat_with_image_data(
+        &self,
+        system: &str,
+        user: &str,
+        png: &[u8],
+    ) -> Result<String> {
+        use base64::Engine;
+        anyhow::ensure!(
+            png.len() <= 2 * 1024 * 1024
+                && image::guess_format(png).ok() == Some(image::ImageFormat::Png),
+            "图片必须为有界 PNG 缩略图"
+        );
+        let url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        );
+        let parts = json!([
+            {"type":"text","text":user},
+            {"type":"image_url","image_url":{"url":url,"detail":"low"}}
+        ]);
+        self.chat_content(Role::BotChat, system, parts, true).await
+    }
+
+    async fn chat_content(
+        &self,
+        role: Role,
+        system: &str,
+        user: Value,
+        json_mode: bool,
+    ) -> Result<String> {
         let r = self
             .roles
             .get(&role)

@@ -15,9 +15,22 @@ use yuantuan_core::{
 
 #[tokio::test]
 async fn timeout_receipt_is_reconciled_without_resending_the_image() {
+    reconcile_image(false).await;
+}
+
+#[tokio::test]
+async fn early_success_is_not_delivery_until_server_sequence_arrives() {
+    reconcile_image(true).await;
+}
+
+async fn reconcile_image(early_success: bool) {
+    // SystemTime can have coarse resolution on Windows; concurrent cases must
+    // never share an artifact directory or clean up each other's image.
+    static NEXT_CASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "yt-delayed-image-{}-{}",
+        "yt-delayed-image-{}-{}-{}",
         std::process::id(),
+        NEXT_CASE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -71,7 +84,11 @@ async fn timeout_receipt_is_reconciled_without_resending_the_image() {
                         req["params"]["message"][2]["data"]["text"],
                         "\nprompt: adult reading, artist:example"
                     );
-                    json!({"retcode":1200,"message":"Timeout: NTEvent sendMsg","echo":req["echo"]})
+                    if early_success {
+                        json!({"retcode":0,"data":{"message_id":456},"echo":req["echo"]})
+                    } else {
+                        json!({"retcode":1200,"message":"Timeout: NTEvent sendMsg","echo":req["echo"]})
+                    }
                 }
                 "get_group_msg_history" => {
                     histories += 1;

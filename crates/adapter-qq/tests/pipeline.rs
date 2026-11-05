@@ -157,11 +157,26 @@ async fn wait_until<F: AsyncFnMut() -> bool>(mut cond: F, what: &str) {
 }
 
 /// Q54 语义:同 chat 窗口内 N 条消息聚合 1 次 Decide。
-/// 三条消息 @bot 同 chat 紧凑发送 → 1 次窗口 → 1 次 DecisionMade(回复锚定 A)。
+/// 三条普通消息同 chat 紧凑发送 → 1 次窗口 → 1 次 DecisionMade(回复锚定 A)。
 /// mock LLM 只喂一次响应,验证 memory_write / 落库在 Q54 语义下仍成立。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn decision_pipeline_q54_window_aggregation() {
+    check_dispatch(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn addressed_requests_are_each_processed_outside_the_group_window() {
+    check_dispatch(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn addressed_request_between_images_is_never_consumed_as_window_context() {
+    check_dispatch(true, true).await;
+}
+
+async fn check_dispatch(addressed: bool, image_flood: bool) {
     let db_path = temp_db().await;
+    let expected = if addressed && !image_flood { 3 } else { 1 };
 
     // Q54 下 3 条同 chat 消息 = 1 次 Decide;只喂一个 content
     let good = json!({
@@ -171,7 +186,7 @@ async fn decision_pipeline_q54_window_aggregation() {
         "reason": "Q54 窗口聚合一次 Decide"
     })
     .to_string();
-    let responses = Arc::new(Mutex::new(VecDeque::from(vec![good])));
+    let responses = Arc::new(Mutex::new(VecDeque::from(vec![good; expected])));
     let llm_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let llm_port = llm_listener.local_addr().unwrap().port();
     tokio::spawn(mock_llm(llm_listener, responses.clone()));
@@ -191,11 +206,22 @@ async fn decision_pipeline_q54_window_aggregation() {
     let _tracer = spawn_tracer(&bus, db_path.clone());
     let self_ids = SelfMsgIds::default();
     let nap_port = free_port();
-    let nap_events = vec![
-        at_message(201, 2001, "云团在吗"),
+    let mut nap_events = vec![
+        at_message(201, 2001, "最近怎么样"),
         at_message(202, 2001, "我很喜欢 Rust"),
         at_message(203, 2001, "Q54 同窗口追加"),
     ];
+    if !addressed {
+        for event in &mut nap_events {
+            event["message"].as_array_mut().unwrap().remove(0);
+        }
+    }
+    if image_flood {
+        for i in [0, 2] {
+            nap_events[i]["message"] = json!([{"type":"image","data":{"file":"image.png"}}]);
+        }
+        nap_events[1] = at_message(202, 2001, "禁言猫猫");
+    }
     tokio::spawn(mock_napcat(nap_port, nap_events));
     let handle = spawn(
         bus.clone(),
@@ -240,7 +266,15 @@ async fn decision_pipeline_q54_window_aggregation() {
                 )
                 .await
                 .unwrap();
-            n == 1
+            let pending: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM messages WHERE processed_at IS NULL",
+                    yuantuan_core::db::params![],
+                    |r| r.try_get(0),
+                )
+                .await
+                .unwrap();
+            n == expected as i64 && pending == 0
         },
         "Q54 同 chat 3 条 → 1 次 DecisionMade(10s 窗口到期)",
     )
@@ -256,7 +290,7 @@ async fn decision_pipeline_q54_window_aggregation() {
         )
         .await
         .unwrap();
-    assert_eq!(n, 1, "Q54 窗口聚合恰好 1 次 Decide");
+    assert_eq!(n, expected as i64, "普通消息聚合，直接请求逐条处理");
 
     let payload_str: String = conn
         .query_row(
@@ -272,6 +306,9 @@ async fn decision_pipeline_q54_window_aggregation() {
     assert_eq!(p["sender_pid"], "p_2001");
     assert_eq!(p["fallback"], false);
     assert_eq!(p["action"], "ignore");
+    if image_flood {
+        assert_eq!(p["text"], "禁言猫猫");
+    }
 
     // memory_write 落 long_memories(Q54 单 decide 也应该写)
     let (content, source): (String, String) = conn

@@ -788,9 +788,16 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         }
     }
     let rig = Rig::new().await;
+    // Linked cases need a real, positive prior message ID even when they are
+    // first in the case list; zero is intentionally rejected by the schema.
+    rig.message("self", "g", "先前回复，请明确版本信息", None, None)
+        .await;
     let app = axum::Router::new().route("/chat/completions", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         let case: Value = serde_json::from_str(ctx["anchor"]["text"].as_str().unwrap()).unwrap();
+        if case["mention_other"] == true {
+            assert_eq!(ctx["message"]["mentions"], json!(["p_other"]));
+        }
         if ctx["anchor"]["text"].as_str().unwrap().contains("blocked_scope") {
             assert!(!body["messages"][0]["content"].as_str().unwrap().contains("- lookup.search:"));
         }
@@ -799,8 +806,8 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         if case["linked"] == true { ids.push(ctx["dialogue"]["last_reply_to_sender"]["msg_id"].clone()); }
         let out = json!({"action":case["action"],"mood":"calm","mention":false,"reply_len":"short","reason":"基于语境选择能力",
             "task_goal":"执行当前任务","request_quote":if case["forged_quote"] == true {json!("不存在的原话")} else {case["text"].clone()},
-            "skill_name":if case["lookup"] == true {"lookup.search"} else {"writer.write"}, "skill_slots":{"query":"FLUX 3 release open source"},
-            "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" {"continuing"} else {"new_topic"},
+            "skill_name":if case["lookup"] == true {json!("lookup.search")} else {case.get("skill").cloned().unwrap_or(json!("writer.write"))}, "skill_slots":{"query":"FLUX 3 release open source","prompt":"白发猫娘，短发，雪山，横版构图"},
+            "assessment":{"audience":case["audience"],"intent":case["intent"],"continuity":if case["intent"]=="follow_up" || case["continuing"]==true {"continuing"} else {"new_topic"},
                 "confidence":if case["low"]==true {"low"} else {"high"},"benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":ids}});
         axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
     }));
@@ -815,6 +822,13 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
     let registry = skills::SkillRegistry::new();
     registry.register_arc(std::sync::Arc::new(Lookup));
     registry.register_arc(std::sync::Arc::new(skills::SkillImpl::new(SkillDef {
+        name: "nai-image.generate",
+        description: "生成图片",
+        prompt_template: String::new(),
+        tools: vec![],
+        role_hint: None,
+    })));
+    registry.register_arc(std::sync::Arc::new(skills::SkillImpl::new(SkillDef {
         name: "writer.write",
         description: "生成提示词",
         prompt_template: String::new(),
@@ -822,6 +836,104 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
         role_hint: None,
     })));
     let cases = [
+        (
+            json!({"text":"来张白发猫娘","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"想看一只戴围巾的狐狸","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"换成短发，再来张横版","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up","linked":true}),
+            "g",
+            false,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"背景换成雪山","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up","linked":true,"foreign_link":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"换成短发","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"follow_up"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"你会画画吗","skill":"nai-image.generate","action":"invoke_skill","audience":"bot","intent":"question"}),
+            "g",
+            true,
+            "reply",
+        ),
+        (
+            json!({"text":"群友说来张猫娘","skill":"nai-image.generate","action":"invoke_skill","audience":"group","intent":"sharing"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"你用的是哪个","lookup":false,"action":"reply","audience":"bot","intent":"question","linked":true,"continuing":true,"mention_other":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"云团帮我看下这个","lookup":false,"action":"reply","audience":"bot","intent":"question","mention_other":true}),
+            "g",
+            true,
+            "reply",
+        ),
+        // A fabricated high-confidence audience=request interpretation must not
+        // turn ambient game chat into prompt optimization or any other action.
+        (
+            json!({"text":"剑星的简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","continuing":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"生成一张白发猫娘","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"运行这段代码","lookup":false,"action":"start_task","audience":"bot","intent":"request"}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true,"continuing":true}),
+            "g",
+            false,
+            "invoke_skill",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"简单一点","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request","linked":true,"continuing":true,"foreign_link":true}),
+            "g",
+            false,
+            "ignore",
+        ),
+        (
+            json!({"text":"优化一下提示词","lookup":false,"action":"invoke_skill","audience":"bot","intent":"request"}),
+            "g",
+            true,
+            "invoke_skill",
+        ),
         (
             json!({"text":"flux3开源了吗","lookup":true,"action":"invoke_skill","audience":"bot","intent":"question"}),
             "g",
@@ -924,6 +1036,17 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
             .message("p_a", chat, &case.to_string(), None, None)
             .await;
         msg.at_me = direct;
+        if case["mention_other"] == true {
+            db::connect(&rig.path)
+                .await
+                .unwrap()
+                .execute(
+                    "UPDATE messages SET mentions='[\"p_other\"]' WHERE msg_id=?1",
+                    params![msg.msg_id],
+                )
+                .await
+                .unwrap();
+        }
         let mut snapshot =
             capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
                 .await
@@ -934,7 +1057,10 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
             reply.person_id = "self".into();
             snapshot.recent_messages.push(reply.clone());
             snapshot.dialogue["last_reply_to_sender"] =
-                json!({"msg_id":reply.msg_id,"text":"另一个版本也要核实吗"});
+                json!({"msg_id":reply.msg_id,"person_id":"self","text":"另一个版本也要核实吗"});
+            if case["foreign_link"] == true {
+                snapshot.dialogue["reply_target_person_id"] = json!("p_someone_else");
+            }
         }
         let outcome = decision::decide(
             &rig.path,
@@ -955,10 +1081,22 @@ async fn semantic_skill_routing_accepts_questions_and_requests_and_checks_eviden
 #[tokio::test]
 async fn reply_capabilities_distinguish_available_skills_from_execution_results() {
     let rig = Rig::new().await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    for (id, category, status) in [
+        (1, "开心", "active"),
+        (2, "开心", "active"),
+        (3, "委屈", "active"),
+        (4, "待审核", "pending"),
+    ] {
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES(?1,?2,?3,'admin',?4,0,100)", params![format!("{id}.png"),category,format!("md5-{id}"),status]).await.unwrap();
+    }
     let msg = rig.message("p_a", "g", "你能联网吗", None, None).await;
     let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
         .await
         .unwrap();
+    assert_eq!(snapshot.meme_categories.len(), 2);
+    assert!(snapshot.meme_categories.contains(&"开心".to_string()));
+    assert!(!snapshot.meme_categories.contains(&"待审核".to_string()));
     assert!(snapshot.scene["current_time"]
         .as_str()
         .unwrap()

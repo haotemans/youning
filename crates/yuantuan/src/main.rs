@@ -77,6 +77,11 @@ async fn main() -> Result<()> {
 
     // c2. meme 入库扫描（md5/dHash 去重）
     let memes_dir = data_root.join("memes");
+    match yuantuan_core::meme_pack::install(&db_path, &memes_dir).await {
+        Ok(added) if added > 0 => info!(added, "云团专属表情包已入库"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error=%e, "专属表情包导入失败（不阻断启动）"),
+    }
     match yuantuan_core::meme::scan_and_ingest(&memes_dir, &db_path).await {
         Ok(s) => info!(
             scanned = s.scanned,
@@ -298,6 +303,16 @@ async fn main() -> Result<()> {
                 memes2.clone(),
                 slot.clone(),
             )
+        });
+    }
+
+    {
+        let db = db_path.clone();
+        let memes = memes_dir.clone();
+        let llm = llm_slot.clone();
+        let enabled = steal_slot.clone();
+        supervisor.spawn("meme_review", move || {
+            yuantuan_core::meme_review::spawn(db.clone(), memes.clone(), llm.clone(), enabled.clone())
         });
     }
 

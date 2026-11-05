@@ -7,8 +7,7 @@
 //! - 单泡失败退避重试 1 次，仍失败跳过该泡记 BubbleSent(ok=false)，回复整体不失踪
 //! - 发送成功的泡落 messages（sender_pid='self'）保持会话连贯；napcat message_id 记 SelfMsgIds
 //!
-//! ::meme 说明：指令已解析；实际从库抽图发送属于施工单 7。本单选最不吵的方案——
-//! 纯 ::meme 泡跳过不发送（仅 debug 日志），混合泡只发文字部分。TODO(单7)：接 meme_library 抽图发送。
+//! ::meme 支持独立图片或文字后的附图，每个回复最多一张。
 //! 系数/泡顶/节流等全部数值目前走代码默认，TODO(热配单)：入 config。
 
 use crate::db::params;
@@ -19,6 +18,7 @@ use crate::prefilter::SelfMsgIds;
 use crate::state::{MoodState, MoodValue};
 use crate::{context_builder, llm, meme};
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
 use rand::Rng;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -861,6 +861,17 @@ async fn process_plugin_result(
                 }],
             )
             .await;
+        } else if delivery == MediaDelivery::Unconfirmed {
+            process_bubbles(
+                eng,
+                job,
+                &[Bubble {
+                    text: "图片已生成，但 QQ 尚未确认送达。图片文件已保留，未自动重复发送。".into(),
+                    at: false,
+                    meme: None,
+                }],
+            )
+            .await;
         }
         return;
     }
@@ -884,7 +895,45 @@ async fn process_plugin_result(
 
 /// 直接发图：无首泡延时、无作废核对，失败退避重试一次；落 self 图片消息保持流水连贯
 async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
-    process_media(eng, job, path, "image", note, ArtifactRetention::Keep).await
+    use tokio::io::AsyncReadExt;
+    let encoded = async {
+        let file = tokio::fs::File::open(path).await?;
+        let mut bytes = Vec::new();
+        file.take(8 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .await?;
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
+            "表情文件为空或超过8MiB"
+        );
+        Ok::<_, anyhow::Error>(format!(
+            "base64://{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))
+    }
+    .await;
+    match encoded {
+        Ok(file) => {
+            process_media_caption_with_file(
+                eng,
+                job,
+                path,
+                "image",
+                note,
+                ArtifactRetention::Keep,
+                None,
+                Some(file),
+            )
+            .await;
+        }
+        Err(e) => eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+            chat_id: job.chat_id.clone(),
+            bubble_index: 0,
+            total: 1,
+            ok: false,
+            note: Some(format!("表情读取失败：{e}")),
+        })),
+    }
 }
 
 async fn process_media(
@@ -914,7 +963,21 @@ async fn process_media_caption(
     retention: ArtifactRetention,
     caption: Option<&str>,
 ) -> MediaDelivery {
-    let mut segments = vec![json!({"type":kind,"data":{"file":meme::file_url(path)}})];
+    process_media_caption_with_file(eng, job, path, kind, note, retention, caption, None).await
+}
+
+async fn process_media_caption_with_file(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    path: &Path,
+    kind: &str,
+    note: &str,
+    retention: ArtifactRetention,
+    caption: Option<&str>,
+    file: Option<String>,
+) -> MediaDelivery {
+    let file = file.unwrap_or_else(|| meme::file_url(path));
+    let mut segments = vec![json!({"type":kind,"data":{"file":file}})];
     if job.chat_type == ChatType::Group && job.mention {
         if let Some(qq) = job.mention_qq.filter(|qq| *qq > 0) {
             segments.push(json!({"type":"at","data":{"qq":qq.to_string()}}));
@@ -1057,6 +1120,7 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
     let cfg = *eng.cfg.read().unwrap(); // 热应用：每泡取当前参数
     let started = Instant::now();
     let total = bubbles.len();
+    let mut meme_attempted = false;
 
     for (i, b) in bubbles.iter().enumerate() {
         // 延时模拟打字（超总预算则不再延时）
@@ -1072,29 +1136,11 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                 tokio::time::sleep(Duration::from_millis(d as u64)).await;
             }
         }
-        // 纯 ::meme 泡：按类别（缺省按 mood 映射）抽图直接发图片；混合泡只发文字部分
+        // 纯表情泡和文字附图使用相同通道；一个回复最多尝试一次。
         if b.text.is_empty() && b.meme.is_some() {
-            let memes_root = eng.db_path.parent().unwrap_or(Path::new(".")).join("memes");
-            let cat = resolve_meme_category(b.meme.as_deref(), eng.mood.get());
-            let picked = match meme::pick(&eng.db_path, &memes_root, &cat).await {
-                some @ Some(_) => some,
-                None => meme::pick(&eng.db_path, &memes_root, "misc").await,
-            };
-            match picked {
-                Some(path) => {
-                    debug!(chat_id = %job.chat_id, category = %cat, "::meme 抽图发送");
-                    process_image(eng, job, &path, "meme(::)").await;
-                }
-                None => {
-                    debug!(chat_id = %job.chat_id, category = %cat, "meme 库无该类别图片，跳过");
-                    eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
-                        chat_id: job.chat_id.clone(),
-                        bubble_index: i,
-                        total,
-                        ok: false,
-                        note: Some(format!("meme 库空（类别 {cat}）")),
-                    }));
-                }
+            if !meme_attempted {
+                meme_attempted = true;
+                send_bubble_meme(eng, job, b, i, total).await;
             }
             continue;
         }
@@ -1144,6 +1190,10 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                     ok: true,
                     note: None,
                 }));
+                if b.meme.is_some() && !meme_attempted {
+                    meme_attempted = true;
+                    send_bubble_meme(eng, job, b, i, total).await;
+                }
             }
             Err(e) => {
                 warn!(chat_id = %job.chat_id, bubble = i, error = %e, "泡发送失败，跳过该泡");
@@ -1158,6 +1208,28 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
         }
     }
     debug!(chat_id = %job.chat_id, total, elapsed_ms = started.elapsed().as_millis() as u64, "回复发送完成");
+}
+
+async fn send_bubble_meme(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    bubble: &Bubble,
+    index: usize,
+    total: usize,
+) {
+    let root = eng.db_path.parent().unwrap_or(Path::new(".")).join("memes");
+    let cat = resolve_meme_category(bubble.meme.as_deref(), eng.mood.get());
+    if let Some(path) = meme::pick(&eng.db_path, &root, &cat).await {
+        process_image(eng, job, &path, "meme(::)").await;
+    } else {
+        eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+            chat_id: job.chat_id.clone(),
+            bubble_index: index,
+            total,
+            ok: false,
+            note: Some(format!("meme 库无可用图片（类别 {cat}）")),
+        }));
+    }
 }
 
 /// 单泡发送失败 → 退避重试一次（稳定六条③）；echo 10s 超时在适配层
@@ -1322,6 +1394,62 @@ pub(crate) fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mixed_reply_keeps_text_and_one_meme_even_when_bubbles_are_merged() {
+        let dir = std::env::temp_dir().join(format!("yt-mixed-meme-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(dir.join("memes")).unwrap();
+        let path = dir.join("test.db");
+        let mut conn = crate::db::connect(&path).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        std::fs::write(dir.join("memes/happy.png"), b"image").unwrap();
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES('happy.png','开心','test-md5','admin','active',0,100)", crate::db::params![]).await.unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let send: SendFn = Arc::new(move |req| {
+            captured.lock().unwrap().push(req);
+            Box::pin(async { Ok(json!({"message_id":42})) })
+        });
+        let engine = Arc::new(ReplyEngine::new(
+            path,
+            EventBus::default(),
+            send,
+            SelfMsgIds::default(),
+            Arc::new(std::sync::RwLock::new(ReplyCfg {
+                total_budget_ms: 0,
+                ..ReplyCfg::default()
+            })),
+            MoodState::default(),
+        ));
+        let mut bubbles = bubbleize_with("好耶！‖::meme 开心", 180, 1);
+        assert_eq!(bubbles.len(), 1);
+        assert_eq!(bubbles[0].meme.as_deref(), Some("开心"));
+        bubbles.push(Bubble {
+            text: String::new(),
+            at: false,
+            meme: Some("开心".into()),
+        });
+        let job = ReplyJob {
+            chat_id: "123".into(),
+            chat_type: ChatType::Private,
+            target: 123,
+            anchor_msg_id: 1,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Bubbles(bubbles.clone()),
+        };
+        process_bubbles(&engine, &job, &bubbles).await;
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].segments[0]["type"], "text");
+        assert_eq!(requests[0].segments[0]["data"]["text"], "好耶！");
+        assert_eq!(requests[1].segments[0]["type"], "image");
+        let file = requests[1].segments[0]["data"]["file"].as_str().unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(file.strip_prefix("base64://").unwrap())
+            .unwrap();
+        assert_eq!(decoded, b"image", "NapCat 不需要访问云团本地的表情路径");
+    }
 
     #[tokio::test]
     async fn shutdown_drains_jobs_and_cancels_stalled_senders() {

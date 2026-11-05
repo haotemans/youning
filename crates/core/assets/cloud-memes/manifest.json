@@ -1,0 +1,291 @@
+{
+  "id": "cloud-memes-v1",
+  "grid": 4,
+  "margin": 4,
+  "sheets": [
+    {
+      "file": "01.jpg",
+      "source_name": "Gemini_Generated_Image_c1bkcac1bkcac1bk.jpg",
+      "cells": [
+        {
+          "caption": "理理我嘛～",
+          "category": "理理我"
+        },
+        {
+          "caption": "吸奶茶！",
+          "category": "吸奶茶"
+        },
+        {
+          "caption": "啊这…",
+          "category": "啊这"
+        },
+        {
+          "caption": "等我撸个袖子！",
+          "category": "撸袖子"
+        },
+        {
+          "caption": "抢到了！",
+          "category": "抢到了"
+        },
+        {
+          "caption": "我无语了",
+          "category": "无语"
+        },
+        {
+          "caption": "麦霸降临～",
+          "category": "麦霸"
+        },
+        {
+          "caption": "大佬带带我！",
+          "category": "大佬带带我"
+        },
+        {
+          "caption": "真可爱～",
+          "category": "真可爱"
+        },
+        {
+          "caption": "真的假的？！",
+          "category": "真的假的"
+        },
+        {
+          "caption": "发红包啦！",
+          "category": "发红包",
+          "enabled": false
+        },
+        {
+          "caption": "哈哈，是吗…",
+          "category": "哈哈是吗"
+        },
+        {
+          "caption": "涨知识了",
+          "category": "涨知识了"
+        },
+        {
+          "caption": "加油，你可以的！",
+          "category": "加油你可以的"
+        },
+        {
+          "caption": "累了，毁灭吧",
+          "category": "累了毁灭吧"
+        },
+        {
+          "caption": "再见啦～",
+          "category": "再见"
+        }
+      ]
+    },
+    {
+      "file": "02.jpg",
+      "source_name": "Gemini_Generated_Image_bj52jfbj52jfbj52.jpg",
+      "cells": [
+        {
+          "caption": "吃土中…",
+          "category": "吃土"
+        },
+        {
+          "caption": "抱紧胖胖的自己",
+          "category": "抱紧自己"
+        },
+        {
+          "caption": "太强了！",
+          "category": "太强了"
+        },
+        {
+          "caption": "溜了溜了",
+          "category": "溜了"
+        },
+        {
+          "caption": "收到！",
+          "category": "收到"
+        },
+        {
+          "caption": "看戏吃瓜",
+          "category": "看戏吃瓜"
+        },
+        {
+          "caption": "暗中观察",
+          "category": "暗中观察",
+          "enabled": false
+        },
+        {
+          "caption": "要抱抱嘛",
+          "category": "要抱抱"
+        },
+        {
+          "caption": "为你打call！",
+          "category": "为你打call"
+        },
+        {
+          "caption": "惊呆了！",
+          "category": "惊呆了"
+        },
+        {
+          "caption": "发红包啦！",
+          "category": "发红包"
+        },
+        {
+          "caption": "我已经看透了一切",
+          "category": "看透一切"
+        },
+        {
+          "caption": "哈？",
+          "category": "哈"
+        },
+        {
+          "caption": "奥利给！",
+          "category": "奥利给"
+        },
+        {
+          "caption": "我不行了",
+          "category": "我不行了"
+        },
+        {
+          "caption": "谢谢你！",
+          "category": "谢谢你",
+          "enabled": false
+        }
+      ]
+    },
+    {
+      "file": "03.jpg",
+      "source_name": "Gemini_Generated_Image_urqswmurqswmurqs.jpg",
+      "cells": [
+        {
+          "caption": "好开心！",
+          "category": "好开心"
+        },
+        {
+          "caption": "气死我了！",
+          "category": "气死我了"
+        },
+        {
+          "caption": "呜呜呜…",
+          "category": "呜呜呜"
+        },
+        {
+          "caption": "吃吃！",
+          "category": "吃吃"
+        },
+        {
+          "caption": "困了…",
+          "category": "困了"
+        },
+        {
+          "caption": "w(°Д°)w",
+          "category": "惊恐"
+        },
+        {
+          "caption": "加油，冲鸭！",
+          "category": "加油冲鸭"
+        },
+        {
+          "caption": "啊？",
+          "category": "啊"
+        },
+        {
+          "caption": "哼！",
+          "category": "哼"
+        },
+        {
+          "caption": "摸鱼不想动",
+          "category": "摸鱼不想动"
+        },
+        {
+          "caption": "比心～",
+          "category": "比心"
+        },
+        {
+          "caption": "居然是这样！！",
+          "category": "居然是这样"
+        },
+        {
+          "caption": "收到！",
+          "category": "收到",
+          "enabled": false
+        },
+        {
+          "caption": "棒！",
+          "category": "棒"
+        },
+        {
+          "caption": "不舒服",
+          "category": "不舒服"
+        },
+        {
+          "caption": "计划通",
+          "category": "计划通"
+        }
+      ]
+    },
+    {
+      "file": "04.jpg",
+      "source_name": "Gemini_Generated_Image_99lxmm99lxmm99lx.jpg",
+      "cells": [
+        {
+          "caption": "暗中观察",
+          "category": "暗中观察"
+        },
+        {
+          "caption": "谢谢你！",
+          "category": "谢谢你"
+        },
+        {
+          "caption": "赞！好耶！",
+          "category": "赞好耶"
+        },
+        {
+          "caption": "干饭中",
+          "category": "干饭中"
+        },
+        {
+          "caption": "拜托拜托！",
+          "category": "拜托"
+        },
+        {
+          "caption": "听歌中",
+          "category": "听歌"
+        },
+        {
+          "caption": "谢谢老财！",
+          "category": "谢谢老财"
+        },
+        {
+          "caption": "那能怎么办呢",
+          "category": "那能怎么办呢"
+        },
+        {
+          "caption": "努力中…",
+          "category": "努力中"
+        },
+        {
+          "caption": "吃瓜群众",
+          "category": "吃瓜群众"
+        },
+        {
+          "caption": "快上人！",
+          "category": "快上人"
+        },
+        {
+          "caption": "想吃…",
+          "category": "想吃"
+        },
+        {
+          "caption": "耶～",
+          "category": "耶"
+        },
+        {
+          "caption": "不！",
+          "category": "不"
+        },
+        {
+          "caption": "要贴贴",
+          "category": "要贴贴"
+        },
+        {
+          "caption": "晚安",
+          "category": "晚安"
+        }
+      ]
+    }
+  ]
+}

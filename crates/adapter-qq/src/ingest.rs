@@ -204,6 +204,13 @@ pub async fn ingest_message(
         ],
     ).await?;
     let msg_id = tx.last_insert_rowid().await?;
+    for (index, url) in image_urls.iter().take(3).enumerate() {
+        tx.execute(
+            "INSERT INTO message_images(msg_id,image_index,url) VALUES(?1,?2,?3)",
+            params![msg_id, index as i64, url],
+        )
+        .await?;
+    }
     tx.commit().await.context("提交摄取事务失败")?;
 
     bus.publish(Event::MessageReceived(MessageReceivedPayload {
