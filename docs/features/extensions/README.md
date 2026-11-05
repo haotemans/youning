@@ -8,7 +8,7 @@ Tool、Skill、Plugin 宿主与 MCP 接入的契约；具体编译期插件在�
 
 | 功能 | 当前实现边界 | 主源码文件 |
 | --- | --- | ---: |
-| [Plugin、Skill 与 Tool](host.md) | 编译期插件已实现（动态安装未实现） | 8 |
+| [Plugin、Skill 与 Tool](host.md) | 编译期插件已实现（动态安装未实现） | 9 |
 | [MCP 服务连接](mcp.md) | 已实现 stdio 工具子集 | 3 |
 
 独立插件文档见 [plugins/README.md](plugins/README.md)，插件的启停、调用范围与生命周期由 [扩展宿主](host.md) 统一约束。

@@ -12,6 +12,8 @@
 - 当前插件在构建时编译进程序，面板支持列出、配置和启停已编译插件；把任意插件文件丢进目录不会自动安装。
 - `SKILL.md` 是插件的参考或使用契约，不代表运行时会自动解析并安装 Markdown Skill。
 
+好友与入群申请通过受限 `HostServices.membership` 服务提供，仅主理人插件且已声明管理能力可用；宿主传递已应用的配置和会话范围，适配层按真实申请核验权限。共享申请动作与群规则类型在 [`membership.rs`](../../../crates/plugin-api/src/membership.rs)，业务约束见[主理人](plugins/moderator.md)。
+
 ## 边界
 
 - 编译进程序的第三方 Rust 插件是受信任本地代码，不是进程级隔离；动态插件市场、面板上传编译属于规划。
@@ -23,6 +25,7 @@
 - [`crates/core/src/plugins/invocation.rs`](../../../crates/core/src/plugins/invocation.rs)
 - [`crates/core/src/skills.rs`](../../../crates/core/src/skills.rs)
 - [`crates/plugin-api/src/lib.rs`](../../../crates/plugin-api/src/lib.rs)
+- [`crates/plugin-api/src/membership.rs`](../../../crates/plugin-api/src/membership.rs)
 - [`crates/plugin-api/src/skills.rs`](../../../crates/plugin-api/src/skills.rs)
 - [`crates/plugin-api/src/tools.rs`](../../../crates/plugin-api/src/tools.rs)
 - [`crates/webui/src/plugins_api.rs`](../../../crates/webui/src/plugins_api.rs)

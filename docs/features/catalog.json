@@ -140,7 +140,8 @@
         "crates/plugin-api/src/skills.rs",
         "crates/plugin-api/src/tools.rs",
         "crates/webui/src/plugins_api.rs",
-        "webui-frontend/src/views/Plugins.vue"
+        "webui-frontend/src/views/Plugins.vue",
+        "crates/plugin-api/src/membership.rs"
       ],
       "tests": [
         "crates/core/tests/plugin_host.rs",
@@ -342,16 +343,22 @@
     },
     {
       "id": "plugin-moderator",
-      "title": "敬之：群聊管理",
+      "title": "敬之：群聊与好友管理",
       "status": "已实现权限检查（需真实 QQ 验收）",
       "doc": "docs/features/extensions/plugins/moderator.md",
       "source": [
         "crates/adapter-qq/src/moderation.rs",
-        "plugins/moderator/src/lib.rs"
+        "plugins/moderator/src/lib.rs",
+        "crates/core/src/membership.rs",
+        "crates/adapter-qq/src/moderation/membership.rs",
+        "plugins/moderator/src/membership.rs"
       ],
       "tests": [
         "crates/adapter-qq/src/moderation/tests.rs",
-        "plugins/moderator/src/tests.rs"
+        "plugins/moderator/src/tests.rs",
+        "crates/core/tests/membership.rs",
+        "crates/adapter-qq/src/moderation/membership/tests.rs",
+        "plugins/moderator/src/membership/tests.rs"
       ],
       "module": "extensions/plugins"
     }

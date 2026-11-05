@@ -3,22 +3,29 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use yuantuan_plugin_api::*;
+mod membership;
 
 pub fn plugin() -> Arc<dyn Plugin> {
-    Arc::new(ModeratorPlugin)
+    Arc::new(ModeratorPlugin::default())
 }
-pub struct ModeratorPlugin;
+#[derive(Default)]
+pub struct ModeratorPlugin {
+    worker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
 #[async_trait]
 impl Plugin for ModeratorPlugin {
     fn presentation(&self) -> PluginPresentation {
         PluginPresentation {
-            purpose: "撤回、禁言与群聊管理",
+            purpose: "撤回、禁言、好友申请与入群审核",
             poem: "周颂·敬之",
             verse: "敬之敬之，天维显思。",
             examples: vec![
                 "引用目标消息后发送 /撤回",
                 "/禁言 @成员 10",
                 "/解除禁言 @成员",
+                "/入群申请",
+                "/好友申请",
+                "/同意申请 申请编号",
             ],
         }
     }
@@ -27,7 +34,7 @@ impl Plugin for ModeratorPlugin {
             id: "moderator",
             name: "敬之",
             version: env!("CARGO_PKG_VERSION"),
-            description: "群管理员撤回消息、禁言和解除禁言，实时核验权限",
+            description: "实时核验权限的群管理、好友申请与按群规自动入群审核",
             api_version: API_VERSION,
         }
     }
@@ -39,6 +46,30 @@ impl Plugin for ModeratorPlugin {
     }
     fn config_fields(&self) -> Vec<ConfigField> {
         vec![
+            ConfigField {
+                key: "auto_group_review",
+                label: "按群规自动审核入群申请",
+                kind: ConfigKind::Boolean,
+                default: json!(false),
+                secret: false,
+                options: vec![],
+            },
+            ConfigField {
+                key: "group_rules",
+                label: "各群入群规则（按群号配置规则与最低QQ等级）",
+                kind: ConfigKind::String,
+                default: json!("{}"),
+                secret: false,
+                options: vec![],
+            },
+            ConfigField {
+                key: "max_auto_reviews_per_day",
+                label: "每日自动审核上限",
+                kind: ConfigKind::Integer,
+                default: json!(20),
+                secret: false,
+                options: vec![],
+            },
             ConfigField {
                 key: "operator_qqs",
                 label: "允许操作的管理员 QQ（逗号分隔，留空允许本群全部管理员）",
@@ -60,6 +91,13 @@ impl Plugin for ModeratorPlugin {
     fn validate_config(&self, config: &Value) -> Result<()> {
         validate_config(&self.config_fields(), config)?;
         operators(config["operator_qqs"].as_str().unwrap_or(""))?;
+        admission_rules(config)?;
+        if config
+            .get("max_auto_reviews_per_day")
+            .is_some_and(|v| !v.as_u64().is_some_and(|n| (1..=100).contains(&n)))
+        {
+            bail!("每日自动审核上限须为1–100");
+        }
         if config
             .get("max_ban_minutes")
             .is_some_and(|v| !v.as_u64().is_some_and(|n| (1..=43200).contains(&n)))
@@ -82,7 +120,27 @@ impl Plugin for ModeratorPlugin {
             caps.tools.push(handler.clone());
             caps.skills.push(handler);
         }
+        membership::register(&mut caps, ctx.host.clone(), operators);
+        let worker = membership::spawn(ctx.host, config);
+        if let Some(previous) = self.worker.lock().unwrap().replace(worker) {
+            previous.abort();
+        }
         Ok(caps)
+    }
+    async fn stop(&self) -> Result<()> {
+        if let Some(worker) = self.worker.lock().unwrap().take() {
+            worker.abort();
+        }
+        Ok(())
+    }
+}
+impl Drop for ModeratorPlugin {
+    fn drop(&mut self) {
+        if let Ok(worker) = self.worker.get_mut() {
+            if let Some(worker) = worker.take() {
+                worker.abort();
+            }
+        }
     }
 }
 fn operators(text: &str) -> Result<Vec<u64>> {

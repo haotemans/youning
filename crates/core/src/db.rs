@@ -255,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_msg_pending ON messages(processed_at) WHERE proce
 "#;
 
 /// 迁移列表按版本升序；每步一个事务，成功后推进 user_version
-const MIGRATIONS: [(&str, &str); 9] = [
+const MIGRATIONS: &[(&str, &str)] = &[
     ("V0.1 基线：14 张表（data-model.md）", V1_SQL),
     (
         "V0.2 媒体生成：media_providers/models/tasks/credits 4 张表",
@@ -307,6 +307,30 @@ const MIGRATIONS: [(&str, &str); 9] = [
             PRIMARY KEY(msg_id,image_index)
         );
     "#,
+    ),
+    (
+        "V0.10 好友及入群申请持久审核队列",
+        r#"
+        CREATE TABLE IF NOT EXISTS membership_requests (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          bot_qq TEXT NOT NULL,
+          request_type TEXT NOT NULL CHECK(request_type IN ('friend','group')),
+          sub_type TEXT NOT NULL,
+          group_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          flag TEXT NOT NULL,
+          comment TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          note TEXT NOT NULL DEFAULT '',
+          assessment TEXT,
+          reviewed_at INTEGER NOT NULL DEFAULT 0,
+          auto_attempts INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(bot_qq,request_type,group_id,sub_type,flag)
+        );
+        CREATE INDEX IF NOT EXISTS idx_membership_pending ON membership_requests(bot_qq,status,reviewed_at,id);
+        "#,
     ),
 ];
 

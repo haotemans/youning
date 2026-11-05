@@ -843,3 +843,131 @@ async fn skill_catalog_tracks_chat_scope_and_plugin_lifecycle() {
     assert!(!skill.available_in_chat("allowed"));
     assert!(registry.describe_for_chat("allowed").is_empty());
 }
+
+#[tokio::test]
+async fn membership_service_is_restricted_to_declared_moderator_and_receives_applied_scope() {
+    struct Service(AtomicUsize);
+    #[async_trait]
+    impl GroupModeration for Service {
+        async fn execute(&self, _: &ToolCtx, _: ModerationAction) -> Result<()> {
+            Ok(())
+        }
+        async fn membership(
+            &self,
+            _: &ToolCtx,
+            _: MembershipAction,
+            policy: &Value,
+            allowed: Option<&[String]>,
+        ) -> Result<Value> {
+            assert_eq!(policy, &json!({}));
+            assert_eq!(allowed.unwrap(), &["42".to_string()]);
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(json!([]))
+        }
+    }
+    struct P {
+        id: &'static str,
+        declared: bool,
+    }
+    struct T {
+        host: Arc<dyn HostServices>,
+        name: &'static str,
+    }
+    #[async_trait]
+    impl Plugin for P {
+        fn metadata(&self) -> PluginMeta {
+            PluginMeta {
+                id: self.id,
+                name: "test",
+                version: "1",
+                description: "test",
+                api_version: API_VERSION,
+            }
+        }
+        fn uses_group_moderation(&self) -> bool {
+            self.declared
+        }
+        async fn start(&self, ctx: PluginContext, _: Value) -> Result<Capabilities> {
+            Ok(Capabilities {
+                tools: vec![Arc::new(T {
+                    host: ctx.host,
+                    name: if self.id == "moderator" {
+                        "moderator.requests"
+                    } else {
+                        "other.requests"
+                    },
+                })],
+                skills: vec![],
+            })
+        }
+    }
+    #[async_trait]
+    impl Tool for T {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> &'static str {
+            "test"
+        }
+        async fn call(&self, ctx: &ToolCtx, _: Value) -> Result<ToolOutput> {
+            let result = self
+                .host
+                .membership(
+                    ctx,
+                    MembershipAction::List {
+                        kind: "group".into(),
+                    },
+                )
+                .await?;
+            Ok(ToolOutput {
+                summary: "ok".into(),
+                artifacts: vec![],
+                data: result,
+            })
+        }
+    }
+    for (id, declared, success) in [
+        ("moderator", true, true),
+        ("moderator", false, false),
+        ("other", true, false),
+    ] {
+        let f = Fixture::new();
+        f.settings(
+            id,
+            PluginSettings {
+                allowed_chats: Some(vec!["42".into()]),
+                ..enabled()
+            },
+        );
+        let service = Arc::new(Service(AtomicUsize::new(0)));
+        let tools = Registry::new();
+        let manager = PluginManager::load_with_moderation(
+            vec![Arc::new(P { id, declared })],
+            f.root.clone(),
+            f.root.join("source"),
+            tools.clone(),
+            SkillRegistry::new(),
+            Arc::new(RwLock::new(None)),
+            Some(service.clone()),
+        )
+        .await
+        .unwrap();
+        let tool = tools
+            .get(if id == "moderator" {
+                "moderator.requests"
+            } else {
+                "other.requests"
+            })
+            .unwrap();
+        let context = ToolCtx {
+            task_id: None,
+            chat_id: "42".into(),
+            chat_type: "group".into(),
+            sender_pid: "p_123".into(),
+            locale: None,
+        };
+        assert_eq!(tool.call(&context, json!({})).await.is_ok(), success);
+        assert_eq!(service.0.load(Ordering::Relaxed), usize::from(success));
+        manager.shutdown().await;
+    }
+}
