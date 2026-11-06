@@ -79,10 +79,10 @@ impl Drop for Rig {
 }
 
 #[tokio::test]
-async fn refresh_excludes_sensitive_text_and_cannot_cite_messages_outside_the_loaded_window() {
+async fn refresh_reads_the_oldest_pending_prefix_and_rejects_unloaded_evidence() {
     let r = Rig::new(json!({"updates":[
         {"field":"interests","value":"喜欢玩明日方舟","evidence_msg_id":1,"evidence_quote":"我喜欢玩明日方舟"},
-        {"field":"preferred_name","value":"不应写入","evidence_msg_id":169,"evidence_quote":"我的密码不应该入模"}
+        {"field":"preferred_name","value":"不应写入","evidence_msg_id":159,"evidence_quote":"我的密码不应该入模"}
     ]}).to_string()).await;
     let mut conn = db::connect(&r.path).await.unwrap();
     conn.execute(
@@ -94,18 +94,28 @@ async fn refresh_excludes_sensitive_text_and_cannot_cite_messages_outside_the_lo
     for id in 1..=170 {
         let text = match id {
             1 => "我喜欢玩明日方舟",
-            169 => "我的密码不应该入模",
+            159 => "我的密码不应该入模",
             _ => "只是一条普通的讨论消息",
         };
         conn.execute("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(?1,'g','group','p_a',?2,?1)",params![id,text]).await.unwrap();
     }
     let result = refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
-    assert_eq!(result.status, "no_evidence");
+    assert_eq!(result.status, "updated");
     assert_eq!(result.inspected_messages, 159);
-    assert!(memory::profile(&mut conn, "p_a", i64::MAX)
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        memory::profile(&mut conn, "p_a", i64::MAX)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let processed: i64 = sqlx::query_scalar(
+        "SELECT cursor FROM memory_progress WHERE stage='portrait' AND owner_id='p_a'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(processed, 160);
     let calls = r.calls.lock().unwrap();
     let input: Value =
         serde_json::from_str(calls[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
@@ -114,7 +124,7 @@ async fn refresh_excludes_sensitive_text_and_cannot_cite_messages_outside_the_lo
         .as_array()
         .unwrap()
         .iter()
-        .all(|m| m["msg_id"].as_i64().unwrap() > 1));
+        .all(|m| m["msg_id"].as_i64().unwrap() <= 160));
 }
 
 #[tokio::test]
@@ -330,4 +340,29 @@ async fn simultaneous_explicit_refreshes_use_one_model_at_a_time() {
     b.unwrap();
     assert_eq!(r.calls.lock().unwrap().len(), 2);
     assert_eq!(r.peak.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn character_budget_never_advances_past_unread_messages() {
+    let r = Rig::new(json!({"updates":[]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    conn.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_a',1,1)")
+        .await
+        .unwrap();
+    for id in 1..=20 {
+        conn.execute("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(?1,'g','group','p_a',?2,?1)",params![id,"原".repeat(4000)]).await.unwrap();
+    }
+    for expected in [8, 16, 20] {
+        refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
+        let processed: i64 = sqlx::query_scalar(
+            "SELECT cursor FROM memory_progress WHERE stage='portrait' AND owner_id='p_a'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(processed, expected);
+        conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:p_a'").await.unwrap();
+    }
+    refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
+    assert_eq!(r.calls.lock().unwrap().len(), 3);
 }

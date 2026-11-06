@@ -86,7 +86,9 @@ pub async fn status(
         day AS (SELECT now,((now+?2*60)/86400)*86400-?2*60 AS start FROM clock)
         SELECT COUNT(m.msg_id) AS total,COUNT(CASE WHEN m.ts>=day.start AND m.ts<day.start+86400 THEN 1 END) AS today_count,
           MAX(m.ts) AS last_seen,MAX(CASE WHEN length(trim(COALESCE(m.text,'')))>=4 THEN m.msg_id END) AS latest_text_id,
-          (SELECT value FROM state_kv WHERE key='profile_refresh:v1:'||?1) AS refresh
+          (SELECT value FROM state_kv WHERE key='profile_refresh:v1:'||?1) AS refresh,
+          COALESCE((SELECT cursor FROM memory_progress WHERE stage='portrait' AND owner_id=?1 AND chat_type=''),0) AS cursor,
+          COALESCE((SELECT baseline FROM memory_progress WHERE stage='portrait' AND owner_id=?1 AND chat_type=''),0) AS baseline
         FROM day LEFT JOIN messages m ON m.sender_pid=?1 AND m.chat_type IN ('group','private')")
         .bind(&id).bind(q.offset()).fetch_one(&mut *conn).await.map_err(db_error)?;
     let raw: Option<String> = row.try_get("refresh").map_err(db_error)?;
@@ -97,10 +99,12 @@ pub async fn status(
         .try_get::<Option<i64>, _>("latest_text_id")
         .map_err(db_error)?
         .unwrap_or(0);
+    let cursor: i64 = row.try_get("cursor").map_err(db_error)?;
+    let baseline: i64 = row.try_get("baseline").map_err(db_error)?;
     Ok(Json(
         json!({"total":row.try_get::<i64,_>("total").map_err(db_error)?,"today_count":row.try_get::<i64,_>("today_count").map_err(db_error)?,
         "last_seen":row.try_get::<Option<i64>,_>("last_seen").map_err(db_error)?,
-        "profile_refresh":refresh,"pending":latest>refresh["cutoff"].as_i64().unwrap_or(0)}),
+        "profile_refresh":refresh,"processed_through":cursor,"legacy_baseline":baseline,"pending":latest>cursor}),
     ))
 }
 
@@ -184,5 +188,64 @@ pub async fn messages(
     tx.commit().await.map_err(db_error)?;
     Ok(Json(
         json!({"messages":messages,"total":total,"page":page,"page_size":size}),
+    ))
+}
+
+pub async fn profile_history(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<ActivityQuery>,
+) -> ApiResult {
+    let mut conn = state.open_db().await.map_err(db_error)?;
+    q.validate(&mut conn).await?;
+    check_person(&mut conn, &id).await?;
+    let mut tx = sqlx::Connection::begin(&mut *conn)
+        .await
+        .map_err(db_error)?;
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM person_profile_versions WHERE person_id=?1")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_error)?;
+    let size = q.page_size.unwrap_or(24);
+    let page = q.page.unwrap_or(1).min((total - 1).max(0) / size + 1);
+    let rows=sqlx::query("SELECT v.*,EXISTS(SELECT 1 FROM person_profile_facts p WHERE p.person_id=v.person_id AND p.field=v.field AND p.source_msg_id=v.source_msg_id AND p.content=v.content AND p.evidence_quote=v.evidence_quote) AS current,
+       EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=v.source_msg_id AND m.sender_pid=v.person_id AND m.chat_id=v.source_chat_id AND m.chat_type=v.source_chat_type AND instr(m.text,v.evidence_quote)>0) AS source_valid
+       FROM person_profile_versions v WHERE v.person_id=?1 ORDER BY v.source_msg_id DESC,v.id DESC LIMIT ?2 OFFSET ?3")
+       .bind(&id).bind(size).bind((page-1)*size).fetch_all(&mut *tx).await.map_err(db_error)?;
+    let versions=rows.iter().map(|r|->sqlx::Result<Value>{
+        let content:String=r.try_get("content")?;let quote:String=r.try_get("evidence_quote")?;
+        let hidden=yuantuan_core::consolidation::is_sensitive(&content)||yuantuan_core::consolidation::is_sensitive(&quote);
+        Ok(json!({"id":r.try_get::<i64,_>("id")?,"field":r.try_get::<String,_>("field")?,"content":if hidden{"敏感内容已隐藏"}else{&content},
+           "evidence_quote":if hidden{""}else{&quote},"source_msg_id":r.try_get::<i64,_>("source_msg_id")?,"source_ts":r.try_get::<i64,_>("source_ts")?,"recorded_at":r.try_get::<i64,_>("recorded_at")?,
+           "current":r.try_get::<bool,_>("current")?,"source_valid":r.try_get::<bool,_>("source_valid")?,"conversation":conversation(r.try_get("source_chat_id")?,r.try_get("source_chat_type")?)}))
+    }).collect::<sqlx::Result<Vec<_>>>().map_err(db_error)?;
+    tx.commit().await.map_err(db_error)?;
+    Ok(Json(
+        json!({"versions":versions,"total":total,"page":page,"page_size":size}),
+    ))
+}
+
+pub async fn profile_source(state: &AppState, id: i64) -> ApiResult {
+    let mut conn = state.open_db().await.map_err(db_error)?;
+    let source=sqlx::query("SELECT m.*,(SELECT display_name FROM persons WHERE person_id=m.sender_pid) AS name FROM person_profile_versions v JOIN messages m ON m.msg_id=v.source_msg_id AND m.sender_pid=v.person_id AND m.chat_id=v.source_chat_id AND m.chat_type=v.source_chat_type WHERE v.id=?1 AND instr(m.text,v.evidence_quote)>0")
+        .bind(id).fetch_optional(&mut *conn).await.map_err(db_error)?;
+    let Some(r) = source else {
+        return Ok(Json(json!({"messages":[],"conversation":null})));
+    };
+    let text = r
+        .try_get::<Option<String>, _>("text")
+        .map_err(db_error)?
+        .unwrap_or_default();
+    let text = if yuantuan_core::consolidation::is_sensitive(&text) {
+        "敏感内容已隐藏".to_owned()
+    } else {
+        text.chars().take(4000).collect()
+    };
+    Ok(Json(
+        json!({"conversation":conversation(Some(r.try_get("chat_id").map_err(db_error)?),Some(r.try_get("chat_type").map_err(db_error)?)),"messages":[{
+        "msg_id":r.try_get::<i64,_>("msg_id").map_err(db_error)?,"person_id":r.try_get::<String,_>("sender_pid").map_err(db_error)?,"name":r.try_get::<Option<String>,_>("name").map_err(db_error)?,"text":text,
+        "ts":r.try_get::<i64,_>("ts").map_err(db_error)?,"has_image":r.try_get::<bool,_>("has_image").map_err(db_error)?}]}),
     ))
 }

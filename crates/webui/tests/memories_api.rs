@@ -101,6 +101,98 @@ impl Rig {
 }
 
 #[tokio::test]
+async fn profile_history_keeps_superseded_values_and_original_sources() {
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    conn.execute_batch("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(5,'10','private','p_101','我现在使用 Python',5)").await.unwrap();
+    yuantuan_core::memory::update_profile(
+        &mut conn,
+        "p_101",
+        "10",
+        5,
+        5,
+        &yuantuan_core::memory::ProfileUpdate {
+            field: yuantuan_core::memory::ProfileField::TechnicalPreferences,
+            value: "使用 Python".into(),
+            evidence_msg_id: 5,
+            evidence_quote: "我现在使用 Python".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let latest = r
+        .get("/api/memories/people/p_101/profile-history?page_size=1")
+        .await;
+    assert_eq!(latest["total"], 2);
+    assert_eq!(latest["versions"][0]["content"], "使用 Python");
+    assert_eq!(latest["versions"][0]["current"], true);
+    assert_eq!(
+        latest["versions"][0]["conversation"]["chat_type"],
+        "private"
+    );
+    let previous = r
+        .get("/api/memories/people/p_101/profile-history?page_size=1&page=2")
+        .await;
+    assert_eq!(previous["versions"][0]["content"], "长期使用 Rust");
+    assert_eq!(previous["versions"][0]["current"], false);
+    let id = previous["versions"][0]["id"].as_i64().unwrap();
+    let source = r
+        .get(&format!("/api/memories/{id}/source?kind=profile"))
+        .await;
+    assert_eq!(source["messages"][0]["text"], "我长期使用 Rust");
+    assert_eq!(source["conversation"]["chat_type"], "group");
+    assert_eq!(
+        r.http
+            .get(format!(
+                "{}/api/memories/people/p_101/profile-history",
+                r.base
+            ))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+}
+
+#[tokio::test]
+async fn new_diaries_keep_each_conversation_and_legacy_summaries() {
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    conn.execute_batch("INSERT INTO memory_batches(id,stage,owner_id,chat_type,from_id,end_id,status,started_at,lease_until) VALUES
+      (1,'conversation','10','group',0,4,'completed',5,600),(2,'conversation','10','private',0,4,'completed',5,600);
+      INSERT INTO memory_diary_entries(batch_id,owner_type,owner_id,source_chat_id,source_chat_type,date,content,source_msg_id,source_end_msg_id,message_count,created_at) VALUES
+      (1,'person','p_101','10','group','2026-11-05','群聊中的新记录',1,4,1,5),
+      (2,'person','p_101','10','private','2026-11-05','私聊中的新记录',2,2,1,6);").await.unwrap();
+    let all = r.get("/api/summaries?person_id=p_101").await;
+    assert_eq!(all["total"], 3);
+    let group = r
+        .get("/api/summaries?person_id=p_101&chat_id=10&chat_type=group")
+        .await;
+    assert_eq!(group["total"], 1);
+    assert_eq!(group["summaries"][0]["content"], "群聊中的新记录");
+    let private = r
+        .get("/api/summaries?person_id=p_101&chat_id=10&chat_type=private")
+        .await;
+    assert_eq!(private["total"], 1);
+    assert_eq!(private["summaries"][0]["content"], "私聊中的新记录");
+    let id = group["summaries"][0]["id"].as_i64().unwrap();
+    assert!(id < 0);
+    let source = r
+        .get(&format!("/api/memories/{id}/source?kind=summary"))
+        .await;
+    assert_eq!(source["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(source["messages"][0]["person_id"], "p_101");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT summary FROM summaries WHERE id=1")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+        "人物每日摘要"
+    );
+}
+
+#[tokio::test]
 async fn original_messages_are_paginated_and_use_real_local_day_boundaries() {
     let r = Rig::start().await;
     let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();

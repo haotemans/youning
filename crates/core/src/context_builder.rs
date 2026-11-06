@@ -242,10 +242,10 @@ pub async fn capture_reply_snapshot(
         .chain(quotes.iter().map(|m| m.text.as_str()))
         .collect::<Vec<_>>()
         .join(" ");
-    let memories = memory::recall(
+    let memories = memory::recall_scoped(
         &mut tx,
         &anchor.sender_pid,
-        &anchor.chat_id,
+        &memory::processing::Scope::conversation(&anchor.chat_id, &anchor.chat_type),
         cutoff,
         &query,
         cfg.roster_mem_per,

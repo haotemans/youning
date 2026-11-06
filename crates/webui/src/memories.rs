@@ -63,15 +63,16 @@ fn cte(summary: bool) -> String {
     let records = if summary {
         "SELECT id,owner_type,owner_id,summary AS content,'consolidation' AS source,created_at,created_at AS updated_at,
             date,period,msg_id_start AS source_msg_id,msg_id_end AS source_end_msg_id,
-            CASE WHEN owner_type='chat' THEN owner_id END AS chat_id FROM summaries"
+            CASE WHEN owner_type='chat' THEN owner_id END AS chat_id,NULL AS stored_chat_type FROM summaries
+         UNION ALL SELECT -id,owner_type,owner_id,content,'consolidation',created_at,created_at,date,'daily',source_msg_id,source_end_msg_id,source_chat_id,source_chat_type FROM memory_diary_entries"
     } else {
         "SELECT id,owner_type,owner_id,content,source,created_at,updated_at,NULL AS date,NULL AS period,
-            source_msg_id,source_end_msg_id,CASE WHEN owner_type='chat' THEN owner_id ELSE source_chat_id END AS chat_id FROM long_memories"
+            source_msg_id,source_end_msg_id,CASE WHEN owner_type='chat' THEN owner_id ELSE source_chat_id END AS chat_id,NULL AS stored_chat_type FROM long_memories"
     };
     format!("WITH records AS ({records}), enriched AS (
         SELECT r.*,COALESCE(NULLIF(p.display_name,''),CASE WHEN r.owner_type='self' THEN '云团' END) AS owner_name,
         (SELECT platform_uid FROM identities WHERE person_id=p.person_id AND platform='qq' ORDER BY id DESC LIMIT 1) AS qq,
-        (SELECT chat_type FROM messages WHERE msg_id=r.source_msg_id AND chat_id=r.chat_id) AS chat_type,
+        COALESCE(r.stored_chat_type,(SELECT chat_type FROM messages WHERE msg_id=r.source_msg_id AND chat_id=r.chat_id)) AS chat_type,
         (SELECT card FROM member_profiles WHERE person_id=r.owner_id AND chat_id=r.chat_id) AS card
         FROM records r LEFT JOIN persons p ON p.person_id=CASE WHEN r.owner_type='self' THEN 'self' ELSE r.owner_id END)")
 }
@@ -162,10 +163,14 @@ async fn list(state: AppState, q: MemQuery, summary: bool) -> ApiResult {
     };
     let page = q.page.unwrap_or(1).min(((total - 1).max(0) / size) + 1);
     let mut b = filtered(summary, &q, false);
-    b.push(" ORDER BY updated_at DESC,id DESC LIMIT ")
-        .push_bind(size)
-        .push(" OFFSET ")
-        .push_bind((page - 1) * size);
+    b.push(if summary {
+        " ORDER BY date DESC,updated_at DESC,id DESC LIMIT "
+    } else {
+        " ORDER BY updated_at DESC,id DESC LIMIT "
+    })
+    .push_bind(size)
+    .push(" OFFSET ")
+    .push_bind((page - 1) * size);
     let rows = b.build().fetch_all(&mut *tx).await.map_err(db_error)?;
     let items=rows.iter().map(|r| -> sqlx::Result<Value> {
         let owner_id:String=r.try_get("owner_id")?;
@@ -303,6 +308,9 @@ pub async fn source(
     Path(id): Path<i64>,
     Query(q): Query<SourceQuery>,
 ) -> ApiResult {
+    if q.kind.as_deref() == Some("profile") {
+        return activity::profile_source(&state, id).await;
+    }
     let summary = match q.kind.as_deref().unwrap_or("memory") {
         "memory" => false,
         "summary" => true,
@@ -338,7 +346,7 @@ pub async fn source(
         .push(" AND ")
         .push_bind(end.unwrap_or(start));
     let owner_type: String = row.try_get("owner_type").map_err(db_error)?;
-    if end.is_none() && owner_type == "person" {
+    if owner_type == "person" {
         b.push(" AND m.sender_pid=")
             .push_bind(row.try_get::<String, _>("owner_id").map_err(db_error)?);
     }

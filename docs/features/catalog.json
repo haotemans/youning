@@ -83,7 +83,8 @@
         "webui-frontend/src/views/Memories.vue",
         "crates/core/src/vision.rs",
         "crates/core/src/memory/refresh.rs",
-        "crates/core/src/memory/nightly.rs"
+        "crates/core/src/memory/nightly.rs",
+        "crates/core/src/memory/processing.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
@@ -91,7 +92,8 @@
         "crates/core/tests/visual_context.rs",
         "crates/webui/tests/memories_api.rs",
         "webui-frontend/tests/memories-flow.spec.js",
-        "crates/core/tests/profile_refresh.rs"
+        "crates/core/tests/profile_refresh.rs",
+        "crates/core/tests/memory_storage.rs"
       ],
       "module": "core"
     },

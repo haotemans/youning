@@ -371,3 +371,18 @@ CREATE INDEX idx_events_ts ON events(ts);
 - 2026-10-02（Q26–Q30）：Task 章新增完工交接契约（result_summary + artifacts + key_data）与工具结果硬性截断规则。
 - 2026-10-02（Q34–Q37）：新增第十二章 events 表（Event Bus 落库副本，7 天轮转），供 trace 与任务可视化页查询。
 - 2026-10-09：按文档用途迁移目录，统一标题层级和引用；区分设计基线、实施记录与当前代码来源。
+
+
+## V11：增量记忆存储（2026-11-06）
+
+本节补充早期表设计；实际迁移以[db.rs](../../crates/core/src/db.rs)的V11事务为准，行为契约见[记忆功能](../features/core/memory.md)。
+
+| 表 | 关键边界 |
+| --- | --- |
+| `memory_progress` | `(stage, owner_id, chat_type)`唯一；`baseline`为旧数据兼容边界，`cursor`只在批次成功后推进 |
+| `memory_batches` | 记录固定输入区间、10分钟租约、running/completed/failed；同scope最多一个running批次 |
+| `memory_facts` | 原话事实及出处；同归属、内容和原消息唯一；结果投影到既有long_memories供兼容召回 |
+| `memory_diary_entries` | 按批次/归属唯一，单独保存会话类型、编号、实际日期、消息区间与发言数，不覆盖旧summaries |
+| `person_profile_versions` | 保存每次资料来源推进，当前表person_profile_facts仍保留；触发器原子归档，不构造旧版本 |
+
+消息增加会话类型/编号/消息ID及人物/消息ID索引，支撑连续前缀读取。迁移不删除原表与原始消息，不清理配置或凭据；旧窗口和画像整理进度仅作为兼容基线，不能等同于新处理器的完整覆盖证明。

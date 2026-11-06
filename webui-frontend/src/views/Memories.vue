@@ -39,12 +39,13 @@
           <span class="memory-avatar large"><img v-if="avatar(selectedPerson)" :src="avatar(selectedPerson)" alt="" referrerpolicy="no-referrer" @error="badAvatars.add(selectedPerson.id)" /><span v-else>{{ initial(selectedPerson) }}</span></span>
           <div class="identity-text"><span class="selected-name">{{ selectedPerson.name }}</span><span class="identity-id mono">{{ selectedPerson.qq ? `QQ ${selectedPerson.qq}` : selectedPerson.id }}</span></div>
           <n-button v-if="selectedPerson.id !== 'self'" size="small" secondary class="relations-link" :loading="refreshingProfile" :disabled="refreshingProfile" @click="refreshProfile">整理画像</n-button>
+          <n-button v-if="selectedPerson.id !== 'self'" size="small" secondary @click="openHistory">画像变更</n-button>
           <n-button size="small" secondary @click="router.push({ path: '/relations', query: { person: selectedPerson.id } })">关系图谱</n-button>
         </div>
         <div v-if="selectedPerson && activity" class="person-activity">
           <n-button text size="small" type="primary" @click="showToday">今天 {{ activity.today_count }} 条发言</n-button>
           <span v-if="activity.last_seen">最近发言 {{ fmtTs(activity.last_seen) }}</span>
-          <span>最近整理 {{ activity.profile_refresh.completed_at ? fmtTs(activity.profile_refresh.completed_at) : '尚未整理' }}</span>
+          <span>最近整理 {{ activity.profile_refresh.completed_at ? fmtTs(activity.profile_refresh.completed_at) : activity.legacy_baseline ? '时间未记录' : '尚未整理' }}</span>
           <n-tag size="tiny" :bordered="false">{{ refreshState }}</n-tag>
         </div>
         <n-alert v-if="activityError" type="error" class="memory-alert">{{ activityError }} <n-button text size="tiny" @click="loadActivity">重试</n-button></n-alert>
@@ -120,6 +121,21 @@
       </n-card>
     </div>
 
+    <n-drawer :show="historyOpen" :width="520" :style="{ maxWidth: '100vw' }" @update:show="closeHistory">
+      <n-drawer-content title="画像变更" closable>
+        <n-alert v-if="historyError" type="error">{{ historyError }} <n-button text size="tiny" @click="loadHistory">重试</n-button></n-alert>
+        <n-spin :show="historyLoading">
+          <article v-for="version in versions" :key="version.id" class="memory-record">
+            <div class="record-meta"><n-tag size="tiny" :bordered="false">{{ !version.source_valid ? '来源未核验' : version.current ? '当前资料' : '历史资料' }}</n-tag><span>{{ profileLabels[version.field] || version.field }}</span><time>{{ fmtTs(version.source_ts) }}</time></div>
+            <p class="memory-text">{{ version.content }}</p>
+            <blockquote v-if="version.evidence_quote" class="memory-text">{{ version.evidence_quote }}</blockquote>
+            <div class="record-meta"><span>{{ version.conversation?.label || '来源未记录' }}</span><n-button v-if="version.source_valid" text size="tiny" type="primary" @click="showVersionSource(version)">查看出处</n-button></div>
+          </article>
+          <EmptyState v-if="!historyLoading && !historyError && !versions.length" title="暂无变更记录" />
+        </n-spin>
+        <n-pagination v-if="historyTotal > 24" :page="historyPage" :page-size="24" :item-count="historyTotal" :disabled="historyLoading" @update:page="changeHistoryPage" />
+      </n-drawer-content>
+    </n-drawer>
     <n-drawer :show="sourceOpen" :width="520" :style="{ maxWidth: '100vw' }" @update:show="closeSource">
       <n-drawer-content :title="sourceData?.is_window ? '归纳出处' : '原消息'" closable>
         <n-alert v-if="sourceError" type="error" role="alert">{{ sourceError }} <n-button text size="tiny" @click="loadSource">重试</n-button></n-alert>
@@ -150,9 +166,10 @@ type Person = { id: string; name: string; qq?: string | null; avatar_url?: strin
 type Conversation = { id: string; chat_type: string | null; label: string }
 type Memory = { id: number; owner_type: string; owner_id: string; owner: Person; content: string; source: string; updated_at: number; date?: string; source_msg_id?: number; source_end_msg_id?: number; conversation?: Conversation; group_card?: string }
 type Profile = { field: string; content: string; evidence_quote: string; updated_at: number }
+type ProfileVersion = Omit<Profile, 'updated_at'> & { id: number; source_ts: number; source_valid: boolean; current: boolean; conversation?: Conversation }
 type Source = { conversation?: Conversation; is_window?: boolean; has_more?: boolean; messages: { msg_id: number; person_id: string; name?: string; text: string; ts: number; has_image: boolean }[] }
 type Message = { msg_id: number; text: string; ts: number; has_image: boolean; text_truncated?: boolean; conversation?: Conversation }
-type Activity = { today_count: number; last_seen?: number; pending: boolean; profile_refresh: { status?: string; attempt?: number; completed_at?: number } }
+type Activity = { legacy_baseline?: number; today_count: number; last_seen?: number; pending: boolean; profile_refresh: { status?: string; attempt?: number; completed_at?: number } }
 type Tab = 'memories' | 'summaries' | 'profile' | 'messages'
 const router = useRouter()
 const search = ref('')
@@ -186,6 +203,12 @@ const sourceOpen = ref(false)
 const sourceLoading = ref(false)
 const sourceError = ref('')
 const sourceData = ref<Source | null>(null)
+const historyOpen = ref(false)
+const historyLoading = ref(false)
+const historyError = ref('')
+const versions = ref<ProfileVersion[]>([])
+const historyPage = ref(1)
+const historyTotal = ref(0)
 let sourceRecord: { id: number; kind: string } | null = null
 let listController: AbortController | undefined
 let peopleController: AbortController | undefined
@@ -193,6 +216,7 @@ let conversationController: AbortController | undefined
 let sourceController: AbortController | undefined
 let refreshController: AbortController | undefined
 let activityController: AbortController | undefined
+let historyController: AbortController | undefined
 let activityTimer: ReturnType<typeof setInterval> | undefined
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
@@ -209,7 +233,7 @@ const refreshState = computed(() => {
   if (status === 'running' && (a?.profile_refresh.attempt || 0) > Date.now() / 1000 - 300) return '整理中'
   if (status === 'failed') return '整理失败'
   if (a?.pending) return '有新发言待整理'
-  return status === 'no_evidence' ? '暂无可确认新资料' : a?.profile_refresh.completed_at ? '已整理' : '尚未整理'
+  return status === 'no_evidence' ? '暂无可确认新资料' : a?.profile_refresh.completed_at ? '已整理' : a?.legacy_baseline ? '已有整理记录' : '尚未整理'
 })
 async function loadActivity() {
   activityController?.abort()
@@ -223,6 +247,22 @@ async function loadActivity() {
   } catch (e) { if (!disposed && !request.signal.aborted) activityError.value = errorText(e) }
 }
 function showToday() { messagesDate.value = localDate(); conversationKey.value = null; changeTab('messages') }
+function openHistory() { historyOpen.value = true; historyPage.value = 1; void loadHistory() }
+function closeHistory(value: boolean) { historyOpen.value = value; if (!value) { historyController?.abort(); versions.value = []; historyError.value = ''; historyLoading.value = false } }
+function changeHistoryPage(value: number) { historyPage.value = value; void loadHistory() }
+async function loadHistory() {
+  historyController?.abort()
+  const id = selectedPerson.value?.id
+  if (!id) return
+  const request = historyController = new AbortController()
+  historyLoading.value = true; historyError.value = ''; versions.value = []
+  try {
+    const { data } = await api.get(`/memories/people/${encodeURIComponent(id)}/profile-history?page=${historyPage.value}&page_size=24`, { signal: request.signal })
+    if (!disposed && !request.signal.aborted && selectedPerson.value?.id === id) { versions.value = data.versions || []; historyTotal.value = data.total || 0; historyPage.value = data.page || 1 }
+  } catch (e) { if (!disposed && !request.signal.aborted) historyError.value = errorText(e) }
+  finally { if (historyController === request) historyLoading.value = false }
+}
+function showVersionSource(version: ProfileVersion) { closeHistory(false); sourceRecord = { id: version.id, kind: 'profile' }; sourceOpen.value = true; void loadSource() }
 function query(includePerson = true) {
   const p = new URLSearchParams()
   if (includePerson && selectedPerson.value) p.set('person_id', selectedPerson.value.id)
@@ -301,6 +341,7 @@ async function refreshProfile() {
 function choosePerson(person: Person | null) {
   if (selectedPerson.value?.id === person?.id && tab.value === 'profile') return
   selectedPerson.value = person
+  closeHistory(false)
   activity.value = null; messagesDate.value = localDate(); void loadActivity()
   profileNotice.value = ''; profileRefreshFailed.value = false
   tab.value = 'profile'
@@ -311,7 +352,7 @@ function changePage(value: number) { page.value = value; records.value = []; mes
 function changePeoplePage(delta: number) { peoplePage.value += delta; void loadPeople() }
 function refresh() { void loadPeople(); void loadActivity(); if (tab.value !== 'profile') void loadConversations(); resetRecords() }
 watch(search, () => {
-  listController?.abort(); peopleController?.abort(); closeSource(false); clearTimeout(searchTimer)
+  listController?.abort(); peopleController?.abort(); closeSource(false); closeHistory(false); clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
     if (tab.value === 'messages' && selectedPerson.value) { resetRecords(); return }
     selectedPerson.value = null; if (tab.value !== 'profile') tab.value = 'memories'; peoplePage.value = 1; refresh()
@@ -339,7 +380,7 @@ onMounted(() => {
     if (tab.value === 'profile' || (tab.value === 'messages' && page.value === 1)) void loadCurrent()
   }, 60000)
 })
-onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); clearInterval(activityTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort(); refreshController?.abort(); activityController?.abort() })
+onBeforeUnmount(() => { disposed = true; clearTimeout(searchTimer); clearInterval(activityTimer); listController?.abort(); peopleController?.abort(); conversationController?.abort(); sourceController?.abort(); refreshController?.abort(); activityController?.abort(); historyController?.abort() })
 </script>
 
 <style scoped>

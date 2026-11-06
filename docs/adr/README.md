@@ -16,6 +16,7 @@ ADR 保存重要取舍与原因。`accepted` 表示接受该决定，不表示�
 | [0008](0008-grounded-bot-context.md) | 人物简档、话题记忆与回复快照 | 修订 Q26/Q27，保留 ADR-0007 的归属约束 |
 | [0009](0009-semantic-participation-policy.md) | 语义参与判断、回复承接与运行时约束 | 修订问句关键词/固定冷却策略，保留低打扰与任务边界 |
 | [0010](0010-sqlx-sqlite-access.md) | 用 SQLx 异步访问既有 SQLite 数据库 | 保留 V1–V7 数据与业务事务，迁移连接池及整条调用链 |
+| [0011](0011-incremental-memory-storage.md) | 增量记忆批次、原话事实、会话日记和画像版本 | 补充ADR-0008，修订Q9最近窗口抽样，保留旧记忆与当前档案 |
 
 编号保持稳定，修订和取代关系遵循[治理协议](../governance.md)。
 

@@ -2,22 +2,21 @@
 //! 调度：config [consolidation]（enabled / daily_time="HH:MM" / run_on_startup 调试项），
 //! tokio 定时任务 + AtomicBool 单实例锁（夜间归纳重跑会脏数据，见 runtime-design 三串行）。
 //!
-//! 执行（每 chat 独立，最新 500 条窗口，当日零新消息的 chat 跳过）：
+//! 执行：按会话类型和编号读取未归纳消息的连续前缀，每批最多500条/32000字，并保留分日来源。
 //! - @关系统计纯 SQL：窗口内 mentions 对计数 → relationship_events(kind='mention',
 //!   delta_familiar=0.01×count 单边单次封顶 0.05) → edges 增量累加 clamp(0..1)；
 //!   @bot 计入 self→该 user 的 familiar
 //! - LLM 提炼（decision 角色）：chat_summary / person_facts / group_facts / rel_events
-//! - 写入：summaries 每日 UPSERT、long_memories(consolidation)、rel_events→edges(trust)
+//! - 写入：带出处事实、按批次追加日记、兼容长期记忆、rel_events→edges(trust)
 //! - 敏感拒收：写入前每条 fact/summary/evidence 过 is_sensitive，命中丢弃记日志
 //!
-//! 幂等方案（简单可靠）：每 chat 处理“开始”即在 state_kv 记当日完成戳（先行占位，
-//! 中途进程崩则该 chat 当日损失一轮，可接受）；同日重复执行整 chat 跳过。
-//! summaries 另有 UNIQUE(owner_type,owner_id,period,date) + UPSERT 兜底防重。
+//! 批次结果与游标同事务提交；模型失败不消费未处理消息。@统计使用独立游标，不重复累计。
 
 use crate::db::params;
-use crate::db::SqliteExt;
+use crate::db::{OptionalExtension, SqliteExt};
 use crate::event::{ChatConsolidationOutcome, ConsolidationDonePayload, Event, EventBus};
 use crate::llm::{LlmGateway, Role};
+use crate::memory::processing;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -44,6 +43,7 @@ pub struct ConsolidationCfg {
     pub run_on_startup: bool,
     pub portrait_daily_limit: usize,
     pub portrait_interval_secs: u64,
+    pub conversation_daily_limit: usize,
 }
 
 impl Default for ConsolidationCfg {
@@ -54,6 +54,7 @@ impl Default for ConsolidationCfg {
             run_on_startup: false,
             portrait_daily_limit: 10,
             portrait_interval_secs: 60,
+            conversation_daily_limit: 20,
         }
     }
 }
@@ -65,6 +66,10 @@ impl ConsolidationCfg {
             "每日执行时刻须为 HH:MM"
         );
         anyhow::ensure!(self.portrait_daily_limit <= 100, "画像每日人数须为0至100");
+        anyhow::ensure!(
+            self.conversation_daily_limit <= 200,
+            "会话每日批次须为0至200"
+        );
         anyhow::ensure!(
             (60..=3600).contains(&self.portrait_interval_secs),
             "画像间隔须为60至3600秒"
@@ -97,6 +102,7 @@ pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
         loop {
             let (start, end) = night_window(now_secs(), &deps.cfg.daily_time);
             if (start..end).contains(&now_secs()) {
+                run_once(&deps).await;
                 if let Some(gateway) = &deps.llm {
                     let options = crate::memory::nightly::Options {
                         date: today_str(&deps.db_path).await,
@@ -110,8 +116,7 @@ pub fn spawn_scheduler(deps: ConsolidationDeps) -> JoinHandle<()> {
                         warn!(error=%e,"夜间人物画像整理失败，保留现有资料");
                     }
                 }
-                // Group memory and portrait model work share this serial scheduler.
-                run_once(&deps).await;
+                // Both derived stores are updated by this serial scheduler.
             }
             let (start, _) = night_window(now_secs(), &deps.cfg.daily_time);
             let next = if start > now_secs() {
@@ -151,11 +156,43 @@ pub async fn run_once(deps: &ConsolidationDeps) {
     info!("夜间归纳开始");
 
     let today = today_str(&deps.db_path).await;
-    let chat_ids = list_chats(&deps.db_path).await;
+    let upper: Result<i64> = async {
+        let mut conn = crate::db::connect(&deps.db_path).await?;
+        Ok(
+            sqlx::query_scalar::<_, Option<i64>>("SELECT MAX(msg_id) FROM messages")
+                .fetch_one(&mut *conn)
+                .await?
+                .unwrap_or(0),
+        )
+    }
+    .await;
+    let upper = match upper {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error=%e,"无法固定归纳消息边界");
+            return;
+        }
+    };
+    let chat_ids = list_chats(&deps.db_path, upper).await;
     let mut outcomes: Vec<ChatConsolidationOutcome> = Vec::new();
-    for chat_id in &chat_ids {
-        let outcome = process_chat(deps, chat_id, &today).await;
-        outcomes.push(outcome);
+    let mut deferred = std::collections::BTreeSet::new();
+    for _ in 0..=deps.cfg.conversation_daily_limit.min(200) {
+        let mut advanced = false;
+        for (chat_id, chat_type) in &chat_ids {
+            if deferred.contains(&(chat_id.clone(), chat_type.clone())) {
+                continue;
+            }
+            let outcome = process_chat(deps, chat_id, chat_type, upper).await;
+            if outcome.status == "ok" && outcome.msg_end > 0 {
+                advanced = true;
+            } else {
+                deferred.insert((chat_id.clone(), chat_type.clone()));
+            }
+            outcomes.push(outcome);
+        }
+        if !advanced {
+            break;
+        }
     }
 
     deps.bus
@@ -185,139 +222,100 @@ fn scopeguard_defer<F: FnOnce()>(f: F) -> impl Drop {
     Guard(Some(f))
 }
 
-fn stamp_key(chat_id: &str, date: &str) -> String {
-    format!("consolidation_done:{}:{}", chat_id, date)
+async fn load_window(
+    conn: &mut sqlx::SqliteConnection,
+    scope: &processing::Scope,
+    limit: i64,
+    upper: i64,
+) -> Result<Vec<MsgRow>> {
+    let cursor = processing::cursor(conn, scope).await?;
+    let rows=sqlx::query("SELECT msg_id,sender_pid,COALESCE(nickname,'') AS nickname,COALESCE(text,'') AS text,COALESCE(mentions,'[]') AS mentions,ts,date(ts,'unixepoch','+8 hours') AS date FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id>?3 AND msg_id<=?5 ORDER BY msg_id LIMIT ?4")
+        .bind(&scope.owner_id).bind(&scope.chat_type).bind(cursor).bind(limit).bind(upper).fetch_all(conn).await?;
+    let mut messages = Vec::new();
+    let mut budget = 0;
+    let mut date = None;
+    for row in rows {
+        let day: String = row.try_get("date")?;
+        if date.as_ref().is_some_and(|d| d != &day) {
+            break;
+        }
+        let text: String = row.try_get("text")?;
+        let chars = if is_sensitive(&text) {
+            10
+        } else {
+            text.chars().count().min(4000)
+        };
+        if budget + chars > 32000 {
+            break;
+        }
+        budget += chars;
+        date = Some(day.clone());
+        messages.push(MsgRow {
+            msg_id: row.try_get("msg_id")?,
+            sender_pid: row.try_get("sender_pid")?,
+            nickname: row.try_get("nickname")?,
+            text,
+            mentions: row.try_get("mentions")?,
+            ts: row.try_get("ts")?,
+            date: day,
+        });
+    }
+    Ok(messages)
 }
 
 async fn process_chat(
     deps: &ConsolidationDeps,
     chat_id: &str,
-    today: &str,
+    chat_type: &str,
+    upper: i64,
 ) -> ChatConsolidationOutcome {
     let mut outcome = ChatConsolidationOutcome {
-        chat_id: chat_id.to_string(),
+        chat_id: chat_id.into(),
         msg_start: 0,
         msg_end: 0,
         mention_pairs: 0,
         facts_written: 0,
         status: "ok".into(),
     };
-
-    let mut conn = match crate::db::connect(&deps.db_path).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(chat_id, error = %e, "归纳失败：打开数据库");
-            outcome.status = "db_error".into();
-            return outcome;
+    let result:Result<()> = async {
+        let mut conn=crate::db::connect(&deps.db_path).await?;
+        // Independent SQL progress preserves mention updates when a model fails or is absent.
+        let mention_scope=processing::Scope{stage:"mentions",owner_id:chat_id.into(),chat_type:chat_type.into()};
+        let mention_rows=load_window(&mut conn,&mention_scope,WINDOW,upper).await?;
+        if let Some(last)=mention_rows.last() {
+            let previous=processing::cursor(&mut conn,&mention_scope).await?;
+            if let Some(batch)=processing::claim(&mut conn,mention_scope,previous,last.msg_id).await? {
+                let mut tx=conn.transaction().await?;
+                let stats=ChatConsolidationOutcome{chat_id:chat_id.into(),msg_start:mention_rows[0].msg_id,msg_end:last.msg_id,mention_pairs:0,facts_written:0,status:"ok".into()};
+                outcome.mention_pairs=apply_mention_stats(&mut tx,deps,chat_id,&mention_rows,&stats).await?;
+                processing::complete(&mut tx,&batch).await?;tx.commit().await?;
+            }
         }
-    };
-    // 幂等闸：同 chat 同日已完成 → 整 chat 跳过
-    let stamped: Option<String> = conn
-        .query_row(
-            "SELECT value FROM state_kv WHERE key = ?1",
-            params![stamp_key(chat_id, today)],
-            |r| r.try_get(0),
-        )
-        .await
-        .ok();
-    if stamped.is_some() {
-        outcome.status = "skipped_done".into();
-        return outcome;
-    }
-
-    // 窗口：最新 500 条（含 self 发言）
-    let rows: Vec<MsgRow> = conn
-        .prepare(
-            "SELECT msg_id, sender_pid, COALESCE(nickname,''), COALESCE(text,''), COALESCE(mentions,'[]'), ts
-             FROM (SELECT msg_id, sender_pid, nickname, text, mentions, ts FROM messages
-                   WHERE chat_id = ?1 ORDER BY msg_id DESC LIMIT ?2)
-             ORDER BY msg_id ASC",
-        ).await
-        .unwrap()
-        .query_map(params![chat_id, WINDOW], |r| {
-            Ok(MsgRow {
-                msg_id: r.try_get(0)?,
-                sender_pid: r.try_get(1)?,
-                nickname: r.try_get(2)?,
-                text: r.try_get(3)?,
-                mentions: r.try_get(4)?,
-                ts: r.try_get(5)?,
-            })
-        }).await
-        .unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
-    if rows.is_empty() {
-        outcome.status = "no_messages".into();
-        return outcome;
-    }
-    // 当日零新消息的 chat 跳过
-    let midnight: i64 = conn
-        .query_row(
-            "SELECT CAST(strftime('%s','now','+8 hours','start of day','-8 hours') AS INTEGER)",
-            crate::db::params![],
-            |r| r.try_get(0),
-        )
-        .await
-        .unwrap_or(0);
-    if !rows.iter().any(|r| r.ts >= midnight) {
-        outcome.status = "no_new_today".into();
-        return outcome;
-    }
-    outcome.msg_start = rows.first().unwrap().msg_id;
-    outcome.msg_end = rows.last().unwrap().msg_id;
-
-    // 先行占位：同 chat 同日再跑直接 skipped_done（防 mention 双重计数）
-    let _ = conn
-        .execute(
-            "INSERT INTO state_kv(key, value, updated_at) VALUES (?1, '1', ?2)
-         ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
-            params![stamp_key(chat_id, today), now_secs()],
-        )
-        .await;
-
-    // —— 通道一：@关系统计（纯 SQL，不经 LLM）——
-    let mention_pairs = apply_mention_stats(&mut conn, deps, chat_id, &rows, &outcome).await;
-    outcome.mention_pairs = mention_pairs;
-
-    // —— LLM 提炼（decision 角色；未配置或两轮校验失败 → 本 chat 本轮跳过提炼）——
-    let decision_ready = deps
-        .llm
-        .as_ref()
-        .map(|g| g.role(Role::Decision).is_some())
-        .unwrap_or(false);
-    if !decision_ready {
-        warn!(
-            chat_id,
-            "Decision 角色未配置，本 chat 跳过 LLM 提炼（@统计已落库）"
-        );
-        outcome.status = "llm_unavailable".into();
-        return outcome;
-    }
-    let visuals = conn.prepare("SELECT i.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id WHERE m.chat_id=?1 AND i.status='ready' AND i.msg_id BETWEEN ?2 AND ?3 ORDER BY i.msg_id DESC LIMIT 6").await
-        .ok();
-    let visuals: Vec<Value> = if let Some(mut stmt) = visuals {
-        stmt.query_map(params![chat_id,outcome.msg_start,outcome.msg_end], |r| Ok(json!({"source_msg_id":r.try_get::<i64,_>(0)?,"observation":r.try_get::<String,_>(1)?}))).await
-            .map(|rows| rows.filter_map(|r|r.ok()).collect()).unwrap_or_default()
-    } else {
-        vec![]
-    };
-    let distill = match distill(deps.llm.as_ref().unwrap(), chat_id, &rows, &visuals).await {
-        Some(d) => d,
-        None => {
-            warn!(chat_id, "LLM 提炼两轮校验失败，本 chat 本轮跳过");
-            outcome.status = "llm_failed".into();
-            return outcome;
+        let scope=processing::Scope::conversation(chat_id,chat_type);
+        let previous=processing::cursor(&mut conn,&scope).await?;
+        let rows=load_window(&mut conn,&scope,WINDOW,upper).await?;
+        if rows.is_empty() {outcome.status="skipped_done".into();return Ok(());}
+        outcome.msg_start=rows[0].msg_id;outcome.msg_end=rows.last().unwrap().msg_id;
+        if !deps.llm.as_ref().is_some_and(|gw|gw.role(Role::Decision).is_some()) {outcome.status="llm_unavailable".into();return Ok(());}
+        let Some(batch)=processing::claim_limited(&mut conn,scope,previous,outcome.msg_end,Some(deps.cfg.conversation_daily_limit)).await? else {outcome.status="deferred".into();return Ok(());};
+        let visual_rows=sqlx::query("SELECT i.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id WHERE m.chat_id=?1 AND m.chat_type=?2 AND i.status='ready' AND i.msg_id BETWEEN ?3 AND ?4 ORDER BY i.msg_id LIMIT 6")
+            .bind(chat_id).bind(chat_type).bind(outcome.msg_start).bind(outcome.msg_end).fetch_all(&mut *conn).await?;
+        let visuals:Vec<Value>=visual_rows.iter().map(|r|->sqlx::Result<Value>{Ok(json!({"source_msg_id":r.try_get::<i64,_>("msg_id")?,"observation":r.try_get::<String,_>("observation")?}))}).collect::<sqlx::Result<_>>()?;
+        drop(conn);
+        let distilled=tokio::time::timeout(Duration::from_secs(180),distill(deps.llm.as_ref().unwrap(),chat_id,chat_type,&rows,&visuals)).await.ok().flatten();
+        let mut conn=crate::db::connect(&deps.db_path).await?;
+        match distilled {
+            Some(data)=>match write_distilled(&mut conn,chat_id,chat_type,&rows[0].date,&data,&outcome,&batch).await {
+                Ok(count)=>outcome.facts_written=count,
+                Err(e)=>{processing::fail(&mut conn,&batch).await?;return Err(e);}
+            },
+            None=>{processing::fail(&mut conn,&batch).await?;outcome.status="llm_failed".into();}
         }
-    };
-
-    // —— 通道二三四：summaries / long_memories / rel_events（单事务）——
-    match write_distilled(&mut conn, chat_id, today, &distill, &outcome).await {
-        Ok(facts) => outcome.facts_written = facts,
-        Err(e) => {
-            warn!(chat_id, error = %e, "提炼结果落库失败");
-            outcome.status = "db_error".into();
-        }
+        Ok(())
+    }.await;
+    if let Err(e) = result {
+        warn!(error=%e,chat_id,chat_type,"归纳批次失败，保留原文与未完成进度");
+        outcome.status = "db_error".into();
     }
     outcome
 }
@@ -329,16 +327,17 @@ struct MsgRow {
     text: String,
     mentions: String,
     ts: i64,
+    date: String,
 }
 
 /// @统计：同对按窗口聚合计数，单边单次 ≤0.05；@bot → 记 self→发送者的边
 async fn apply_mention_stats(
-    conn: &mut crate::db::Connection,
+    conn: &mut sqlx::SqliteConnection,
     deps: &ConsolidationDeps,
     chat_id: &str,
     rows: &[MsgRow],
     outcome: &ChatConsolidationOutcome,
-) -> usize {
+) -> Result<usize> {
     let self_pid = {
         let q = deps.self_qq.load(Ordering::Relaxed);
         (q != 0).then(|| format!("p_{q}"))
@@ -368,30 +367,13 @@ async fn apply_mention_stats(
         chat_id, outcome.msg_start, outcome.msg_end
     );
     let n = pairs.len();
-    let mut tx = match conn.transaction().await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(error = %e, "@统计事务开启失败");
-            return 0;
-        }
-    };
     for ((from, to), count) in &pairs {
         let delta = (MENTION_DELTA_PER * *count as f64).min(MENTION_DELTA_CAP);
-        if let Err(e) = tx.execute(
-            "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at)
-             VALUES (?1, ?2, 'mention', ?3, 0, ?4, ?5)",
-            params![from, to, delta, evidence, now],
-        ).await {
-            warn!(error = %e, "relationship_events 写入失败");
-            continue;
-        }
-        bump_edge(&mut tx, from, to, delta, 0.0, now).await;
+        conn.execute(
+            "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at) VALUES (?1,?2,'mention',?3,0,?4,?5)",params![from,to,delta,evidence,now]).await?;
+        bump_edge(conn, from, to, delta, 0.0, now).await?;
     }
-    if let Err(e) = tx.commit().await {
-        warn!(error = %e, "@统计事务提交失败");
-        return 0;
-    }
-    n
+    Ok(n)
 }
 
 /// edges 增量累加，clamp(0..1)
@@ -402,7 +384,7 @@ async fn bump_edge(
     d_familiar: f64,
     d_trust: f64,
     now: i64,
-) {
+) -> Result<()> {
     let cur: Option<(f64, f64)> = conn
         .query_row(
             "SELECT trust, familiar FROM relationship_edges WHERE from_pid = ?1 AND to_pid = ?2",
@@ -410,15 +392,16 @@ async fn bump_edge(
             |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         )
         .await
-        .ok();
+        .optional()?;
     let (trust, familiar) = cur.unwrap_or((0.5, 0.0));
     let nt = (trust + d_trust).clamp(0.0, 1.0);
     let nf = (familiar + d_familiar).clamp(0.0, 1.0);
-    let _ = conn.execute(
+    conn.execute(
         "INSERT INTO relationship_edges(from_pid, to_pid, trust, familiar, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(from_pid, to_pid) DO UPDATE SET trust = excluded.trust, familiar = excluded.familiar, updated_at = excluded.updated_at",
         params![from, to, nt, nf, now],
-    ).await;
+    ).await?;
+    Ok(())
 }
 
 // ---------- LLM 提炼 ----------
@@ -429,7 +412,7 @@ struct DistillOut {
     #[serde(default)]
     person_facts: Vec<PersonFact>,
     #[serde(default)]
-    group_facts: Vec<String>,
+    group_facts: Vec<SourcedFact>,
     #[serde(default)]
     rel_events: Vec<RelEvent>,
 }
@@ -437,7 +420,15 @@ struct DistillOut {
 #[derive(Debug, Deserialize)]
 struct PersonFact {
     person_id: String,
+    #[serde(flatten)]
+    source: SourcedFact,
+}
+
+#[derive(Debug, Deserialize)]
+struct SourcedFact {
     fact: String,
+    evidence_msg_id: i64,
+    evidence_quote: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -454,13 +445,13 @@ struct RelEvent {
     evidence_quote: String,
 }
 
-const DISTILL_SYSTEM: &str = r#"你是云团夜间归纳的提炼器。输入是一个会话窗口的消息流水（每行：昵称(person_id): 内容），输出严格 JSON，不要任何其他文字。
+const DISTILL_SYSTEM: &str = r#"你是云团夜间归纳的提炼器。输入是一个会话批次的 JSON，包含消息编号、人物、昵称、时间与正文，输出严格 JSON，不要任何其他文字。
 
 Schema：
 {
-  "chat_summary": "本日群摘要一段话（时间线索引用，100 字内）",
-  "person_facts": [{"person_id": "p_xxx", "fact": "关于此人的一条提炼事实（陈述句）"}],
-  "group_facts": ["关于本群长期值得记住的事实（陈述句；即群话题摘要）"],
+  "chat_summary": "本批会话的讨论与进展，保留谁提出和实际结论，100字内",
+  "person_facts": [{"person_id": "p_xxx", "fact": "本人明确陈述的事实", "evidence_msg_id":100,"evidence_quote":"该人物逐字原话，4–240字"}],
+  "group_facts": [{"fact":"本会话长期值得记住的事实；保留谁提出、谁确认","evidence_msg_id":100,"evidence_quote":"原消息中4–240字连续原话"}],
   "rel_events": [{"from": "p_a", "to": "p_b", "kind": "help|quarrel|praise|...", "delta_trust": 0.05, "evidence": "一句话依据", "evidence_msg_id":100,"evidence_quote":"from 本人的逐字原话，4–240字"}]
 }
 
@@ -475,21 +466,13 @@ Schema：
 async fn distill(
     gw: &LlmGateway,
     chat_id: &str,
+    chat_type: &str,
     rows: &[MsgRow],
     visuals: &[Value],
 ) -> Option<DistillOut> {
-    let mut user = String::from("消息流水（最新 500 条窗口，按时间序）：\n");
-    for r in rows {
-        let text: String = r.text.chars().take(80).collect();
-        user.push_str(&format!(
-            "msg_id={} {}({}): {}\n",
-            r.msg_id, r.nickname, r.sender_pid, text
-        ));
-    }
-    user.push_str(&format!(
-        "\n图片观察（非本人确认，仅为辅助语境）：{}",
-        json!(visuals)
-    ));
+    let _guard = crate::memory::refresh::MODEL_LOCK.lock().await;
+    let messages:Vec<Value>=rows.iter().map(|r|json!({"msg_id":r.msg_id,"person_id":r.sender_pid,"nickname":r.nickname,"ts":r.ts,"text":if is_sensitive(&r.text){"敏感内容已隐藏".to_owned()}else{r.text.chars().take(4000).collect::<String>()},"text_truncated":r.text.chars().count()>4000})).collect();
+    let user=json!({"chat_id":chat_id,"chat_type":chat_type,"messages":messages,"visual_observations_not_personal_confirmation":visuals}).to_string();
     let first = gw
         .chat(Role::Decision, DISTILL_SYSTEM, &user, true)
         .await
@@ -519,119 +502,99 @@ fn parse_distill(content: &str) -> std::result::Result<DistillOut, String> {
 }
 
 /// 提炼结果落库（单事务；敏感条目逐条拒收记日志）
+async fn diary(
+    conn: &mut sqlx::SqliteConnection,
+    batch: &processing::Batch,
+    owner_type: &str,
+    owner: &str,
+    date: &str,
+    content: &str,
+    outcome: &ChatConsolidationOutcome,
+) -> Result<()> {
+    if content.trim().is_empty() || is_sensitive(content) {
+        return Ok(());
+    }
+    let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id BETWEEN ?3 AND ?4 AND (?5='chat' OR sender_pid=?6)")
+        .bind(&batch.scope.owner_id).bind(&batch.scope.chat_type).bind(outcome.msg_start).bind(outcome.msg_end).bind(owner_type).bind(owner).fetch_one(&mut *conn).await?;
+    conn.execute("INSERT INTO memory_diary_entries(batch_id,owner_type,owner_id,source_chat_id,source_chat_type,date,content,source_msg_id,source_end_msg_id,message_count,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![batch.id,owner_type,owner,batch.scope.owner_id,batch.scope.chat_type,date,content.chars().take(4000).collect::<String>(),outcome.msg_start,outcome.msg_end,count,now_secs()]).await?;
+    Ok(())
+}
+
 async fn write_distilled(
     conn: &mut crate::db::Connection,
     chat_id: &str,
-    today: &str,
+    chat_type: &str,
+    date: &str,
     d: &DistillOut,
     outcome: &ChatConsolidationOutcome,
+    batch: &processing::Batch,
 ) -> Result<usize> {
     let now = now_secs();
-    let mut tx = conn.transaction().await.context("归纳写入事务开启失败")?;
-    let mut facts_written = 0usize;
-
-    // chat 每日摘要（UPSERT 防重）
-    if !is_sensitive(&d.chat_summary) {
-        tx.execute(
-            "INSERT INTO summaries(owner_type, owner_id, period, date, summary, msg_id_start, msg_id_end, created_at)
-             VALUES ('chat', ?1, 'daily', ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(owner_type, owner_id, period, date)
-             DO UPDATE SET summary = excluded.summary, msg_id_start = excluded.msg_id_start, msg_id_end = excluded.msg_id_end",
-            params![chat_id, today, d.chat_summary, outcome.msg_start, outcome.msg_end, now],
-        ).await?;
-    } else {
-        warn!(chat_id, "chat_summary 命中敏感拒收");
-    }
-
-    // 成员当日出席清点（person 摘要有事实也写、无事实写字数兜底，由 person_facts 聚合一句话）
-    let speakers: Vec<(String, String, i64)> = tx
-        .prepare(
-            "SELECT sender_pid, COALESCE(MAX(nickname),''), COUNT(*) FROM messages
-             WHERE chat_id = ?1 AND msg_id BETWEEN ?2 AND ?3 AND sender_pid != 'self'
-             GROUP BY sender_pid",
+    let mut tx = conn.transaction().await?;
+    let mut facts_written = 0;
+    let mut personal = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for fact in d.person_facts.iter().take(100) {
+        let f = &fact.source;
+        if processing::fact(
+            &mut tx,
+            batch,
+            "person",
+            &fact.person_id,
+            &f.fact,
+            f.evidence_msg_id,
+            &f.evidence_quote,
         )
         .await?
-        .query_map(params![chat_id, outcome.msg_start, outcome.msg_end], |r| {
-            Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?))
-        })
-        .await?
-        .collect::<std::result::Result<Vec<(String, String, i64)>, sqlx::Error>>()?;
-    for (pid, _nick, msg_count) in &speakers {
-        let facts: Vec<&str> = d
-            .person_facts
-            .iter()
-            .filter(|f| &f.person_id == pid)
-            .map(|f| f.fact.as_str())
-            .collect();
-        let fallback = format!("归纳窗口内发言 {msg_count} 条。");
-        let summary = if facts.is_empty() {
-            fallback
-        } else {
-            let joined = facts.join("；");
-            if is_sensitive(&joined) {
-                // 敏感拒收滤的是内容不是该人的当日索引——回退到计数保底
-                warn!(
-                    chat_id,
-                    person = pid,
-                    "person 聚合摘要命中敏感，回退发言计数"
-                );
-                fallback
-            } else {
-                joined
-            }
-        };
-        tx.execute(
-            "INSERT INTO summaries(owner_type, owner_id, period, date, summary, msg_id_start, msg_id_end, created_at)
-             VALUES ('person', ?1, 'daily', ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(owner_type, owner_id, period, date)
-             DO UPDATE SET summary = excluded.summary, msg_id_start = excluded.msg_id_start, msg_id_end = excluded.msg_id_end",
-            params![pid, today, summary, outcome.msg_start, outcome.msg_end, now],
-        ).await?;
-    }
-
-    // person_facts → long_memories(owner=person, source=consolidation)
-    for f in d.person_facts.iter().take(100) {
-        let fact = f.fact.trim();
-        if fact.is_empty()
-            || fact.chars().count() > 800
-            || !speakers.iter().any(|(pid, _, _)| pid == &f.person_id)
         {
-            continue;
+            facts_written += 1;
+            personal
+                .entry(fact.person_id.clone())
+                .or_default()
+                .push(f.fact.clone());
         }
-        if is_sensitive(fact) {
-            warn!(chat_id, person = %f.person_id, "person_fact 命中敏感拒收");
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
-             VALUES ('person', ?1, ?2, 'consolidation', ?3, ?3, ?4, ?5, ?6)",
-            params![f.person_id, fact, now, chat_id, outcome.msg_start, outcome.msg_end],
-        ).await?;
-        facts_written += 1;
     }
-    // group_facts → long_memories(owner=chat)
-    for fact in d.group_facts.iter().take(100) {
-        let fact = fact.trim();
-        if fact.is_empty() || fact.chars().count() > 800 {
-            continue;
+    for f in d.group_facts.iter().take(100) {
+        if processing::fact(
+            &mut tx,
+            batch,
+            "chat",
+            chat_id,
+            &f.fact,
+            f.evidence_msg_id,
+            &f.evidence_quote,
+        )
+        .await?
+        {
+            facts_written += 1;
         }
-        if is_sensitive(fact) {
-            warn!(chat_id, "group_fact 命中敏感拒收");
-            continue;
-        }
-        tx.execute(
-            "INSERT INTO long_memories(owner_type, owner_id, content, source, created_at, updated_at, source_chat_id, source_msg_id, source_end_msg_id)
-             VALUES ('chat', ?1, ?2, 'consolidation', ?3, ?3, ?1, ?4, ?5)",
-            params![chat_id, fact, now, outcome.msg_start, outcome.msg_end],
-        ).await?;
-        facts_written += 1;
     }
-
-    // rel_events → relationship_events + edges(trust)
-    for ev in &d.rel_events {
+    diary(
+        &mut tx,
+        batch,
+        "chat",
+        chat_id,
+        date,
+        &d.chat_summary,
+        outcome,
+    )
+    .await?;
+    for (person, notes) in personal {
+        diary(
+            &mut tx,
+            batch,
+            "person",
+            &person,
+            date,
+            &notes.join("；"),
+            outcome,
+        )
+        .await?;
+    }
+    for ev in d.rel_events.iter().take(100) {
         let Some(source_id) = ev
             .evidence_msg_id
-            .filter(|id| (outcome.msg_start..=outcome.msg_end).contains(id))
+            .filter(|id| *id > batch.from_id && *id <= batch.end_id)
         else {
             continue;
         };
@@ -640,53 +603,43 @@ async fn write_distilled(
             || ev.from == "self"
             || ev.from == ev.to
             || is_sensitive(quote)
+            || is_sensitive(&ev.evidence)
+            || !ev.delta_trust.is_finite()
         {
             continue;
         }
-        let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=?1 AND m.chat_id=?2 AND m.sender_pid=?3 AND instr(m.text,?4)>0)
-            AND EXISTS(SELECT 1 FROM messages WHERE chat_id=?2 AND sender_pid=?5 AND msg_id<=?6)",
-            params![source_id,chat_id,ev.from,quote,ev.to,outcome.msg_end], |r|r.try_get(0)).await?;
+        let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m WHERE m.msg_id=?1 AND m.chat_id=?2 AND m.chat_type=?3 AND m.sender_pid=?4 AND instr(substr(m.text,1,4000),?5)>0) AND EXISTS(SELECT 1 FROM messages WHERE chat_id=?2 AND chat_type=?3 AND sender_pid=?6 AND msg_id<=?7)",
+            params![source_id,chat_id,chat_type,ev.from,quote,ev.to,outcome.msg_end],|r|r.try_get(0)).await?;
         if !valid {
             continue;
         }
-        if !ev.delta_trust.is_finite() {
+        let original: String =
+            sqlx::query_scalar("SELECT COALESCE(text,'') FROM messages WHERE msg_id=?1")
+                .bind(source_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if is_sensitive(&original) {
             continue;
         }
         let delta = ev.delta_trust.clamp(-0.2, 0.2);
-        if is_sensitive(&ev.evidence) {
-            warn!(chat_id, "rel_event evidence 命中敏感拒收");
-            continue;
-        }
         let evidence = format!("{}（消息 {source_id}，本人原话：{quote}）", ev.evidence);
-        tx.execute(
-            "INSERT INTO relationship_events(from_pid, to_pid, kind, delta_familiar, delta_trust, evidence, created_at)
-             VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
-            params![ev.from, ev.to, ev.kind, delta, evidence, now],
-        ).await?;
-        bump_edge(&mut tx, &ev.from, &ev.to, 0.0, delta, now).await;
+        tx.execute("INSERT INTO relationship_events(from_pid,to_pid,kind,delta_familiar,delta_trust,evidence,created_at) VALUES(?1,?2,?3,0,?4,?5,?6)",params![ev.from,ev.to,ev.kind,delta,evidence,now]).await?;
+        bump_edge(&mut tx, &ev.from, &ev.to, 0.0, delta, now).await?;
     }
-
-    tx.commit().await.context("归纳写入事务提交失败")?;
+    processing::complete(&mut tx, batch).await?;
+    tx.commit().await?;
     Ok(facts_written)
 }
 
 // ---------- 工具 ----------
 
-async fn list_chats(db_path: &Path) -> Vec<String> {
-    async {
-        let mut c = crate::db::connect(db_path).await.ok()?;
-        let mut st = c
-            .prepare("SELECT DISTINCT chat_id FROM messages")
-            .await
-            .ok()?;
-        st.query_map(crate::db::params![], |r| r.try_get(0))
-            .await
-            .ok()?
-            .collect::<sqlx::Result<Vec<String>>>()
-            .ok()
-    }
-    .await
-    .unwrap_or_default()
+async fn list_chats(db_path: &Path, upper: i64) -> Vec<(String, String)> {
+    let result:Result<Vec<(String,String)>>=async {
+        let mut conn=crate::db::connect(db_path).await?;
+        let rows=sqlx::query("SELECT m.chat_id,m.chat_type FROM messages m LEFT JOIN memory_progress p ON p.stage='conversation' AND p.owner_id=m.chat_id AND p.chat_type=m.chat_type WHERE m.chat_type IN ('group','private') AND m.msg_id>COALESCE(p.cursor,0) AND m.msg_id<=?1 GROUP BY m.chat_id,m.chat_type ORDER BY MIN(m.msg_id) LIMIT 200").bind(upper).fetch_all(&mut *conn).await?;
+        Ok(rows.into_iter().map(|r|Ok((r.try_get("chat_id")?,r.try_get("chat_type")?))).collect::<sqlx::Result<_>>()?)
+    }.await;
+    result.unwrap_or_default()
 }
 
 /// 今日日期串（本地时区，经 SQL 换算）
