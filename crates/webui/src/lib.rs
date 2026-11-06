@@ -20,7 +20,7 @@ mod tasks_api;
 mod ws;
 
 use anyhow::{Context, Result};
-use axum::{middleware, routing::{get, post}, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::{get, post}, Router};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
@@ -37,6 +37,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/dashboard", get(dashboard::dashboard))
         .route("/api/events", get(events_api::list))
         .route("/api/memes", get(memes::list))
+        .route("/api/memes/upload", post(memes::upload).layer(DefaultBodyLimit::max(10 * 1024 * 1024)))
         .route("/api/memes/batch", post(memes::batch))
         .route("/api/memes/{id}/approve", post(memes::approve))
         .route("/api/memes/{id}/category", post(memes::category))
