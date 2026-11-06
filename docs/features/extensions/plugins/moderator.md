@@ -71,3 +71,5 @@
 - [`crates/core/tests/membership.rs`](../../../../crates/core/tests/membership.rs)
 - [`crates/adapter-qq/src/moderation/membership/tests.rs`](../../../../crates/adapter-qq/src/moderation/membership/tests.rs)
 - [`plugins/moderator/src/membership/tests.rs`](../../../../plugins/moderator/src/membership/tests.rs)
+
+申请队列的迁移回滚测试随数据库V11更新版本断言，继续验证重放迁移不会丢失已有群聊记忆。

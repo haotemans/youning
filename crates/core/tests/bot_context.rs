@@ -464,11 +464,11 @@ async fn profile_requires_own_exact_evidence_and_new_sources_win() {
         .await
         .unwrap()
         .is_empty());
-    // 无按当时版本重建能力时宁可缺失，不能把未来资料带回旧窗口。
-    assert!(memory::profile(&mut conn, "p_a", old.msg_id)
-        .await
-        .unwrap()
-        .is_empty());
+    // 历史版本按消息上界读取，旧窗口仍得到当时的资料。
+    assert_eq!(
+        memory::profile(&mut conn, "p_a", old.msg_id).await.unwrap()[0].content,
+        "偏好 Rust"
+    );
 }
 
 #[tokio::test]

@@ -334,6 +334,8 @@ run_on_startup = false
 # 每晚画像整理人数（0关闭）与每人完成后的等待秒数
 portrait_daily_limit = 10
 portrait_interval_secs = 60
+# 会话模型处理的独立每晚批次预算（0关闭；不占人物额度）
+conversation_daily_limit = 20
 
 [meme]
 # 偷表情包：群图片自动进 data/memes/_inbox/ 待审（WebUI 审批后入库）

@@ -56,11 +56,12 @@ async fn claim(path: &Path, options: &Options, at: i64) -> Result<Claim> {
     let person=sqlx::query_scalar::<_,String>(
         "SELECT m.sender_pid FROM messages m
          LEFT JOIN state_kv s ON s.key='profile_refresh:v1:'||m.sender_pid
+         LEFT JOIN memory_progress progress ON progress.stage='portrait' AND progress.owner_id=m.sender_pid AND progress.chat_type=''
          WHERE m.sender_pid<>'self' AND m.chat_type IN ('group','private')
            AND length(trim(COALESCE(m.text,'')))>=4
            AND NOT EXISTS(SELECT 1 FROM state_kv done WHERE done.key=?1||m.sender_pid)
          GROUP BY m.sender_pid
-         HAVING MAX(m.msg_id)>COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff'),0)
+         HAVING MAX(m.msg_id)>COALESCE(progress.cursor,0)
            AND COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.attempt'),0)<=?2-300
          ORDER BY COALESCE(s.updated_at,0),MAX(m.ts) DESC,m.sender_pid LIMIT 1")
         .bind(prefix.clone()).bind(at).fetch_optional(&mut *tx).await?;

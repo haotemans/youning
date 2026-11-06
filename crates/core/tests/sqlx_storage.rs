@@ -218,7 +218,7 @@ async fn backup_restores_a_consistent_snapshot_during_concurrent_writes() {
         .fetch_one(&mut *c)
         .await
         .unwrap();
-    assert_eq!((integrity.as_str(), version), ("ok", 10));
+    assert_eq!((integrity.as_str(), version), ("ok", 11));
     let image_source: (i64,String) = sqlx::query_as("SELECT m.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id")
         .fetch_one(&mut *c).await.unwrap();
     assert_eq!(image_source.0,1);

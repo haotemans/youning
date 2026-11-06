@@ -69,7 +69,7 @@ async fn seed_fixture(db_path: &PathBuf) {
         ).await
         .unwrap();
     }
-    let t = now - 600;
+    let t = (now + 28800) / 86400 * 86400 - 28800 + 3600;
     let mundane = [
         "早啊",
         "吃了没",
@@ -142,11 +142,11 @@ async fn consolidation_end_to_end() {
     let distill = json!({
         "chat_summary": "今天聊 Rust 很热闹",
         "person_facts": [
-            {"person_id": "p_2001", "fact": "小明在组织晚上的球局"},
-            {"person_id": "p_2002", "fact": "阿强的手机号是13800001111"},
-            {"person_id": "p_2003", "fact": "阿芳的开箱密码是1234"}
+            {"person_id": "p_2001", "fact": "小明分享了文档", "evidence_msg_id":2,"evidence_quote":"文档发你"},
+            {"person_id": "p_2002", "fact": "阿强的手机号是13800001111","evidence_msg_id":2,"evidence_quote":"文档发你"},
+            {"person_id": "p_2003", "fact": "阿芳的开箱密码是1234","evidence_msg_id":3,"evidence_quote":"今天聊 Rust 吧"}
         ],
-        "group_facts": ["本群近期在玩 Rust"],
+        "group_facts": [{"fact":"本群近期在玩 Rust","evidence_msg_id":3,"evidence_quote":"今天聊 Rust 吧"}],
         "profile_updates": [
             {"person_id":"p_2001","field":"ongoing_projects","value":"正在分享文档","evidence_msg_id":2,"evidence_quote":"文档发你"},
             {"person_id":"p_2002","field":"technical_preferences","value":"错误归属","evidence_msg_id":2,"evidence_quote":"文档发你"}
@@ -194,8 +194,8 @@ async fn consolidation_end_to_end() {
         .collect::<sqlx::Result<_>>()
         .unwrap();
     assert!(profiles.is_empty(), "群归纳不能绕过独立画像人数上限");
-    let provenance:(String,i64,i64)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'", yuantuan_core::db::params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
-    assert_eq!(provenance, ("555666".into(), 1, 30));
+    let provenance:(String,i64,Option<i64>)=conn.query_row("SELECT source_chat_id,source_msg_id,source_end_msg_id FROM long_memories WHERE owner_type='person' AND owner_id='p_2001'", yuantuan_core::db::params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
+    assert_eq!(provenance, ("555666".into(), 2, None));
     let today: String = conn
         .query_row(
             "SELECT strftime('%Y-%m-%d','now','+8 hours')",
@@ -205,50 +205,44 @@ async fn consolidation_end_to_end() {
         .await
         .unwrap();
 
-    // 1. summaries：chat 一条 + person 三条（speaker 均有）
+    // 1. 日记按实际会话和日期保存，个人条目只记录有依据的内容。
     let chat_sum: String = conn
         .query_row(
-            "SELECT summary FROM summaries WHERE owner_type='chat' AND owner_id='555666' AND period='daily' AND date=?1",
+            "SELECT content FROM memory_diary_entries WHERE owner_type='chat' AND owner_id='555666' AND date=?1",
             yuantuan_core::db::params![today], |r| r.try_get(0),
         ).await
         .unwrap();
     assert_eq!(chat_sum, "今天聊 Rust 很热闹");
-    for pid in ["p_2001", "p_2002", "p_2003"] {
-        let _: String = conn
-            .query_row(
-                "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id=?1 AND date=?2",
-                yuantuan_core::db::params![pid, today], |r| r.try_get(0),
-            ).await
-            .unwrap_or_else(|_| panic!("person summary 缺失: {pid}"));
-    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM memory_diary_entries WHERE owner_type='person'"
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap(),
+        1
+    );
     // person 摘要由 person_facts 聚合（p_2001 正常聚合）
     let p_sum: String = conn
         .query_row(
-            "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id='p_2001' AND date=?1",
+            "SELECT content FROM memory_diary_entries WHERE owner_type='person' AND owner_id='p_2001' AND date=?1",
             yuantuan_core::db::params![today], |r| r.try_get(0),
         ).await
         .unwrap();
-    assert_eq!(p_sum, "小明在组织晚上的球局");
-    // p_2002 的 fact 含手机号被拒 → 摘要回退发言计数，敏感内容不得出现
-    let p2_sum: String = conn
-        .query_row(
-            "SELECT summary FROM summaries WHERE owner_type='person' AND owner_id='p_2002' AND date=?1",
-            yuantuan_core::db::params![today], |r| r.try_get(0),
-        ).await
-        .unwrap();
-    assert!(
-        !p2_sum.contains("手机") && !p2_sum.contains("13800001111"),
-        "敏感内容泄露: {p2_sum}"
-    );
-    assert!(
-        p2_sum.contains("归纳窗口内发言"),
-        "应回退窗口计数: {p2_sum}"
-    );
+    assert_eq!(p_sum, "小明分享了文档");
+    // p_2002 的敏感 fact 被拒，不用统计数补造摘要。
+    let p2_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memory_diary_entries WHERE owner_type='person' AND owner_id='p_2002'",
+    )
+    .fetch_one(&mut *conn)
+    .await
+    .unwrap();
+    assert_eq!(p2_count, 0, "没有可用归纳时不以发言计数冒充摘要");
 
     // 2. long_memories：正常 fact 落库；两个敏感陷阱被拒
     let ok_fact: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM long_memories WHERE owner_type='person' AND owner_id='p_2001' AND content='小明在组织晚上的球局' AND source='consolidation'", yuantuan_core::db::params![], |r| r.try_get(0),
+            "SELECT COUNT(*) FROM long_memories WHERE owner_type='person' AND owner_id='p_2001' AND content='小明分享了文档' AND source='consolidation'", yuantuan_core::db::params![], |r| r.try_get(0),
         ).await
         .unwrap();
     assert_eq!(ok_fact, 1);
@@ -316,7 +310,7 @@ async fn consolidation_end_to_end() {
             .unwrap()
     };
     let before = [
-        count("SELECT COUNT(*) FROM summaries").await,
+        count("SELECT COUNT(*) FROM memory_diary_entries").await,
         count("SELECT COUNT(*) FROM long_memories").await,
         count("SELECT COUNT(*) FROM relationship_events").await,
         count("SELECT COUNT(*) FROM events").await,
@@ -324,7 +318,7 @@ async fn consolidation_end_to_end() {
     run_once(&deps).await;
     wait_for_done(&db_path, 2).await;
     let after = [
-        count("SELECT COUNT(*) FROM summaries").await,
+        count("SELECT COUNT(*) FROM memory_diary_entries").await,
         count("SELECT COUNT(*) FROM long_memories").await,
         count("SELECT COUNT(*) FROM relationship_events").await,
         count("SELECT COUNT(*) FROM events").await,

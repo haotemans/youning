@@ -6,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub mod refresh;
 pub mod nightly;
+pub mod processing;
+pub mod refresh;
 
 pub const PROFILE_FIELDS: usize = 5;
 
@@ -118,8 +119,8 @@ pub async fn profiles(
         return Ok(result);
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT p.person_id,p.field,p.content,p.source_msg_id,p.evidence_quote,p.updated_at
-         FROM person_profile_facts p JOIN messages m ON m.msg_id=p.source_msg_id
+        "WITH history AS (SELECT p.*,ROW_NUMBER() OVER(PARTITION BY p.person_id,p.field ORDER BY p.source_msg_id DESC,p.id DESC) AS rank
+         FROM person_profile_versions p JOIN messages m ON m.msg_id=p.source_msg_id
          WHERE m.sender_pid=p.person_id AND instr(m.text,p.evidence_quote)>0 AND p.source_msg_id<=",
     );
     query.push_bind(cutoff).push(" AND p.person_id IN (");
@@ -128,7 +129,7 @@ pub async fn profiles(
         ids.push_bind(id);
     }
     ids.push_unseparated(")");
-    query.push(" ORDER BY p.person_id,p.field");
+    query.push(") SELECT person_id,field,content,source_msg_id,evidence_quote,source_ts AS updated_at FROM history WHERE rank=1 ORDER BY person_id,field");
     for row in query.build().fetch_all(&mut *conn).await? {
         let facts = result.entry(row.try_get("person_id")?).or_default();
         if facts.len() < PROFILE_FIELDS {
@@ -205,18 +206,40 @@ pub async fn recall(
     query: &str,
     limit: usize,
 ) -> Result<Vec<RecalledMemory>> {
+    recall_scoped(
+        conn,
+        person,
+        &processing::Scope::conversation(chat, ""),
+        cutoff,
+        query,
+        limit,
+    )
+    .await
+}
+
+pub async fn recall_scoped(
+    conn: &mut sqlx::SqliteConnection,
+    person: &str,
+    scope: &processing::Scope,
+    cutoff: i64,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<RecalledMemory>> {
+    let chat = scope.owner_id.as_str();
     let terms = query_terms(query);
     if terms.is_empty() || limit == 0 {
         return Ok(Vec::new());
     }
     let conditions = (0..terms.len())
-        .map(|i| format!("instr(lower(content),?{})>0", i + 4))
+        .map(|i| format!("instr(lower(content),?{})>0", i + 5))
         .collect::<Vec<_>>()
         .join(" OR ");
     let sql = format!(
         "SELECT id,owner_type,owner_id,substr(content,1,800),source,updated_at,
-                source_chat_id,source_msg_id,source_end_msg_id,length(content)>800
+                source_chat_id,source_msg_id,source_end_msg_id,length(content)>800,
+                (SELECT evidence_quote FROM memory_facts f WHERE f.owner_type=long_memories.owner_type AND f.owner_id=long_memories.owner_id AND f.content=long_memories.content AND f.source_msg_id=long_memories.source_msg_id LIMIT 1)
          FROM long_memories WHERE ((owner_type='person' AND owner_id=?1) OR (owner_type='chat' AND owner_id=?2))
+         AND (owner_type<>'chat' OR ?4='' OR NOT EXISTS(SELECT 1 FROM messages s WHERE s.msg_id=long_memories.source_msg_id AND s.chat_id=COALESCE(long_memories.source_chat_id,long_memories.owner_id) AND s.chat_type<>?4))
          AND (source_msg_id IS NULL OR source_msg_id<=?3) AND (source_end_msg_id IS NULL OR source_end_msg_id<=?3)
          AND ({conditions}) ORDER BY updated_at DESC,id DESC LIMIT 128"
     );
@@ -224,6 +247,7 @@ pub async fn recall(
         person.to_owned().into(),
         chat.to_owned().into(),
         cutoff.into(),
+        scope.chat_type.clone().into(),
     ];
     binds.extend(terms.iter().cloned().map(Into::into));
     let mut st = conn.prepare(&sql).await?;
@@ -239,7 +263,7 @@ pub async fn recall(
                 source_chat_id: r.try_get(6)?,
                 source_msg_id: r.try_get(7)?,
                 source_end_msg_id: r.try_get(8)?,
-                evidence_quote: None,
+                evidence_quote: r.try_get(10)?,
                 evidence_status: "legacy_unverified".into(),
                 content_truncated: r.try_get(9)?,
             })
@@ -275,7 +299,7 @@ pub async fn recall(
                 }
             } else {
                 let raw: Option<(String,String)> = conn.query_row(
-                    "SELECT sender_pid,substr(COALESCE(text,''),1,240) FROM messages WHERE msg_id=?1 AND chat_id=?2",
+                    "SELECT sender_pid,COALESCE(text,'') FROM messages WHERE msg_id=?1 AND chat_id=?2",
                     params![source,source_chat], |r| Ok((r.try_get(0)?,r.try_get(1)?)),
                 ).await.optional()?;
                 match raw {
@@ -284,8 +308,18 @@ pub async fn recall(
                             && (m.owner_type != "person" || sender == m.owner_id) =>
                     {
                         m.evidence_status = "source_message_available_not_fact_verification".into();
-                        if !crate::consolidation::is_sensitive(&text) {
-                            m.evidence_quote = Some(text);
+                        if crate::consolidation::is_sensitive(&text) {
+                            m.evidence_quote = None;
+                        } else {
+                            if m.evidence_quote
+                                .as_ref()
+                                .is_some_and(|q| !text.contains(q.as_str()))
+                            {
+                                m.evidence_status = "source_quote_no_longer_matches".into();
+                                m.evidence_quote = None;
+                            } else if m.evidence_quote.is_none() {
+                                m.evidence_quote = Some(text.chars().take(240).collect());
+                            }
                         }
                     }
                     _ => m.evidence_status = "source_missing_or_author_mismatch".into(),

@@ -41,6 +41,13 @@ async function openMemories(page, options = {}) {
     }
     if (url.pathname === '/api/memories/conversations') return route.fulfill({ json: { conversations } })
     if (url.pathname.endsWith('/activity')) return route.fulfill({ json: { today_count: 11, last_seen: 1700000100, pending: !state.refreshed, profile_refresh: state.refreshed ? { completed_at: 1700000200, status: 'updated' } : {} } })
+    if (url.pathname.endsWith('/profile-history')) {
+      if (state.historyFail) return route.fulfill({status:500,json:{error:'变更读取失败'}})
+      return route.fulfill({json:{total:2,page:1,versions:[
+        {id:12,field:'technical_preferences',content:'长期使用 Rust',evidence_quote:'我长期使用 Rust',source_ts:1700000000,current:true,source_valid:true,conversation:conversations[0]},
+        {id:11,field:'technical_preferences',content:'使用 C++',evidence_quote:'我之前使用 C++',source_ts:1699900000,current:false,source_valid:true,conversation:conversations[2]},
+      ]}})
+    }
     if (/\/api\/memories\/people\/[^/]+\/messages$/.test(url.pathname)) {
       const id = url.pathname.split('/').at(-2)
       if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
@@ -56,7 +63,7 @@ async function openMemories(page, options = {}) {
       if (id === state.slowPerson) await new Promise(resolve => setTimeout(resolve, 450))
       return route.fulfill({ json: { profile: [...(people.find(p => p.id === id)?.profile || []), ...(state.refreshed && id === 'p_101' ? [{ field: 'interests', content: '喜欢玩明日方舟', evidence_quote: '我喜欢玩明日方舟', updated_at: 1700000000 }] : [])] } }).catch(() => {})
     }
-    if (/\/api\/memories\/\d+\/source/.test(url.pathname)) return route.fulfill({ json: { is_window: true, conversation: conversations[0], messages: [{ msg_id: 1, person_id: 'p_101', name: '冰猪', text: '我长期使用 Rust', ts: 1700000000 }] } })
+    if (/\/api\/memories\/-?\d+\/source/.test(url.pathname)) return route.fulfill({ json: { is_window: q.get('kind') !== 'profile', conversation: url.pathname.includes('/11/') ? conversations[2] : conversations[0], messages: [{ msg_id: 1, person_id: 'p_101', name: '冰猪', text: url.pathname.includes('/11/') ? '我之前使用 C++' : '我长期使用 Rust', ts: 1700000000 }] } })
     if (url.pathname === '/api/memories' || url.pathname === '/api/summaries') {
       if (state.fail) return route.fulfill({ status: 500, json: { error: '读取失败' } })
       let rows = state.rows.filter(r => (!q.get('person_id') || r.owner_id === q.get('person_id')) && (!q.get('chat_id') || (r.conversation.id === q.get('chat_id') && r.conversation.chat_type === q.get('chat_type'))))
@@ -78,6 +85,22 @@ async function openMemories(page, options = {}) {
   return state
 }
 const person = (page, id) => page.locator('.person-option').filter({ hasText: id })
+
+test('profile versions load on demand, retain old values and link to source speech', async ({page})=>{
+  const state=await openMemories(page)
+  await person(page,'101').click()
+  expect(state.requests.some(r=>r.path.endsWith('/profile-history'))).toBe(false)
+  state.historyFail=true
+  await page.getByRole('button',{name:'画像变更',exact:true}).click()
+  await expect(page.getByRole('alert')).toContainText('变更读取失败')
+  state.historyFail=false
+  await page.getByRole('alert').getByRole('button',{name:'重试',exact:true}).click()
+  const previous=page.locator('.n-drawer .memory-record').filter({hasText:'使用 C++'})
+  await expect(previous).toContainText('历史资料')
+  await expect(page.locator('.n-drawer .memory-record').filter({hasText:'长期使用 Rust'})).toContainText('当前资料')
+  await previous.getByRole('button',{name:'查看出处'}).click()
+  await expect(page.locator('.source-message')).toContainText('我之前使用 C++')
+})
 
 test('portrait refresh is explicit, reloads the selected person and preserves the portrait on failure', async ({ page }) => {
   const state = await openMemories(page)

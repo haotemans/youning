@@ -13,12 +13,16 @@ test('nightly portrait defaults are visible and save with runtime settings', asy
   await expect(card.getByText('执行时刻（北京时间）',{exact:true})).toBeVisible()
   const limit=card.locator('.n-form-item').filter({hasText:'每晚画像人数上限'}).getByRole('textbox')
   const gap=card.locator('.n-form-item').filter({hasText:'画像间隔（秒）'}).getByRole('textbox')
+  const conversations=card.locator('.n-form-item').filter({hasText:'每晚会话批次上限'}).getByRole('textbox')
   await expect(limit).toHaveValue('10')
   await expect(gap).toHaveValue('60')
+  await expect(conversations).toHaveValue('20')
+  await conversations.fill('12')
   await page.getByRole('button',{name:'保存运行参数'}).click()
   await expect.poll(()=>saved?.consolidation.portrait_daily_limit).toBe(10)
   expect(saved.consolidation.portrait_interval_secs).toBe(60)
   expect(saved.consolidation.daily_time).toBe('03:00')
+  expect(saved.consolidation.conversation_daily_limit).toBe(12)
 })
 
 async function openModels(page, { saveError = false, staleReadback = false, testGate, loadGate, loadError = false } = {}) {

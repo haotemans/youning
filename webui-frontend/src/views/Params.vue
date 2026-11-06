@@ -32,6 +32,9 @@
                 <n-form-item label="每晚画像人数上限">
                   <n-input-number v-model:value="f.consolidation.portrait_daily_limit" :min="0" :max="100" :precision="0" style="width: 160px" />
                 </n-form-item>
+                <n-form-item label="每晚会话批次上限">
+                  <n-input-number v-model:value="f.consolidation.conversation_daily_limit" :min="0" :max="200" :precision="0" style="width: 160px" />
+                </n-form-item>
                 <n-form-item label="画像间隔（秒）">
                   <n-input-number v-model:value="f.consolidation.portrait_interval_secs" :min="60" :max="3600" :precision="0" style="width: 160px" />
                 </n-form-item>
@@ -133,7 +136,7 @@ const ok = ref(false)
 const restartList = ref([])
 
 const f = ref({
-  consolidation: { enabled: true, daily_time: '03:00', run_on_startup: false, portrait_daily_limit: 10, portrait_interval_secs: 60 },
+  consolidation: { enabled: true, daily_time: '03:00', run_on_startup: false, portrait_daily_limit: 10, portrait_interval_secs: 60, conversation_daily_limit: 20 },
   context: { budget_chars: 40000, k: 20, roster_mem_per: 3 },
   reply: {
     first_delay_min_ms: 300, first_delay_max_ms: 800, base_delay_ms: 600,

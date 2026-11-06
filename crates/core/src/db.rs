@@ -332,6 +332,83 @@ const MIGRATIONS: &[(&str, &str)] = &[
         CREATE INDEX IF NOT EXISTS idx_membership_pending ON membership_requests(bot_qq,status,reviewed_at,id);
         "#,
     ),
+    (
+        "V0.11 增量记忆批次、原文事实、会话日记及画像历史",
+        r#"
+        CREATE TABLE IF NOT EXISTS memory_progress (
+          stage TEXT NOT NULL, owner_id TEXT NOT NULL, chat_type TEXT NOT NULL DEFAULT '',
+          cursor INTEGER NOT NULL DEFAULT 0, baseline INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(stage,owner_id,chat_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_msg_conversation_id ON messages(chat_id,chat_type,msg_id);
+        CREATE INDEX IF NOT EXISTS idx_msg_person_id ON messages(sender_pid,msg_id);
+        -- A migration baseline preserves legacy records without pretending they were
+        -- processed by the new pipeline or paying to re-extract every historical chat.
+        INSERT OR IGNORE INTO memory_progress(stage,owner_id,chat_type,cursor,baseline)
+          SELECT 'mentions',chat_id,chat_type,MAX(msg_id),MAX(msg_id) FROM messages WHERE chat_type IN ('group','private') GROUP BY chat_id,chat_type;
+        INSERT OR IGNORE INTO memory_progress(stage,owner_id,chat_type,cursor,baseline)
+          SELECT 'conversation',chat_id,chat_type,MAX(msg_id),MAX(msg_id) FROM messages WHERE chat_type IN ('group','private') GROUP BY chat_id,chat_type;
+        INSERT OR IGNORE INTO memory_progress(stage,owner_id,chat_type,cursor,baseline)
+          SELECT 'portrait',m.sender_pid,'',MIN(MAX(m.msg_id),CAST(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff') AS INTEGER)),MIN(MAX(m.msg_id),CAST(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff') AS INTEGER))
+          FROM messages m JOIN state_kv s ON s.key='profile_refresh:v1:'||m.sender_pid
+          WHERE m.chat_type IN ('group','private') AND json_valid(s.value) AND CAST(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.cutoff') AS INTEGER)>0
+          GROUP BY m.sender_pid;
+        CREATE TABLE IF NOT EXISTS memory_batches (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          stage TEXT NOT NULL, owner_id TEXT NOT NULL, chat_type TEXT NOT NULL,
+          from_id INTEGER NOT NULL, end_id INTEGER NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('running','completed','failed')),
+          started_at INTEGER NOT NULL, lease_until INTEGER NOT NULL,
+          finished_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_batch_running ON memory_batches(stage,owner_id,chat_type) WHERE status='running';
+        CREATE INDEX IF NOT EXISTS idx_memory_batches_scope ON memory_batches(stage,owner_id,chat_type,id);
+        CREATE INDEX IF NOT EXISTS idx_memory_batches_daily ON memory_batches(stage,started_at);
+        CREATE TABLE IF NOT EXISTS memory_facts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER REFERENCES memory_batches(id),
+          owner_type TEXT NOT NULL, owner_id TEXT NOT NULL, content TEXT NOT NULL,
+          source_chat_id TEXT NOT NULL, source_chat_type TEXT NOT NULL,
+          source_msg_id INTEGER NOT NULL REFERENCES messages(msg_id), evidence_quote TEXT NOT NULL,
+          source_ts INTEGER NOT NULL, created_at INTEGER NOT NULL,
+          UNIQUE(owner_type,owner_id,content,source_msg_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_facts_owner ON memory_facts(owner_type,owner_id,source_msg_id);
+        CREATE TABLE IF NOT EXISTS memory_diary_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id INTEGER NOT NULL REFERENCES memory_batches(id),
+          owner_type TEXT NOT NULL, owner_id TEXT NOT NULL,
+          source_chat_id TEXT NOT NULL, source_chat_type TEXT NOT NULL,
+          date TEXT NOT NULL, content TEXT NOT NULL,
+          source_msg_id INTEGER NOT NULL, source_end_msg_id INTEGER NOT NULL,
+          message_count INTEGER NOT NULL, created_at INTEGER NOT NULL,
+          UNIQUE(batch_id,owner_type,owner_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_memory_diary_owner ON memory_diary_entries(owner_type,owner_id,date,id);
+        CREATE TABLE IF NOT EXISTS person_profile_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          person_id TEXT NOT NULL, field TEXT NOT NULL, content TEXT NOT NULL,
+          source_msg_id INTEGER NOT NULL, evidence_quote TEXT NOT NULL,
+          source_chat_id TEXT, source_chat_type TEXT, source_ts INTEGER NOT NULL,
+          recorded_at INTEGER NOT NULL,
+          UNIQUE(person_id,field,source_msg_id,content,evidence_quote)
+        );
+        CREATE INDEX IF NOT EXISTS idx_profile_versions_person ON person_profile_versions(person_id,field,source_msg_id,id);
+        INSERT OR IGNORE INTO person_profile_versions(person_id,field,content,source_msg_id,evidence_quote,source_chat_id,source_chat_type,source_ts,recorded_at)
+          SELECT p.person_id,p.field,p.content,p.source_msg_id,p.evidence_quote,m.chat_id,m.chat_type,p.updated_at,0
+          FROM person_profile_facts p LEFT JOIN messages m ON m.msg_id=p.source_msg_id;
+        CREATE TRIGGER IF NOT EXISTS profile_version_insert AFTER INSERT ON person_profile_facts BEGIN
+          INSERT OR IGNORE INTO person_profile_versions(person_id,field,content,source_msg_id,evidence_quote,source_chat_id,source_chat_type,source_ts,recorded_at)
+            VALUES(NEW.person_id,NEW.field,NEW.content,NEW.source_msg_id,NEW.evidence_quote,
+              (SELECT chat_id FROM messages WHERE msg_id=NEW.source_msg_id),
+              (SELECT chat_type FROM messages WHERE msg_id=NEW.source_msg_id),NEW.updated_at,CAST(strftime('%s','now') AS INTEGER));
+        END;
+        CREATE TRIGGER IF NOT EXISTS profile_version_update AFTER UPDATE ON person_profile_facts BEGIN
+          INSERT OR IGNORE INTO person_profile_versions(person_id,field,content,source_msg_id,evidence_quote,source_chat_id,source_chat_type,source_ts,recorded_at)
+            VALUES(NEW.person_id,NEW.field,NEW.content,NEW.source_msg_id,NEW.evidence_quote,
+              (SELECT chat_id FROM messages WHERE msg_id=NEW.source_msg_id),
+              (SELECT chat_type FROM messages WHERE msg_id=NEW.source_msg_id),NEW.updated_at,CAST(strftime('%s','now') AS INTEGER));
+        END;
+        "#,
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -512,6 +589,76 @@ mod tests {
             .unwrap(),
             "旧消息"
         );
+    }
+
+    #[tokio::test]
+    async fn v11_preserves_legacy_data_and_archives_profile_changes() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        conn.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p',1,2);
+          INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(1,'same','group','p','我长期使用 Rust',1),(2,'same','private','p','我现在使用 Python',2);
+          INSERT INTO person_profile_facts VALUES('p','technical_preferences','Rust',1,'我长期使用 Rust',1);
+          INSERT INTO long_memories(owner_type,owner_id,content,source,created_at,updated_at) VALUES('chat','same','旧群记忆保留','legacy',1,1);
+          INSERT INTO summaries(owner_type,owner_id,period,date,summary,created_at) VALUES('chat','same','daily','2026-11-05','旧摘要保留',1);
+          INSERT INTO state_kv(key,value,updated_at) VALUES('admin_password_hash','fixture-only',1);
+          DROP TRIGGER profile_version_insert; DROP TRIGGER profile_version_update;
+          DROP TABLE person_profile_versions; DROP TABLE memory_diary_entries; DROP TABLE memory_facts; DROP TABLE memory_batches; DROP TABLE memory_progress;
+          DROP INDEX idx_msg_conversation_id; DROP INDEX idx_msg_person_id; PRAGMA user_version=10;").await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM messages")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT content FROM long_memories")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+            "旧群记忆保留"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT summary FROM summaries")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+            "旧摘要保留"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT value FROM state_kv WHERE key='admin_password_hash'"
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap(),
+            "fixture-only"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM person_profile_versions")
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+            1
+        );
+        conn.execute_batch("UPDATE person_profile_facts SET content='Python',source_msg_id=2,evidence_quote='我现在使用 Python',updated_at=2").await.unwrap();
+        assert_eq!(
+            crate::memory::profile(&mut conn, "p", 1).await.unwrap()[0].content,
+            "Rust"
+        );
+        assert_eq!(
+            crate::memory::profile(&mut conn, "p", 2).await.unwrap()[0].content,
+            "Python"
+        );
+        let kinds: Vec<String> = sqlx::query_scalar(
+            "SELECT source_chat_type FROM person_profile_versions ORDER BY source_msg_id",
+        )
+        .fetch_all(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(kinds, vec!["group", "private"]);
     }
 
     async fn v3_database(conn: &mut sqlx::SqliteConnection) {
