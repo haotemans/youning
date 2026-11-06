@@ -187,7 +187,8 @@ pub async fn person(
             {
                 Ok(true) => written += 1,
                 Ok(false) => (),
-                Err(e) => return Err(e),
+                Err(e) if e.downcast_ref::<sqlx::Error>().is_some() => return Err(e),
+                Err(_) => tracing::warn!(source_msg_id=source.msg_id, "人物画像条目未通过校验"),
             }
         }
         processing::complete(&mut tx,&batch).await?;

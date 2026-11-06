@@ -366,3 +366,40 @@ async fn character_budget_never_advances_past_unread_messages() {
     refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
     assert_eq!(r.calls.lock().unwrap().len(), 3);
 }
+
+#[tokio::test]
+async fn portrait_write_failures_roll_back_versions_and_progress_but_invalid_items_are_skipped() {
+    let r = Rig::new(json!({"updates":[
+        {"field":"technical_preferences","value":"使用 Rust","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"},
+        {"field":"interests","value":"","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"},
+        {"field":"preferred_name","value":"小A","evidence_msg_id":1,"evidence_quote":"我长期使用 Rust"}
+    ]}).to_string()).await;
+    let mut conn = db::connect(&r.path).await.unwrap();
+    conn.execute_batch("INSERT INTO persons(person_id,first_seen,last_seen) VALUES('a',1,1);
+      INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('g','group','a','我长期使用 Rust',1);
+      CREATE TRIGGER fail_portrait BEFORE INSERT ON person_profile_facts WHEN NEW.field='preferred_name'
+        BEGIN SELECT RAISE(ABORT,'simulated write failure'); END;").await.unwrap();
+    assert!(refresh::person(&r.path, &r.gw, "a", true).await.is_err());
+    for table in ["person_profile_facts", "person_profile_versions"] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(&mut *conn)
+                .await
+                .unwrap(),
+            0
+        );
+    }
+    let scope = memory::processing::Scope::portrait("a");
+    assert_eq!(
+        memory::processing::cursor(&mut conn, &scope).await.unwrap(),
+        0
+    );
+    conn.execute_batch("DROP TRIGGER fail_portrait; UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:a';").await.unwrap();
+    let result = refresh::person(&r.path, &r.gw, "a", true).await.unwrap();
+    assert_eq!(result.updated_fields, 2);
+    assert_eq!(
+        memory::processing::cursor(&mut conn, &scope).await.unwrap(),
+        1
+    );
+    assert_eq!(r.calls.lock().unwrap().len(), 2);
+}

@@ -17,7 +17,7 @@ use crate::db::{OptionalExtension, SqliteExt};
 use crate::event::{ChatConsolidationOutcome, ConsolidationDonePayload, Event, EventBus};
 use crate::llm::{LlmGateway, Role};
 use crate::memory::processing;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
