@@ -33,6 +33,28 @@ pub async fn allowed(path: &Path, name: &str, kind: &str, ctx: &ToolCtx) -> Resu
     Ok(row.try_get::<bool, _>("enabled")?
         && (scopes.is_empty() || scopes.contains(&format!("{}:{}", ctx.chat_type, ctx.chat_id))))
 }
+
+pub async fn visible_skills(
+    path: &Path,
+    registry: &crate::skills::SkillRegistry,
+    ctx: &ToolCtx,
+) -> Result<Vec<(String, String)>> {
+    let mut result = Vec::new();
+    for (name, description) in registry.describe_for_chat(&ctx.chat_id) {
+        register(
+            path,
+            &name,
+            "skill",
+            &description,
+            &json!({"type":"object"}),
+        )
+        .await?;
+        if allowed(path, &name, "skill", ctx).await? {
+            result.push((name, description));
+        }
+    }
+    Ok(result)
+}
 pub fn validate(schema: &Value, args: &Value) -> Result<()> {
     if let Some(kind) = schema["type"].as_str() {
         ensure!(

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS task_invocations (
 CREATE INDEX IF NOT EXISTS task_invocation_task ON task_invocations(task_id,revision,started_at);
 CREATE TABLE IF NOT EXISTS task_outbox (
  task_id TEXT NOT NULL REFERENCES tasks(task_id), revision INTEGER NOT NULL,
- text TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'ready', receipt TEXT,
+ text TEXT NOT NULL, artifacts TEXT NOT NULL DEFAULT '[]', state TEXT NOT NULL DEFAULT 'ready', receipt TEXT,
  updated_at INTEGER NOT NULL, PRIMARY KEY(task_id,revision)
 );
 CREATE TABLE IF NOT EXISTS capability_catalog (
@@ -46,3 +46,14 @@ CREATE TABLE IF NOT EXISTS capability_invocations (
  summary TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS capability_origin_once ON capability_invocations(name,kind,chat_type,chat_id,anchor_id) WHERE anchor_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS memory_material_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
+INSERT OR IGNORE INTO memory_material_epoch VALUES(1,0);
+CREATE TRIGGER IF NOT EXISTS cache_memory_items_insert AFTER INSERT ON memory_items BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_memory_items_update AFTER UPDATE ON memory_items BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_memory_items_delete AFTER DELETE ON memory_items BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_person_profile_versions_insert AFTER INSERT ON person_profile_versions BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_person_profile_versions_update AFTER UPDATE ON person_profile_versions BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_person_profile_versions_delete AFTER DELETE ON person_profile_versions BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_messages_edit AFTER UPDATE OF text,sender_pid,chat_id,chat_type,ts ON messages BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;
+CREATE TRIGGER IF NOT EXISTS cache_messages_delete AFTER DELETE ON messages BEGIN UPDATE memory_material_epoch SET epoch=epoch+1 WHERE id=1; END;

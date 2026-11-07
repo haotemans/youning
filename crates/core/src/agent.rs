@@ -1,6 +1,5 @@
 //! Durable bounded Agent execution. See docs/features/core/tasks.md and ADR-0012.
 
-
 pub mod delivery;
 pub mod runtime;
 use crate::db::params;
@@ -250,6 +249,26 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
     let mut tool_failures = 0u32;
 
     loop {
+        if serde_json::to_vec(&history)?.len() > 48_000 && history.len() > 10 {
+            let mut c = crate::db::connect(&deps.db_path).await?;
+            let receipts=sqlx::query("SELECT id,tool_name,state,substr(result,1,600) AS result FROM task_invocations WHERE task_id=?1 AND revision=?2 ORDER BY started_at LIMIT 64").bind(&task_id).bind(checkpoint.revision).fetch_all(&mut *c).await?;
+            let receipts:Vec<Value>=receipts.iter().map(|r|Ok(json!({"receipt_id":r.try_get::<String,_>("id")?,"tool":r.try_get::<String,_>("tool_name")?,"state":r.try_get::<String,_>("state")?,"result_preview":r.try_get::<Option<String>,_>("result")?}))).collect::<Result<_>>()?;
+            let mut compact = vec![
+                history[0].clone(),
+                json!({"role":"user","content":json!({"phase_compaction":true,"verified_invocations":receipts,"note":"中间记录已归档，结果预览可能截断；不得编造省略内容或重放已完成动作"}).to_string()}),
+            ];
+            compact.extend(
+                history
+                    .iter()
+                    .rev()
+                    .take(8)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev(),
+            );
+            history = compact;
+        }
         checkpoint.history = history.clone();
         runtime::save(&deps.db_path, &task_id, &checkpoint).await?;
         let user = render_history(&history);

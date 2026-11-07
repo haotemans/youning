@@ -63,7 +63,9 @@ async fn claim(path: &Path, options: &Options, at: i64) -> Result<Claim> {
          GROUP BY m.sender_pid
          HAVING MAX(m.msg_id)>COALESCE(progress.cursor,0)
            AND COALESCE(json_extract(CASE WHEN json_valid(s.value) THEN s.value ELSE '{}' END,'$.attempt'),0)<=?2-300
-         ORDER BY COALESCE(s.updated_at,0),MAX(m.ts) DESC,m.sender_pid LIMIT 1")
+         ORDER BY CASE WHEN COALESCE(s.updated_at,0)<?2-604800 THEN 0 ELSE 1 END,
+         CASE WHEN EXISTS(SELECT 1 FROM memory_facts f WHERE f.owner_type='person' AND f.owner_id=m.sender_pid AND f.source_msg_id>COALESCE(progress.cursor,0)) THEN 0 ELSE 1 END,
+         COALESCE(s.updated_at,0),MAX(m.ts) DESC,m.sender_pid LIMIT 1")
         .bind(prefix.clone()).bind(at).fetch_optional(&mut *tx).await?;
     let Some(person) = person else {
         return Ok(Claim::Done);

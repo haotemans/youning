@@ -118,13 +118,30 @@ pub async fn current(
     cutoff: i64,
     at: i64,
 ) -> Result<Vec<Value>> {
-    let rows=sqlx::query("WITH visible AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY item_key,source_chat_type,source_chat_id ORDER BY source_end_id DESC,id DESC) AS rn FROM memory_items WHERE owner_type=?1 AND owner_id=?2 AND source_end_id<=?3 AND ((source_chat_id=?4 AND source_chat_type=?5) OR (owner_type='person' AND source_chat_type='group' AND kind IN ('portrait','inference','fact')))) SELECT * FROM visible WHERE rn=1 AND status!='corrected' ORDER BY source_end_id DESC LIMIT 24")
+    let key = super::material_cache::key(conn, owner_type, owner, chat, chat_type, cutoff).await?;
+    if let Some(mut items) = super::material_cache::get(&key) {
+        for item in &mut items {
+            if item["valid_until"].as_i64().is_some_and(|v| v <= at) {
+                item["status"] = json!("expired");
+            }
+        }
+        return Ok(items);
+    }
+    let rows=sqlx::query("WITH visible AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY item_key,source_chat_type,source_chat_id ORDER BY source_end_id DESC,id DESC) AS rn FROM memory_items WHERE owner_type=?1 AND owner_id=?2 AND source_end_id<=?3 AND ((source_chat_id=?4 AND source_chat_type=?5) OR (owner_type='person' AND source_chat_type='group' AND kind IN ('portrait','inference','fact')))) SELECT * FROM visible WHERE rn=1 AND status!='corrected' AND NOT EXISTS(SELECT 1 FROM json_each(visible.evidence) e LEFT JOIN messages m ON m.msg_id=json_extract(e.value,'$.msg_id') WHERE m.msg_id IS NULL OR m.sender_pid='self' OR (visible.owner_type='person' AND m.sender_pid!=visible.owner_id) OR m.chat_id!=visible.source_chat_id OR m.chat_type!=visible.source_chat_type OR instr(COALESCE(m.text,''),json_extract(e.value,'$.quote'))=0) ORDER BY source_end_id DESC LIMIT 24")
         .bind(owner_type).bind(owner).bind(cutoff).bind(chat).bind(chat_type).fetch_all(&mut *conn).await?;
-    rows.iter().map(|r| Ok(json!({"id":r.try_get::<i64,_>("id")?,"key":r.try_get::<String,_>("item_key")?,
+    let items:Vec<Value>=rows.iter().map(|r| Ok(json!({"id":r.try_get::<i64,_>("id")?,"key":r.try_get::<String,_>("item_key")?,
         "kind":r.try_get::<String,_>("kind")?,"content":r.try_get::<String,_>("content")?,
-        "status":if r.try_get::<Option<i64>,_>("valid_until")?.is_some_and(|v|v<=at){"expired".to_owned()}else{r.try_get::<String,_>("status")?},
+        "status":r.try_get::<String,_>("status")?,"valid_until":r.try_get::<Option<i64>,_>("valid_until")?,
         "source_chat_id":r.try_get::<String,_>("source_chat_id")?,"source_chat_type":r.try_get::<String,_>("source_chat_type")?,
-        "evidence":serde_json::from_str::<Value>(&r.try_get::<String,_>("evidence")?)?,"version":r.try_get::<i64,_>("source_end_id")?}))).collect()
+        "evidence":serde_json::from_str::<Value>(&r.try_get::<String,_>("evidence")?)?,"version":r.try_get::<i64,_>("source_end_id")?}))).collect::<Result<_>>()?;
+    super::material_cache::put(key, &items);
+    let mut items = items;
+    for item in &mut items {
+        if item["valid_until"].as_i64().is_some_and(|v| v <= at) {
+            item["status"] = json!("expired");
+        }
+    }
+    Ok(items)
 }
 
 /// Filter legacy facts too; a global directory view does not authorize cross-chat disclosure.
@@ -135,6 +152,13 @@ pub async fn scoped_profile(
     chat_type: &str,
     cutoff: i64,
 ) -> Result<Vec<super::ProfileFact>> {
+    let key = super::material_cache::key(conn, "legacy", person, chat, chat_type, cutoff).await?;
+    if let Some(items) = super::material_cache::get(&key) {
+        return Ok(items
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?);
+    }
     let mut result = Vec::new();
     for fact in super::profile(conn, person, cutoff).await? {
         let visible: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE msg_id=?1 AND (chat_type='group' OR (chat_type=?2 AND chat_id=?3)))")
@@ -143,5 +167,12 @@ pub async fn scoped_profile(
             result.push(fact);
         }
     }
+    super::material_cache::put(
+        key,
+        &result
+            .iter()
+            .map(|f| serde_json::to_value(f).unwrap())
+            .collect::<Vec<_>>(),
+    );
     Ok(result)
 }

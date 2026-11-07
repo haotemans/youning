@@ -53,7 +53,9 @@ async fn drain(deps: &PipelineDeps) -> Result<()> {
             let cfg=*deps.ctx_cfg.read().unwrap();
             let mut snapshot=crate::context_builder::capture_reply_snapshot(&deps.db_path,&m,anchor,&cfg).await?;
             snapshot.delivery_task=Some((id.clone(),revision));
-            snapshot.execution_results.push(json!({"task_id":id,"goal":row.try_get::<String,_>("goal")?,"state":row.try_get::<String,_>("phase")?,"result":row.try_get::<Option<String>,_>("final_text")?,"error":row.try_get::<Option<String>,_>("stop_reason")?}));
+            let receipt_rows=sqlx::query("SELECT i.tool_name,i.state,substr(i.result,1,2000) AS result FROM task_invocations i JOIN task_runtime r ON r.task_id=i.task_id WHERE r.root_id=?1 AND i.revision=r.revision ORDER BY i.started_at LIMIT 16").bind(&id).fetch_all(&mut *c).await?;
+            let receipts:Vec<serde_json::Value>=receipt_rows.iter().map(|r|Ok(json!({"tool":r.try_get::<String,_>("tool_name")?,"state":r.try_get::<String,_>("state")?,"result_preview":r.try_get::<Option<String>,_>("result")?}))).collect::<Result<_>>()?;
+            snapshot.execution_results.push(json!({"invocations":receipts,"task_id":id,"goal":row.try_get::<String,_>("goal")?,"state":row.try_get::<String,_>("phase")?,"result":row.try_get::<Option<String>,_>("final_text")?,"error":row.try_get::<Option<String>,_>("stop_reason")?}));
             let mut decision=crate::decision::decide(&deps.db_path,&gw,&deps.bus,&deps.mood,&m,deps.skill_registry.as_ref(),&snapshot).await;
             // Completion is a response event, not fresh authority to dispatch an external action.
             decision.output.action=crate::decision::DecisionAction::Reply;

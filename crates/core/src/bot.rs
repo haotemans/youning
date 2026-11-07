@@ -677,11 +677,20 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                 match (&deps.reply, bot_chat_ready) {
                     (Some(engine), true) => {
                         let reply_cfg = *deps.reply_cfg.read().unwrap();
-                        let catalog = deps
-                            .skill_registry
-                            .as_ref()
-                            .map(|registry| registry.describe_for_chat(&m.chat_id))
-                            .unwrap_or_default();
+                        let catalog = if let Some(registry) = deps.skill_registry.as_ref() {
+                            let ctx = crate::tools::ToolCtx {
+                                task_id: None,
+                                chat_id: m.chat_id.clone(),
+                                chat_type: m.chat_type.clone(),
+                                sender_pid: m.sender_pid.clone(),
+                                locale: None,
+                            };
+                            crate::capabilities::visible_skills(&deps.db_path, registry, &ctx)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
                         if let Err(e) = reply_engine::prepare_and_enqueue(
                             engine,
                             &snapshot,

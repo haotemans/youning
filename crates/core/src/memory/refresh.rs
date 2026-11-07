@@ -1,5 +1,5 @@
 //! Bounded, author-verified portrait repair from original messages across conversations.
-use super::{processing, profile, update_profile, ProfileUpdate};
+use super::{processing, update_profile, ProfileUpdate};
 use crate::{
     db::{self, params, SqliteExt},
     llm::{LlmGateway, Role},
@@ -71,7 +71,7 @@ pub async fn person(
         )
         .await?;
     ensure!(exists, "人物不存在");
-    let current = profile(&mut conn, person, i64::MAX).await?;
+
     let scope = processing::Scope::portrait(person);
     let previous = processing::cursor(&mut conn, &scope).await?;
     let rows = sqlx::query("SELECT msg_id,chat_id,chat_type,text,ts FROM messages WHERE sender_pid=?1 AND chat_type IN ('group','private') AND msg_id>?2 AND length(trim(COALESCE(text,'')))>=4 ORDER BY msg_id LIMIT 160")
@@ -79,7 +79,16 @@ pub async fn person(
     let mut cutoff = previous;
     let mut sources = Vec::new();
     let mut chars = 0;
+    let mut visibility: Option<(String, String)> = None;
     for row in rows {
+        let row_kind: String = row.try_get("chat_type")?;
+        let row_chat: String = row.try_get("chat_id")?;
+        if visibility.as_ref().is_some_and(|(kind, chat)| {
+            kind != &row_kind || (kind == "private" && chat != &row_chat)
+        }) {
+            break;
+        }
+        visibility.get_or_insert((row_kind, row_chat));
         let original: String = row.try_get("text")?;
         let id: i64 = row.try_get("msg_id")?;
         if crate::consolidation::is_sensitive(&original) {
@@ -150,9 +159,23 @@ pub async fn person(
         tx.commit().await?;
         return Ok(result("no_evidence", 0));
     }
+    let (visible_kind, visible_chat) = visibility.as_ref().unwrap();
+    let current =
+        super::semantic::scoped_profile(&mut conn, person, visible_chat, visible_kind, i64::MAX)
+            .await?;
+    let current_memory = super::semantic::current(
+        &mut conn,
+        "person",
+        person,
+        visible_chat,
+        visible_kind,
+        cutoff,
+        now(),
+    )
+    .await?;
     drop(conn); // No reserved connection or SQL transaction while awaiting a model.
     let extracted: Result<RefreshResult> = async {
-        let user = json!({"person_id":person,"current_profile":current,"messages":sources}).to_string();
+        let user = json!({"person_id":person,"current_profile":current,"current_memory":current_memory,"messages":sources}).to_string();
         let raw = gw
             .chat(Role::Decision, &format!("{SYSTEM}{}", super::semantic::CONTRACT), &user, true)
             .await

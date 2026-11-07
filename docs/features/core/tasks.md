@@ -2,7 +2,7 @@
 
 [返回功能索引](../README.md) · [返回文档总索引](../../README.md) · [本模块索引](README.md)
 
-**当前状态：已实现基础闭环（自动回聊未完成）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
+**当前状态：已实现持久执行与结果回聊（需真实环境验收）**。此判断基于当前 `main` 的代码入口静态核对；真实模型、NapCat 与外部 API 需在目标环境单独验收。
 
 > 持久化任务队列、有限轮工具调用、失败终态和任务时间轴。
 
@@ -10,12 +10,12 @@
 
 - Decision 的 `start_task` 将目标持久化为 `tasks`，事件只负责唤醒 Runner；Runner 也扫描数据库等待任务。
 - `agent_exec` 使用 JSON 动作协议调度工具；任务与事件流水在 WebUI「任务回放」查看。
-- 当前默认同时最多 3 个任务、每任务最多 10 轮、单工具超时 120 秒；解析与工具错误有终止阈值。
+- 当前默认同时最多 2 个任务、Router未指定时每根任务最多 10 轮、单工具超时 120 秒；解析与工具错误有终止阈值。
 - 可选 Docker 开发沙箱默认关闭，仅对特定工具提供隔离，不代表所有插件和 MCP 在沙箱里执行。
 
 ## 边界
 
-- **任务执行结果尚未完整自动发回 QQ 聊天**；中间 `reply` 动作只是写入任务事件，不是对群发送。
+- 根任务完成/等待补充经Decision与Chat进入持久outbox；中间 `reply` 动作仍只写入任务事件。
 - 重启后已开始但中断的可能有副作用任务不盲目重跑；无法宣称恰好一次执行。
 - 参考[Agent 沙箱](../../reference/agent-sandbox.md)。
 
@@ -42,6 +42,8 @@ Agent支持 tool_call/reply/done/delegate/wait_input。每次拆分最多2个子
 
 pause/cancel/resume/amend 必须匹配原发起人、会话编号和类型；WebUI管理员入口单独受session认证。任务版本使迟到结果失效，修改/暂停会取消子任务，已经开始的外部动作无法保证撤销。已开始但无完成回执的工具在重启后终止并提示核实，安全检查不交给另一个模型循环。
 
-根任务结果和等待补充事件经Decision再由Chat组织，生成正文先入task_outbox，实际发送状态与任务完成分开记录。ready可恢复，sending/unknown不自动重发；需要后续人工核实。仅收到适配层message_id记sent，不证明群成员已阅读。任务页显示阶段、原始调用回执状态、等待原因及暂停/继续/取消。该链路目前回传正文，Agent附件尚未自动投递；普通插件媒体投递继续走已有链路。
+根任务结果和等待补充事件经Decision再由Chat组织，生成正文先入task_outbox，实际发送状态与任务完成分开记录。ready可恢复，sending/unknown不自动重发；需要后续人工核实。仅收到适配层message_id记sent，不证明群成员已阅读。任务页显示阶段、原始调用回执状态、等待原因及暂停/继续/取消。该链路回传正文和当前版本成功回执的至多4个附件，图片用base64，视频沿用已有共享路径方式；总附件限30MiB，预检失败停止发送并标failed，不丢弃原产物。普通插件媒体投递继续走已有链路。
 
 新增实现 [`runtime.rs`](../../../crates/core/src/agent/runtime.rs)、[`delivery.rs`](../../../crates/core/src/agent/delivery.rs)、[`runtime_api.rs`](../../../crates/webui/src/runtime_api.rs)，验证 [`context_runtime.rs`](../../../crates/core/tests/context_runtime.rs)。以上为实现契约及mock验证目标，不能代替真实QQ/模型验收。
+
+长任务历史超过48KB且多于10项时进行确定性的阶段压缩：保留原目标、工具回执索引和最近8项记录，完整结果仍在SQLite；压缩本身不增加模型调用或算作任务进展。

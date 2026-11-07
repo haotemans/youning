@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod material_cache;
 pub mod nightly;
 pub mod processing;
 pub mod refresh;
@@ -88,7 +89,7 @@ pub async fn update_profile(
     ).await? > 0)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileFact {
     pub field: String,
     pub content: String,

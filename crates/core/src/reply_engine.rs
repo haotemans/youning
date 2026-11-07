@@ -30,6 +30,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use yuantuan_plugin_api::{ArtifactRetention, DeliveryPolicy};
 
+#[cfg(test)]
+mod task_delivery_tests;
+
 // ---------- 发送抽象（core 不依赖适配层：由装配侧注入闭包） ----------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -675,6 +678,10 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
         } => {
             if let Err(e) = process_task_result(eng, &job, &task_id, revision, &text).await {
                 warn!(%e,"任务回聊发送失败");
+                if let Ok(mut conn) = crate::db::connect(&eng.db_path).await {
+                    let _=conn.execute("UPDATE task_outbox SET state='failed',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready'",params![task_id,revision]).await;
+                    let _=conn.execute("UPDATE task_runtime SET delivery_state='failed',stop_reason=?3 WHERE task_id=?1 AND revision=?2 AND delivery_state!='sent'",params![task_id,revision,e.to_string()]).await;
+                }
             }
         }
         JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
@@ -712,6 +719,25 @@ async fn process_task_result(
     text: &str,
 ) -> Result<()> {
     let mut conn = crate::db::connect(&eng.db_path).await?;
+    let raw: Option<String> = sqlx::query_scalar(
+        "SELECT artifacts FROM task_outbox WHERE task_id=?1 AND revision=?2 AND state='ready'",
+    )
+    .bind(id)
+    .bind(revision)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(raw) = raw else { return Ok(()) };
+    let artifacts: Vec<String> = serde_json::from_str(&raw)?;
+    let mut media = Vec::new();
+    let mut total_bytes = 0;
+    for artifact in &artifacts {
+        let path = Path::new(artifact);
+        let kind = media_kind(path)?;
+        let bytes = tokio::fs::read(path).await?;
+        total_bytes += bytes.len();
+        anyhow::ensure!(total_bytes <= 30 * 1024 * 1024, "任务附件总大小超过30MiB");
+        media.push(json!({"type":kind,"data":{"file":if kind=="image"{format!("base64://{}",base64::engine::general_purpose::STANDARD.encode(bytes))}else{meme::file_url(path)}}}));
+    }
     let claimed=conn.execute("UPDATE task_outbox SET state='sending',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready' AND EXISTS(SELECT 1 FROM task_runtime r WHERE r.task_id=?1 AND r.revision=?2 AND r.phase NOT IN ('cancelled','paused'))",params![id,revision]).await?;
     if claimed != 1 {
         return Ok(());
@@ -723,6 +749,7 @@ async fn process_task_result(
             segments.push(json!({"type":"at","data":{"qq":qq.to_string()}}));
         }
     }
+    segments.extend(media);
     segments.push(json!({"type":"text","data":{"text":text}}));
     // One attempt. An ambiguous timeout is not evidence that no message was delivered.
     let result = (eng.send)(SendRequest {
@@ -735,7 +762,14 @@ async fn process_task_result(
     let confirmed = result.as_ref().ok().and_then(|v| v["message_id"].as_i64());
     if let Some(message_id) = confirmed {
         eng.self_ids.record(message_id);
-        insert_self_message_ex(&eng.db_path, job, text, false, Some(message_id)).await;
+        insert_self_message_ex(
+            &eng.db_path,
+            job,
+            text,
+            !artifacts.is_empty(),
+            Some(message_id),
+        )
+        .await;
     }
     let mut conn = crate::db::connect(&eng.db_path).await?;
     let mut tx = conn.begin_immediate().await?;
@@ -1456,8 +1490,16 @@ pub async fn prepare_and_enqueue(
     let (chat_type, target, mention_qq) = route_of(msg)?;
     if let Some((id, revision)) = &snapshot.delivery_task {
         let mut conn = crate::db::connect(&engine.db_path).await?;
-        conn.execute("INSERT OR IGNORE INTO task_outbox(task_id,revision,text,updated_at) SELECT ?1,?2,?3,unixepoch() WHERE EXISTS(SELECT 1 FROM task_runtime WHERE task_id=?1 AND revision=?2 AND delivery_state='preparing')",
-            params![id,revision,bubbles.iter().map(|b|b.text.as_str()).collect::<Vec<_>>().join("\n")]).await?;
+        let receipts=sqlx::query_scalar::<_,String>("SELECT i.result FROM task_invocations i JOIN task_runtime r ON r.task_id=i.task_id WHERE r.root_id=?1 AND i.revision=r.revision AND i.state='succeeded' AND r.phase!='cancelled' ORDER BY i.started_at LIMIT 64").bind(id).fetch_all(&mut *conn).await?;
+        let artifacts: std::collections::BTreeSet<String> = receipts
+            .iter()
+            .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+            .flat_map(|v| v["artifacts"].as_array().cloned().unwrap_or_default())
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .take(4)
+            .collect();
+        conn.execute("INSERT OR IGNORE INTO task_outbox(task_id,revision,text,artifacts,updated_at) SELECT ?1,?2,?3,?4,unixepoch() WHERE EXISTS(SELECT 1 FROM task_runtime WHERE task_id=?1 AND revision=?2 AND delivery_state='preparing')",
+            params![id,revision,bubbles.iter().map(|b|b.text.as_str()).collect::<Vec<_>>().join("\n"),serde_json::to_string(&artifacts)?]).await?;
         return Ok(());
     }
     engine.enqueue(ReplyJob {

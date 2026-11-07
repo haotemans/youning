@@ -239,9 +239,20 @@ pub async fn decide(
     }
     let user_prompt = ctx.to_string();
     let visible_ids = visible_message_ids(&ctx);
-    let catalog: Vec<(String, String)> = skills
-        .map(|r| r.describe_for_chat(&msg.chat_id))
-        .unwrap_or_default();
+    let catalog = if let Some(registry) = skills {
+        let ctx = crate::tools::ToolCtx {
+            task_id: None,
+            chat_id: msg.chat_id.clone(),
+            chat_type: msg.chat_type.clone(),
+            sender_pid: msg.sender_pid.clone(),
+            locale: None,
+        };
+        crate::capabilities::visible_skills(db_path, registry, &ctx)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
     let sys_prompt = build_system_prompt(&catalog);
 
     let raw = if user_prompt.chars().count() > 8000 {

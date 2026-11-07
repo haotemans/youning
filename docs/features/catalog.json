@@ -61,7 +61,8 @@
       "status": "已实现（代码入口）",
       "doc": "docs/features/core/replies.md",
       "source": [
-        "crates/core/src/reply_engine.rs"
+        "crates/core/src/reply_engine.rs",
+        "crates/core/src/reply_engine/task_delivery_tests.rs"
       ],
       "tests": [
         "crates/adapter-qq/tests/reply.rs",
@@ -85,7 +86,8 @@
         "crates/core/src/memory/refresh.rs",
         "crates/core/src/memory/nightly.rs",
         "crates/core/src/memory/processing.rs",
-        "crates/core/src/memory/semantic.rs"
+        "crates/core/src/memory/semantic.rs",
+        "crates/core/src/memory/material_cache.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
