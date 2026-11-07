@@ -280,7 +280,13 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
             system.len() + user.len(),
         )
         .await?;
-        let raw = gw.chat(Role::AgentExec, &system, &user, true).await;
+        let remaining = checkpoint.deadline.saturating_sub(now_secs()).max(1) as u64;
+        let raw = tokio::time::timeout(
+            std::time::Duration::from_secs(remaining),
+            gw.chat(Role::AgentExec, &system, &user, true),
+        )
+        .await
+        .context("任务时间预算用完")?;
 
         let content = match raw {
             Ok(c) => c,
@@ -397,11 +403,13 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
                     runtime::begin_invocation(&deps.db_path, &task_id, &checkpoint, &name, &args)
                         .await?;
                 // 超时保留 started 回执，不能盲目重放。
-                let output = tokio::time::timeout(TOOL_TIMEOUT, tool.call(&ctx, args.clone()))
-                    .await
-                    .with_context(|| {
-                        format!("工具 {name} 超时（{} 秒）", TOOL_TIMEOUT.as_secs())
-                    })?;
+                let remaining = checkpoint.deadline.saturating_sub(now_secs()).max(1) as u64;
+                let output = tokio::time::timeout(
+                    TOOL_TIMEOUT.min(std::time::Duration::from_secs(remaining)),
+                    tool.call(&ctx, args.clone()),
+                )
+                .await
+                .with_context(|| format!("工具 {name} 超时（{} 秒）", TOOL_TIMEOUT.as_secs()))?;
                 match output {
                     Ok(out) => {
                         tool_failures = 0;

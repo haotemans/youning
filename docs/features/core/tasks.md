@@ -47,3 +47,5 @@ pause/cancel/resume/amend 必须匹配原发起人、会话编号和类型；Web
 新增实现 [`runtime.rs`](../../../crates/core/src/agent/runtime.rs)、[`delivery.rs`](../../../crates/core/src/agent/delivery.rs)、[`runtime_api.rs`](../../../crates/webui/src/runtime_api.rs)，验证 [`context_runtime.rs`](../../../crates/core/tests/context_runtime.rs)。以上为实现契约及mock验证目标，不能代替真实QQ/模型验收。
 
 长任务历史超过48KB且多于10项时进行确定性的阶段压缩：保留原目标、工具回执索引和最近8项记录，完整结果仍在SQLite；压缩本身不增加模型调用或算作任务进展。
+
+持久outbox入发送队列前先标queued，避免忙碌会话重复积压；重启只恢复未开始发送的queued正文，sending保持待核实。模型等待与工具调用均受根任务剩余时间限制。任务UI操作与错误回显见 [`tasks-flow.spec.js`](../../../webui-frontend/tests/tasks-flow.spec.js)，纳入Linux浏览器CI。

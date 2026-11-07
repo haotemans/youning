@@ -140,7 +140,7 @@ pub async fn invoke(
     let id = {
         let mut c = db::connect(path).await?;
         sqlx::query_scalar::<_,i64>("INSERT INTO capability_invocations(name,kind,chat_id,chat_type,actor,anchor_id,state,started_at) VALUES(?1,'skill',?2,?3,?4,?5,'started',unixepoch()) RETURNING id")
-            .bind(def.name).bind(&ctx.chat_id).bind(&ctx.chat_type).bind(&ctx.sender_pid).bind(anchor).fetch_one(&mut *c).await?
+            .bind(def.name).bind(&ctx.chat_id).bind(&ctx.chat_type).bind(&ctx.sender_pid).bind(anchor.filter(|id|*id>0)).fetch_one(&mut *c).await?
     };
     let result = skill.invoke(ctx, slots).await;
     let summary = match &result {

@@ -43,6 +43,7 @@ pub struct Checkpoint {
     pub history: Vec<Value>,
     pub allowed: Vec<String>,
     pub no_progress: i64,
+    pub deadline: i64,
 }
 
 pub async fn load(path: &Path, id: &str) -> Result<Option<Checkpoint>> {
@@ -58,6 +59,7 @@ pub async fn load(path: &Path, id: &str) -> Result<Option<Checkpoint>> {
             history: serde_json::from_str(&r.try_get::<String, _>("history")?)?,
             allowed: serde_json::from_str(&r.try_get::<String, _>("allowed_tools")?)?,
             no_progress: r.try_get("no_progress")?,
+            deadline: r.try_get("deadline")?,
         })
     })
     .transpose()

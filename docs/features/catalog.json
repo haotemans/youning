@@ -135,7 +135,8 @@
       "tests": [
         "crates/core/tests/agent_loop.rs",
         "crates/core/tests/sandbox_docker.rs",
-        "crates/core/tests/context_runtime.rs"
+        "crates/core/tests/context_runtime.rs",
+        "webui-frontend/tests/tasks-flow.spec.js"
       ],
       "module": "core"
     },

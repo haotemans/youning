@@ -679,7 +679,7 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
             if let Err(e) = process_task_result(eng, &job, &task_id, revision, &text).await {
                 warn!(%e,"任务回聊发送失败");
                 if let Ok(mut conn) = crate::db::connect(&eng.db_path).await {
-                    let _=conn.execute("UPDATE task_outbox SET state='failed',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready'",params![task_id,revision]).await;
+                    let _=conn.execute("UPDATE task_outbox SET state='failed',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state IN ('ready','queued')",params![task_id,revision]).await;
                     let _=conn.execute("UPDATE task_runtime SET delivery_state='failed',stop_reason=?3 WHERE task_id=?1 AND revision=?2 AND delivery_state!='sent'",params![task_id,revision,e.to_string()]).await;
                 }
             }
@@ -720,7 +720,7 @@ async fn process_task_result(
 ) -> Result<()> {
     let mut conn = crate::db::connect(&eng.db_path).await?;
     let raw: Option<String> = sqlx::query_scalar(
-        "SELECT artifacts FROM task_outbox WHERE task_id=?1 AND revision=?2 AND state='ready'",
+        "SELECT artifacts FROM task_outbox WHERE task_id=?1 AND revision=?2 AND state IN ('ready','queued')",
     )
     .bind(id)
     .bind(revision)
@@ -733,12 +733,17 @@ async fn process_task_result(
     for artifact in &artifacts {
         let path = Path::new(artifact);
         let kind = media_kind(path)?;
+        let metadata = tokio::fs::metadata(path).await?;
+        anyhow::ensure!(
+            metadata.is_file() && metadata.len() <= 30 * 1024 * 1024,
+            "任务附件无效或过大"
+        );
         let bytes = tokio::fs::read(path).await?;
         total_bytes += bytes.len();
         anyhow::ensure!(total_bytes <= 30 * 1024 * 1024, "任务附件总大小超过30MiB");
         media.push(json!({"type":kind,"data":{"file":if kind=="image"{format!("base64://{}",base64::engine::general_purpose::STANDARD.encode(bytes))}else{meme::file_url(path)}}}));
     }
-    let claimed=conn.execute("UPDATE task_outbox SET state='sending',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready' AND EXISTS(SELECT 1 FROM task_runtime r WHERE r.task_id=?1 AND r.revision=?2 AND r.phase NOT IN ('cancelled','paused'))",params![id,revision]).await?;
+    let claimed=conn.execute("UPDATE task_outbox SET state='sending',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state IN ('ready','queued') AND EXISTS(SELECT 1 FROM task_runtime r WHERE r.task_id=?1 AND r.revision=?2 AND r.phase NOT IN ('cancelled','paused'))",params![id,revision]).await?;
     if claimed != 1 {
         return Ok(());
     }

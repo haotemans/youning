@@ -46,6 +46,9 @@ jobs:
       - name: Memory browser tests
         working-directory: webui-frontend
         run: npm run test:memories
+      - name: Task runtime browser tests
+        working-directory: webui-frontend
+        run: npm run test:tasks
       - name: Model configuration browser tests
         working-directory: webui-frontend
         run: npm run test:models

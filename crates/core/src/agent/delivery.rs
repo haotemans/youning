@@ -15,6 +15,15 @@ pub async fn run(deps: Arc<PipelineDeps>) {
     if let Ok(mut c) = db::connect(&deps.db_path).await {
         let _=c.execute("UPDATE task_runtime SET delivery_state='pending' WHERE delivery_state='preparing' AND NOT EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=task_runtime.task_id AND o.revision=task_runtime.revision)",params![]).await;
     }
+    if let Ok(mut c) = db::connect(&deps.db_path).await {
+        let _ = c
+            .execute(
+                "UPDATE task_outbox SET state='ready' WHERE state='queued'",
+                params![],
+            )
+            .await;
+        let _=c.execute("UPDATE task_runtime SET delivery_state='unknown' WHERE EXISTS(SELECT 1 FROM task_outbox o WHERE o.task_id=task_runtime.task_id AND o.revision=task_runtime.revision AND o.state='sending')",params![]).await;
+    }
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -29,6 +38,7 @@ async fn drain(deps: &PipelineDeps) -> Result<()> {
     let Some(engine) = &deps.reply else {
         return Ok(());
     };
+    queue_ready(deps, engine).await?;
     let gw = deps.llm.read().unwrap().clone();
     let Some(gw) =
         gw.filter(|g| g.role(Role::BotChat).is_some() && g.role(Role::Decision).is_some())
@@ -68,6 +78,13 @@ async fn drain(deps: &PipelineDeps) -> Result<()> {
             c.execute("UPDATE task_runtime SET delivery_state='failed',stop_reason=COALESCE(stop_reason,'')||?3 WHERE task_id=?1 AND revision=?2",params![id,revision,format!("；回聊失败：{e}")]).await?;
         }
     }
+    Ok(())
+}
+
+async fn queue_ready(
+    deps: &PipelineDeps,
+    engine: &crate::reply_engine::EngineHandle,
+) -> Result<()> {
     // Ready bodies survive restarts. Sending/unknown are never blindly resent.
     let mut c = db::connect(&deps.db_path).await?;
     let rows=sqlx::query("SELECT o.task_id,o.revision,o.text,t.chat_id,t.created_by_pid,r.chat_type,r.anchor_id FROM task_outbox o JOIN tasks t USING(task_id) JOIN task_runtime r USING(task_id) WHERE o.state='ready' AND o.revision=r.revision AND r.phase!='cancelled' LIMIT 8").fetch_all(&mut *c).await?;
@@ -83,6 +100,10 @@ async fn drain(deps: &PipelineDeps) -> Result<()> {
             &chat
         }
         .parse()?;
+        let claimed=c.execute("UPDATE task_outbox SET state='queued',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready'",params![id,revision]).await?;
+        if claimed != 1 {
+            continue;
+        }
         engine.enqueue(crate::reply_engine::ReplyJob {
             chat_id: chat,
             chat_type: if kind == "private" {

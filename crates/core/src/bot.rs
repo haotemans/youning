@@ -1165,6 +1165,10 @@ mod tests {
         message.sender_pid = "p_1".into();
         message.text = "分享文案 https://xhslink.cn/o/123 查看原文".into();
         message.reply_to = None;
+        let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42','group','p_1',?1,2)",crate::db::params![message.text]).await.unwrap();
+        message.msg_id = conn.last_insert_rowid().await.unwrap();
+        drop(conn);
         let pipeline = spawn_pipeline(deps.clone());
         deps.bus.publish(Event::MessageReceived(message));
         // Automatic links bypass the ten-second aggregation window and require no model.
