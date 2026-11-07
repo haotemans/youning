@@ -1175,6 +1175,22 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(2), automatic.notified())
             .await
             .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if sent.lock().unwrap().iter().any(|request| {
+                    request.segments.as_array().is_some_and(|segments| {
+                        segments
+                            .iter()
+                            .any(|segment| segment["data"]["text"] == "自动解析")
+                    })
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual automatic delivery before shutting the pipeline down");
         pipeline.abort();
         let _ = pipeline.await;
         let mut mention = MessageReceivedPayload {

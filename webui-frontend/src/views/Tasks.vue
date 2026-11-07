@@ -34,8 +34,8 @@
             <div v-if="runtime" class="yt-toolbar">
               <n-tag>{{ phaseLabel(runtime.phase) }}</n-tag>
               <n-tag>{{ deliveryLabel(runtime.delivery_state) }}</n-tag>
-              <n-button v-if="cur.state === 'running' && !runtime.parent_id" size="small" :disabled="controlling" @click="control(['paused','waiting_input'].includes(runtime.phase) ? 'resume' : 'pause')">{{ ['paused','waiting_input'].includes(runtime.phase) ? '继续' : '暂停' }}</n-button>
-              <n-button v-if="cur.state === 'running' && !runtime.parent_id" size="small" :disabled="controlling" @click="control('cancel')">取消任务</n-button>
+              <n-button v-if="cur.state === 'running' && !runtime.parent_id && !['cancelled','finished','failed'].includes(runtime.phase)" size="small" :disabled="controlling" @click="control(['paused','waiting_input'].includes(runtime.phase) ? 'resume' : 'pause')">{{ ['paused','waiting_input'].includes(runtime.phase) ? '继续' : '暂停' }}</n-button>
+              <n-button v-if="cur.state === 'running' && !runtime.parent_id && !['cancelled','finished','failed'].includes(runtime.phase)" size="small" :disabled="controlling" @click="control('cancel')">取消任务</n-button>
             </div>
             <p v-if="runtime?.stop_reason">{{ runtime.stop_reason }}</p>
             <p v-if="runtime?.final_text">{{ runtime.final_text }}</p>

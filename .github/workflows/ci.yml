@@ -85,7 +85,7 @@ jobs:
           cargo test --locked -p yuantuan-plugin-moderator
           cargo test --locked -p yuantuan-adapter-qq --lib moderation
           cargo test --locked -p yuantuan-core --test membership
-          cargo test --locked -p yuantuan-core --lib --test profile_refresh --test consolidation --test memory_storage
+          cargo test --locked -p yuantuan-core --test context_runtime --test agent_loop --test profile_refresh --test consolidation --test memory_storage
           cargo test --locked -p yuantuan-webui --test memories_api
           cargo test --locked -p yuantuan-webui --test memes_api
           cargo test --locked --workspace
