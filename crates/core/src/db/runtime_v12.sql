@@ -46,4 +46,3 @@ CREATE TABLE IF NOT EXISTS capability_invocations (
  summary TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS capability_origin_once ON capability_invocations(name,kind,chat_type,chat_id,anchor_id) WHERE anchor_id IS NOT NULL;
-

@@ -41,3 +41,5 @@
 - [`crates/webui/tests/pages_api.rs`](../../../crates/webui/tests/pages_api.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+V12在现有session保护层注册 `/api/capabilities`、`/api/tasks/{id}/runtime` 与 `/api/tasks/{id}/control`；能力目录、会话范围与任务操作继续由后端核实。
