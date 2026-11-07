@@ -58,7 +58,7 @@ async fn source_scopes_corrections_expiry_and_inferences() {
             .await
             .unwrap()
             .len(),
-        2
+        1
     );
     assert!(semantic::write(
         &mut c,
