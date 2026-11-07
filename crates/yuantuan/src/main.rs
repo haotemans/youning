@@ -184,18 +184,26 @@ async fn main() -> Result<()> {
     let skill_registry = yuantuan_core::skills::SkillRegistry::new();
     let llm_slot: yuantuan_core::bot::SharedLlm = Arc::new(RwLock::new(llm.clone()));
     let plugins = yuantuan_core::plugins::PluginManager::load_with_moderation(
-        compiled_plugins(), data_root.clone(), std::path::PathBuf::from("plugins"),
-        tools_registry.clone(), skill_registry.clone(), llm_slot.clone(),
+        compiled_plugins(),
+        data_root.clone(),
+        std::path::PathBuf::from("plugins"),
+        tools_registry.clone(),
+        skill_registry.clone(),
+        llm_slot.clone(),
         adapter.as_ref().map(|h| {
             let super_admin = cfg.security.super_admin_qq;
             if let Some(qq) = super_admin {
-                info!(super_admin_qq = qq, "已启用管理员分级：仅超级管理员可使用主理人");
+                info!(
+                    super_admin_qq = qq,
+                    "已启用管理员分级：仅超级管理员可使用主理人"
+                );
             } else {
                 info!("未配置超级管理员，群管理退回兼容模式（群主/管理员可用）");
             }
             yuantuan_adapter_qq::moderation_service(h.clone(), db_path.clone(), super_admin)
         }),
-    ).await?;
+    )
+    .await?;
     plugins.subscribe(&bus).await;
 
     // h1''. MCP stdio client（Q-M01 裁决：spawn 外部 MCP server，tools 注入 ToolRegistry）
@@ -312,7 +320,12 @@ async fn main() -> Result<()> {
         let llm = llm_slot.clone();
         let enabled = steal_slot.clone();
         supervisor.spawn("meme_review", move || {
-            yuantuan_core::meme_review::spawn(db.clone(), memes.clone(), llm.clone(), enabled.clone())
+            yuantuan_core::meme_review::spawn(
+                db.clone(),
+                memes.clone(),
+                llm.clone(),
+                enabled.clone(),
+            )
         });
     }
 
@@ -506,8 +519,8 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
                             .map(|d| d.as_secs() as i64)
                             .unwrap_or(0);
                         conn.execute(
-                            "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens,cache_hit_tokens,cache_miss_tokens)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7,?8)",
                             yuantuan_core::db::params![
                                 now,
                                 rec.role.to_string(),
@@ -515,6 +528,8 @@ fn load_llm_gateway() -> Option<std::sync::Arc<yuantuan_core::llm::LlmGateway>> 
                                 rec.usage.prompt_tokens as i64,
                                 rec.usage.completion_tokens as i64,
                                 rec.usage.total_tokens as i64,
+                            rec.usage.cache_hit_tokens.map(|v|v as i64),
+                            rec.usage.cache_miss_tokens.map(|v|v as i64),
                             ],
                         ).await.ok()
                     }).await;

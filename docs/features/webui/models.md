@@ -36,3 +36,5 @@ BotChat 视觉输入统一携带 PNG 像素：定向消息先在应用侧下载�
 - [`webui-frontend/tests/models-flow.spec.js`](../../../webui-frontend/tests/models-flow.spec.js)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+LLM用量记录可空缓存命中/未命中数；支持prompt_cache_hit_tokens、prompt_cache_miss_tokens及prompt_tokens_details.cached_tokens。缺失表示未知，不记为零或宣称命中。模型请求增加300k保守文本预算和8192输出预留；尚未接入供应商模型上下文能力目录。

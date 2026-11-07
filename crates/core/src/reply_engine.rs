@@ -363,6 +363,11 @@ fn mechanical_split(b: &Bubble, max: usize) -> Vec<Bubble> {
 /// 队列任务种类：文字泡序列 or 直接发图（meme）
 #[derive(Debug, Clone)]
 pub enum JobKind {
+    TaskResult {
+        task_id: String,
+        revision: i64,
+        text: String,
+    },
     Bubbles(Vec<Bubble>),
     /// 已抽好的 meme 图片绝对路径（直接发图，无打字延时/无作废核对）
     Image(PathBuf),
@@ -429,6 +434,7 @@ impl Default for ReplyCfg {
 
 #[derive(Clone)]
 pub struct EngineHandle {
+    db_path: PathBuf,
     tx: mpsc::UnboundedSender<EngineCommand>,
     abort: tokio::task::AbortHandle,
 }
@@ -615,6 +621,7 @@ impl ReplyEngine {
 
     /// 派遣器：每个 chat 一个 worker（mpsc 串行）；折叠卡与普通回复同队列（稳定六条②）
     pub fn spawn(self) -> EngineHandle {
+        let db_path = self.db_path.clone();
         let engine = Arc::new(self);
         let (tx, mut rx) = mpsc::unbounded_channel::<EngineCommand>();
         let dispatcher = tokio::spawn(async move {
@@ -652,6 +659,7 @@ impl ReplyEngine {
         });
         info!("回复形态引擎已启动");
         EngineHandle {
+            db_path,
             tx,
             abort: dispatcher.abort_handle(),
         }
@@ -660,6 +668,15 @@ impl ReplyEngine {
 
 async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
     match job.kind.clone() {
+        JobKind::TaskResult {
+            task_id,
+            revision,
+            text,
+        } => {
+            if let Err(e) = process_task_result(eng, &job, &task_id, revision, &text).await {
+                warn!(%e,"任务回聊发送失败");
+            }
+        }
         JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
         JobKind::Image(path) => process_image(eng, &job, &path, "meme").await,
         JobKind::Video(path) => {
@@ -685,6 +702,67 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
             process_plugin_result(eng, &job, &text, &artifacts, retention, policy).await;
         }
     }
+}
+
+async fn process_task_result(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    id: &str,
+    revision: i64,
+    text: &str,
+) -> Result<()> {
+    let mut conn = crate::db::connect(&eng.db_path).await?;
+    let claimed=conn.execute("UPDATE task_outbox SET state='sending',updated_at=unixepoch() WHERE task_id=?1 AND revision=?2 AND state='ready' AND EXISTS(SELECT 1 FROM task_runtime r WHERE r.task_id=?1 AND r.revision=?2 AND r.phase NOT IN ('cancelled','paused'))",params![id,revision]).await?;
+    if claimed != 1 {
+        return Ok(());
+    }
+    drop(conn);
+    let mut segments = vec![];
+    if job.chat_type == ChatType::Group {
+        if let Some(qq) = job.mention_qq {
+            segments.push(json!({"type":"at","data":{"qq":qq.to_string()}}));
+        }
+    }
+    segments.push(json!({"type":"text","data":{"text":text}}));
+    // One attempt. An ambiguous timeout is not evidence that no message was delivered.
+    let result = (eng.send)(SendRequest {
+        chat_type: job.chat_type,
+        target: job.target,
+        segments: json!(segments),
+        operation: SendOperation::Message,
+    })
+    .await;
+    let confirmed = result.as_ref().ok().and_then(|v| v["message_id"].as_i64());
+    if let Some(message_id) = confirmed {
+        eng.self_ids.record(message_id);
+        insert_self_message_ex(&eng.db_path, job, text, false, Some(message_id)).await;
+    }
+    let mut conn = crate::db::connect(&eng.db_path).await?;
+    let mut tx = conn.begin_immediate().await?;
+    let status = if confirmed.is_some() {
+        "sent"
+    } else {
+        "unknown"
+    };
+    tx.execute("UPDATE task_outbox SET state=?3,receipt=?4,updated_at=unixepoch() WHERE task_id=?1 AND revision=?2",params![id,revision,status,confirmed.map(|v|v.to_string())]).await?;
+    tx.execute(
+        "UPDATE task_runtime SET delivery_state=?3 WHERE task_id=?1 AND revision=?2",
+        params![id, revision, status],
+    )
+    .await?;
+    tx.commit().await?;
+    eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
+        chat_id: job.chat_id.clone(),
+        bubble_index: 0,
+        total: 1,
+        ok: confirmed.is_some(),
+        note: if confirmed.is_some() {
+            None
+        } else {
+            Some("任务回复送达未确认，未自动重发".into())
+        },
+    }));
+    Ok(())
 }
 
 fn media_kind(path: &Path) -> Result<&'static str> {
@@ -1284,6 +1362,14 @@ fn now_secs() -> i64 {
 }
 
 // ---------- bot_chat 调用与入队 ----------
+#[derive(Debug)]
+pub struct ExecutionRequest(pub String);
+impl std::fmt::Display for ExecutionRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Chat 请求执行能力")
+    }
+}
+impl std::error::Error for ExecutionRequest {}
 
 /// Decision=reply 之后：组装 Bot Context → 调 bot_chat → Bubbleizer → 入队。
 /// ctx_cfg/reply_cfg 由调用方从热应用槽读取传入（每消息取当前值）。
@@ -1325,7 +1411,7 @@ pub async fn prepare_and_enqueue(
     ctx.system.push_str(length_hint);
     ctx.system.push('\n');
     ctx.system.push_str(mode_hint);
-    ctx.system.push_str("\n直接输出给用户的聊天正文，不调用 send_message，不输出工具协议或工具调用标记。工具和插件已由宿主分流处理。");
+    ctx.system.push_str("\n通常直接输出聊天正文。确需技能或多步操作且 execution_results 尚无所需结果时，可以只输出严格 JSON：{\"type\":\"execution_request\",\"goal\":\"具体需求\"}。宿主会交回 Decision 核对授权，不直接执行。已经执行过但失败的需求不得重复请求，说明结果或追问。不得输出 send_message 调用。");
     let started = Instant::now();
     let mut raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
@@ -1344,6 +1430,16 @@ pub async fn prepare_and_enqueue(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "bot_chat 生成完成"
     );
+    if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
+        if value["type"] == "execution_request" {
+            let goal = value["goal"].as_str().unwrap_or("").trim();
+            anyhow::ensure!(
+                !goal.is_empty() && goal.chars().count() <= 1000,
+                "Chat 执行需求无效"
+            );
+            return Err(ExecutionRequest(goal.to_owned()).into());
+        }
+    }
     let style_cap = match out.reply_len {
         crate::decision::ReplyLen::Short => 1,
         crate::decision::ReplyLen::Medium => 2,
@@ -1358,6 +1454,12 @@ pub async fn prepare_and_enqueue(
         return Err(anyhow!("bot_chat 输出为空"));
     }
     let (chat_type, target, mention_qq) = route_of(msg)?;
+    if let Some((id, revision)) = &snapshot.delivery_task {
+        let mut conn = crate::db::connect(&engine.db_path).await?;
+        conn.execute("INSERT OR IGNORE INTO task_outbox(task_id,revision,text,updated_at) SELECT ?1,?2,?3,unixepoch() WHERE EXISTS(SELECT 1 FROM task_runtime WHERE task_id=?1 AND revision=?2 AND delivery_state='preparing')",
+            params![id,revision,bubbles.iter().map(|b|b.text.as_str()).collect::<Vec<_>>().join("\n")]).await?;
+        return Ok(());
+    }
     engine.enqueue(ReplyJob {
         chat_id: msg.chat_id.clone(),
         chat_type,

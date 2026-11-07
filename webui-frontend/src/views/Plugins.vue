@@ -72,7 +72,7 @@
             <p class="section-note" v-else>尚无已完成的调用记录。</p>
             <div class="runtime-secondary"><span>未接纳 {{ detail.invocations?.rejected || 0 }} 次</span><span>已取消 {{ detail.invocations?.cancelled || 0 }} 次</span></div>
             <n-collapse class="technical-details"><n-collapse-item title="能力与存储信息" name="capabilities">
-              <div v-for="skill in detail.skills || []" :key="skill.name" class="capability"><code>{{ skill.name }}</code><p>{{ skill.description }}</p></div>
+              <div v-for="skill in detail.skills || []" :key="skill.name" class="capability"><code>{{ skill.name }}</code><p>{{ skill.description }}</p><n-switch :value="capabilityEnabled(skill.name)" :disabled="busy" @update:value="value => toggleCapability(skill.name, value)" /><span> 累计调用 {{ capabilities.find(c => c.name === skill.name && c.kind === 'skill')?.calls || 0 }} 次</span></div>
               <div class="command-chips" v-if="detail.tools?.length"><code v-for="tool in detail.tools" :key="tool.name">{{ tool.name }}</code></div>
               <p v-if="!detail.skills?.length && !detail.tools?.length" class="section-note">启用后显示可调用的能力。</p>
               <p class="storage-path" v-if="detail.data_dir">数据目录 <code>{{ detail.data_dir }}</code></p>
@@ -96,6 +96,13 @@ import PluginCard from '../components/PluginCard.vue'
 
 const messages = useMessage()
 const plugins = ref([])
+const capabilities=ref([])
+function capabilityEnabled(name) { return capabilities.value.find(c=>c.kind==='skill' && c.name===name)?.enabled ?? true }
+async function toggleCapability(name,enabled) {
+  try {await api.post('/capabilities',{name,kind:'skill',enabled});const {data}=await api.get('/capabilities');capabilities.value=data.capabilities || []}
+  catch(e) {messages.error(e.response?.data?.error || '更新技能失败')}
+}
+onMounted(async()=>{try {const {data}=await api.get('/capabilities');capabilities.value=data.capabilities || []}catch(e){ messages.error('技能状态加载失败') }})
 const initialLoading = ref(true)
 const loadError = ref('')
 const actionError = ref('')

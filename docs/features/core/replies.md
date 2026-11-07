@@ -29,3 +29,5 @@
 - [`crates/adapter-qq/tests/delayed_delivery.rs`](../../../crates/adapter-qq/tests/delayed_delivery.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+V12支持Chat结构化执行需求返回Decision；任务结果正文先持久化至task_outbox，发送时检查任务版本及暂停/取消状态。任务发送不盲目重试，适配层返回message_id后才记sent并保存Bot实际发言；不确定结果标unknown。普通回复和插件媒体投递仍沿用既有处理。

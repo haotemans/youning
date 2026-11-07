@@ -340,7 +340,7 @@ async fn wait_finished(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn durable_backlog_and_duplicate_events_execute_once_with_three_slots() {
+async fn durable_backlog_and_duplicate_events_execute_once_with_two_slots() {
     use axum::{routing::post, Json, Router};
     let calls = Arc::new(AtomicUsize::new(0));
     let active = Arc::new(AtomicUsize::new(0));
@@ -404,7 +404,7 @@ async fn durable_backlog_and_duplicate_events_execute_once_with_three_slots() {
     .await
     .expect("all durable tasks should run despite lost events");
     assert_eq!(calls.load(Ordering::SeqCst), 12);
-    assert!((2..=3).contains(&peak.load(Ordering::SeqCst)));
+    assert!((2..=2).contains(&peak.load(Ordering::SeqCst)));
     runner.abort();
     let _ = runner.await;
     server.abort();

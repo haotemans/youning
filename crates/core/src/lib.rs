@@ -12,11 +12,11 @@ pub mod engagement;
 pub mod event;
 pub mod llm;
 pub mod mcp;
+pub mod membership;
 pub mod meme;
 pub mod meme_pack;
 pub mod meme_review;
 pub mod memory;
-pub mod membership;
 pub mod napcat_slot;
 pub mod personality;
 pub mod prefilter;
@@ -29,3 +29,5 @@ pub mod vision;
 pub mod window;
 
 pub mod plugins;
+
+pub mod capabilities;

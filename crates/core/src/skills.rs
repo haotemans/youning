@@ -127,15 +127,18 @@ impl SkillRegistry {
 
     /// 列出每个 skill 的 (name, description)，供 Decision 系统提示注入
     pub fn describe_for_decision(&self) -> Vec<(String, String)> {
-        self.inner
+        let mut catalog: Vec<_> = self
+            .inner
             .read()
-            .expect("skills registry poisoned")
+            .unwrap()
             .values()
             .map(|s| {
                 let d = s.def();
                 (d.name.to_string(), d.description.to_string())
             })
-            .collect()
+            .collect();
+        catalog.sort_by(|a, b| a.0.cmp(&b.0));
+        catalog
     }
 
     pub fn describe_for_chat(&self, chat_id: &str) -> Vec<(String, String)> {
