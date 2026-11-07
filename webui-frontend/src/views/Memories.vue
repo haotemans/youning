@@ -85,7 +85,8 @@
             <div v-else-if="!selectedPerson" class="portrait-directory">
               <button v-for="person in people" :key="person.id" type="button" class="portrait-card" @click="choosePerson(person)">
                 <span class="portrait-card-head"><span class="memory-avatar"><img v-if="avatar(person)" :src="avatar(person)" alt="" loading="lazy" referrerpolicy="no-referrer" @error="badAvatars.add(person.id)" /><span v-else>{{ initial(person) }}</span></span><span class="identity-text"><span class="identity-name">{{ person.name }}</span><span class="identity-id mono">{{ person.qq || person.id }}</span></span></span>
-                <span v-if="person.profile?.length" class="portrait-preview">{{ person.profile.map(f => f.content).join('；') }}</span>
+                <span v-if="person.portrait_preview" class="portrait-preview">{{ person.portrait_preview }}</span>
+                <span v-else-if="person.profile?.length" class="portrait-preview">{{ person.profile.map(f => f.content).join('；') }}</span>
                 <span v-else class="record-time">暂无画像</span>
                 <time v-if="person.profile_updated_at" class="record-time">{{ fmtTs(person.profile_updated_at) }}</time>
               </button>
@@ -168,7 +169,7 @@ import EmptyState from '../components/EmptyState.vue'
 import YtIcon from '../components/YtIcon.vue'
 import mascot from '../assets/mascot.png'
 
-type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string; profile?: Profile[]; profile_updated_at?: number | null }
+type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string; profile?: Profile[]; profile_updated_at?: number | null; portrait_preview?: string | null }
 type Conversation = { id: string; chat_type: string | null; label: string }
 type Memory = { id: number; owner_type: string; owner_id: string; owner: Person; content: string; source: string; updated_at: number; date?: string; source_msg_id?: number; source_end_msg_id?: number; conversation?: Conversation; group_card?: string }
 type Profile = { field: string; content: string; evidence_quote: string; updated_at: number }

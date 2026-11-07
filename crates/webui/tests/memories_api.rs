@@ -597,3 +597,17 @@ async fn memory_browser_requires_auth_and_rejects_bad_filters() {
         StatusCode::NOT_FOUND
     );
 }
+
+#[tokio::test]
+async fn semantic_portrait_is_visible_in_directory_without_legacy_fields() {
+    let r = Rig::start().await;
+    let mut conn = db::connect(&r.dir.join("db.sqlite")).await.unwrap();
+    conn.execute_batch("DELETE FROM person_profile_facts WHERE person_id='p_202';
+    INSERT INTO memory_items(owner_type,owner_id,item_key,kind,content,status,source_chat_id,source_chat_type,source_end_id,evidence,recorded_at) VALUES('person','p_202','summary','portrait','正在研究图像模型','current','10','group',4,'[{\"msg_id\":4,\"quote\":\"我在测试模型\"}]',100);").await.unwrap();
+    let response = r.get("/api/memories/people?search=图像模型").await;
+    assert_eq!(response["total"], 1);
+    assert_eq!(
+        response["people"][0]["portrait_preview"],
+        "正在研究图像模型"
+    );
+}
