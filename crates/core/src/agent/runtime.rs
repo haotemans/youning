@@ -133,8 +133,8 @@ pub async fn begin_invocation(
     let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_runtime WHERE task_id=?1 AND revision=?2 AND phase='executing')")
         .bind(id).bind(s.revision).fetch_one(&mut *tx).await?;
     ensure!(valid, "任务已停止或改变");
-    let previous:i64=sqlx::query_scalar("SELECT COUNT(*) FROM task_invocations WHERE task_id=?1 AND revision=?2 AND tool_name=?3 AND args=?4")
-        .bind(id).bind(s.revision).bind(name).bind(args.to_string()).fetch_one(&mut *tx).await?;
+    let previous:i64=sqlx::query_scalar("SELECT COUNT(*) FROM task_invocations i JOIN task_runtime r ON r.task_id=i.task_id WHERE r.root_id=?1 AND i.tool_name=?2 AND i.args=?3")
+        .bind(&s.root).bind(name).bind(args.to_string()).fetch_one(&mut *tx).await?;
     ensure!(
         previous == 0,
         "相同参数的工具已调用，先使用已保存结果或核实，不重复外部动作"

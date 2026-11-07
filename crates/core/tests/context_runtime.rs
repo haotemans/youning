@@ -203,6 +203,12 @@ async fn task_origin_controls_and_receipts_survive_restart() {
     assert!(runtime::save(&p, &id, &cp).await.is_err());
     let updated = runtime::load(&p, &id).await.unwrap().unwrap();
     assert_eq!(updated.revision, 2);
+    runtime::reserve(&p, &id, &updated, 100).await.unwrap();
+    assert!(
+        runtime::begin_invocation(&p, &id, &updated, "test", &json!({"a":1}))
+            .await
+            .is_err()
+    );
     assert_eq!(updated.history.len(), 3);
 }
 

@@ -244,6 +244,13 @@ async fn run_task(deps: &TaskRunnerDeps, p: &TaskLifecyclePayload) -> Result<Str
         bail!("工具执行被中断，外部结果待核实，禁止自动重放");
     }
     let mut history = checkpoint.history.clone();
+    let mut c = crate::db::connect(&deps.db_path).await?;
+    let prior=sqlx::query("SELECT i.id,i.tool_name,i.state,substr(i.result,1,1200) AS result FROM task_invocations i JOIN task_runtime r ON r.task_id=i.task_id WHERE r.root_id=? ORDER BY i.started_at LIMIT 64").bind(&checkpoint.root).fetch_all(&mut *c).await?;
+    if !prior.is_empty() {
+        let receipts:Vec<Value>=prior.iter().map(|r|Ok(json!({"receipt_id":r.try_get::<String,_>("id")?,"tool":r.try_get::<String,_>("tool_name")?,"state":r.try_get::<String,_>("state")?,"result_preview":r.try_get::<Option<String>,_>("result")?}))).collect::<Result<_>>()?;
+        history.push(json!({"role":"user","content":json!({"prior_invocations":receipts,"instruction":"恢复时先核对已有回执；已完成或不确定的外部动作不重放，预览不是完整结果"}).to_string()}));
+    }
+    drop(c);
     let mut used_calls: i64;
     let mut parse_failures = 0u32;
     let mut tool_failures = 0u32;
