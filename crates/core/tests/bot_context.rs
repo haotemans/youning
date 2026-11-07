@@ -338,6 +338,11 @@ async fn semantic_evidence_must_survive_decision_context_pruning() {
         )
         .await;
     }
+    // Scoped recall excludes legacy records without provenance. Give this pruning
+    // fixture a real source in the current conversation so it still exercises truncation.
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    conn.execute("UPDATE long_memories SET source_chat_id='123',source_msg_id=?1 WHERE owner_type='person' AND owner_id='p_a'",params![old.msg_id]).await.unwrap();
+    drop(conn);
     let anchor = rig
         .message("p_a", "123", "Docker 怎么配置", None, None)
         .await;
