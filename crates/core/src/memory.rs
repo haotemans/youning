@@ -6,9 +6,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod material_cache;
 pub mod nightly;
 pub mod processing;
 pub mod refresh;
+pub mod semantic;
 
 pub const PROFILE_FIELDS: usize = 5;
 
@@ -87,7 +89,7 @@ pub async fn update_profile(
     ).await? > 0)
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileFact {
     pub field: String,
     pub content: String,
@@ -240,6 +242,7 @@ pub async fn recall_scoped(
                 (SELECT evidence_quote FROM memory_facts f WHERE f.owner_type=long_memories.owner_type AND f.owner_id=long_memories.owner_id AND f.content=long_memories.content AND f.source_msg_id=long_memories.source_msg_id LIMIT 1)
          FROM long_memories WHERE ((owner_type='person' AND owner_id=?1) OR (owner_type='chat' AND owner_id=?2))
          AND (owner_type<>'chat' OR ?4='' OR NOT EXISTS(SELECT 1 FROM messages s WHERE s.msg_id=long_memories.source_msg_id AND s.chat_id=COALESCE(long_memories.source_chat_id,long_memories.owner_id) AND s.chat_type<>?4))
+         AND (?4='' OR EXISTS(SELECT 1 FROM messages src WHERE src.msg_id=long_memories.source_msg_id AND src.chat_id=?2 AND src.chat_type=?4))
          AND (source_msg_id IS NULL OR source_msg_id<=?3) AND (source_end_msg_id IS NULL OR source_end_msg_id<=?3)
          AND ({conditions}) ORDER BY updated_at DESC,id DESC LIMIT 128"
     );

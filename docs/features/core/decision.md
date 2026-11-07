@@ -33,3 +33,5 @@
 - [`crates/core/tests/bot_context.rs`](../../../crates/core/tests/bot_context.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+V12增加可选 history_query、task_plan、task_control。Chat执行建议回到Decision，仍核对原anchor；任务控制原话需来自当前消息并由运行时检查归属。结果事件不作为重新派工授权。

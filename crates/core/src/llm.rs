@@ -195,6 +195,8 @@ pub struct LlmUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+    pub cache_hit_tokens: Option<u64>,
+    pub cache_miss_tokens: Option<u64>,
 }
 
 /// 用量记录（交给 sink 落库/统计）
@@ -383,6 +385,14 @@ impl LlmGateway {
             let usage = v
                 .get("usage")
                 .map(|u| LlmUsage {
+                    cache_hit_tokens: u
+                        .get("prompt_cache_hit_tokens")
+                        .and_then(Value::as_u64)
+                        .or_else(|| {
+                            u.pointer("/prompt_tokens_details/cached_tokens")
+                                .and_then(Value::as_u64)
+                        }),
+                    cache_miss_tokens: u.get("prompt_cache_miss_tokens").and_then(Value::as_u64),
                     prompt_tokens: u.get("prompt_tokens").and_then(|x| x.as_u64()).unwrap_or(0),
                     completion_tokens: u
                         .get("completion_tokens")
@@ -584,8 +594,24 @@ impl LlmGateway {
             .await
             .map_err(|_| anyhow!("LLM 并发信号量已关闭"))?;
 
+        // Byte-based conservative estimate; keep output room and do not count image base64 as text.
+        let text_bytes = user.as_str().map(str::len).unwrap_or_else(|| {
+            user.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|p| p["text"].as_str())
+                        .map(str::len)
+                        .sum()
+                })
+                .unwrap_or(0)
+        });
+        anyhow::ensure!(
+            system.len() + text_bytes + 8192 <= 300_000,
+            "上下文超过300k保守上限"
+        );
         let mut body = json!({
             "model": r.model,
+            "max_tokens":8192,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

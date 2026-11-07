@@ -30,3 +30,5 @@
 - [`webui-frontend/tests/relations-flow.spec.js`](../../../webui-frontend/tests/relations-flow.spec.js)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+人物按需详情附加带依据、状态和来源会话的综合画像，供记忆页复用；读取需管理员认证。统一人物身份不改变Bot回复时的私聊来源隔离规则。

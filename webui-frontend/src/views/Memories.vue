@@ -65,7 +65,13 @@
         </div>
         <n-spin :show="loading || (!selectedPerson && peopleLoading)">
           <div v-if="tab === 'profile'" class="memory-records">
-            <article v-if="selectedPerson && profile.length" class="portrait-record">
+            <article v-if="selectedPerson && (profile.length || portrait.length)" class="portrait-record">
+              <div v-for="item in portrait" :key="item.id" class="profile-evidence">
+                <p class="memory-text">{{ item.content }}</p>
+                <n-tag size="tiny" :bordered="false">{{ item.kind === 'inference' ? '归纳认识' : item.kind === 'event' ? '近期进展' : '综合资料' }}</n-tag>
+                <n-tag v-if="item.status !== 'current'" size="tiny">{{ ({ended:'已结束',uncertain:'待确认',expired:'已过期'} as Record<string,string>)[item.status] || item.status }}</n-tag>
+                <n-collapse><n-collapse-item title="依据" :name="String(item.id)"><span class="record-time">{{ item.source_chat_type === 'private' ? '私聊' : '群聊' }} {{ item.source_chat_id }}</span><blockquote v-for="e in item.evidence" :key="e.msg_id">{{ e.quote }}</blockquote></n-collapse-item></n-collapse>
+              </div>
               <dl class="portrait-fields"><template v-for="fact in profile" :key="fact.field"><dt>{{ profileLabels[fact.field] || fact.field }}</dt><dd>{{ fact.content }}</dd></template></dl>
               <n-collapse class="portrait-evidence">
                 <n-collapse-item title="来源依据" name="evidence">
@@ -79,12 +85,13 @@
             <div v-else-if="!selectedPerson" class="portrait-directory">
               <button v-for="person in people" :key="person.id" type="button" class="portrait-card" @click="choosePerson(person)">
                 <span class="portrait-card-head"><span class="memory-avatar"><img v-if="avatar(person)" :src="avatar(person)" alt="" loading="lazy" referrerpolicy="no-referrer" @error="badAvatars.add(person.id)" /><span v-else>{{ initial(person) }}</span></span><span class="identity-text"><span class="identity-name">{{ person.name }}</span><span class="identity-id mono">{{ person.qq || person.id }}</span></span></span>
-                <span v-if="person.profile?.length" class="portrait-preview">{{ person.profile.map(f => f.content).join('；') }}</span>
+                <span v-if="person.portrait_preview" class="portrait-preview">{{ person.portrait_preview }}</span>
+                <span v-else-if="person.profile?.length" class="portrait-preview">{{ person.profile.map(f => f.content).join('；') }}</span>
                 <span v-else class="record-time">暂无画像</span>
                 <time v-if="person.profile_updated_at" class="record-time">{{ fmtTs(person.profile_updated_at) }}</time>
               </button>
             </div>
-            <EmptyState v-if="!loading && !peopleLoading && !loadError && !peopleError && (selectedPerson ? !profile.length : !people.length)" :title="selectedPerson ? '暂无人物画像' : '暂无匹配人物'" />
+            <EmptyState v-if="!loading && !peopleLoading && !loadError && !peopleError && (selectedPerson ? !profile.length && !portrait.length : !people.length)" :title="selectedPerson ? '暂无人物画像' : '暂无匹配人物'" />
           </div>
           <div v-else-if="tab === 'messages'" class="message-records">
             <article v-for="message in messages" :key="message.msg_id" class="memory-record message-record">
@@ -162,7 +169,7 @@ import EmptyState from '../components/EmptyState.vue'
 import YtIcon from '../components/YtIcon.vue'
 import mascot from '../assets/mascot.png'
 
-type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string; profile?: Profile[]; profile_updated_at?: number | null }
+type Person = { id: string; name: string; qq?: string | null; avatar_url?: string | null; kind?: string; profile?: Profile[]; profile_updated_at?: number | null; portrait_preview?: string | null }
 type Conversation = { id: string; chat_type: string | null; label: string }
 type Memory = { id: number; owner_type: string; owner_id: string; owner: Person; content: string; source: string; updated_at: number; date?: string; source_msg_id?: number; source_end_msg_id?: number; conversation?: Conversation; group_card?: string }
 type Profile = { field: string; content: string; evidence_quote: string; updated_at: number }
@@ -191,6 +198,7 @@ const messagesDate = ref<string | null>(localDate())
 const activity = ref<Activity | null>(null)
 const activityError = ref('')
 const profile = ref<Profile[]>([])
+const portrait = ref<{id:number;key:string;content:string;kind:string;status:string;source_chat_type:string;source_chat_id:string;evidence:{msg_id:number;quote:string}[]}[]>([])
 const refreshingProfile = ref(false)
 const profileNotice = ref('')
 const profileRefreshFailed = ref(false)
@@ -304,7 +312,7 @@ async function loadCurrent() {
     if (tab.value === 'profile') {
       if (selectedPerson.value) {
         const { data } = await api.get(`/relations/person/${encodeURIComponent(selectedPerson.value.id)}`, { signal: request.signal })
-        if (!request.signal.aborted && !disposed) profile.value = data.profile || []
+        if (!request.signal.aborted && !disposed) { profile.value = data.profile || [];portrait.value = data.portrait || [] }
       }
     } else if (tab.value === 'messages' && selectedPerson.value) {
       const q = query(); q.set('page', String(page.value)); q.set('page_size', '24'); q.set('utc_offset_minutes', timezone())
@@ -321,7 +329,7 @@ async function loadCurrent() {
   } catch (e) { if (!request.signal.aborted && !disposed) loadError.value = errorText(e) }
   finally { if (listController === request) loading.value = false }
 }
-function resetRecords() { page.value = 1; records.value = []; messages.value = []; profile.value = []; closeSource(false); void loadCurrent() }
+function resetRecords() { page.value = 1; records.value = []; messages.value = []; profile.value = []; portrait.value=[]; closeSource(false); void loadCurrent() }
 async function refreshProfile() {
   const id = selectedPerson.value?.id
   if (!id || refreshingProfile.value) return

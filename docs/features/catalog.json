@@ -61,7 +61,8 @@
       "status": "已实现（代码入口）",
       "doc": "docs/features/core/replies.md",
       "source": [
-        "crates/core/src/reply_engine.rs"
+        "crates/core/src/reply_engine.rs",
+        "crates/core/src/reply_engine/task_delivery_tests.rs"
       ],
       "tests": [
         "crates/adapter-qq/tests/reply.rs",
@@ -84,7 +85,9 @@
         "crates/core/src/vision.rs",
         "crates/core/src/memory/refresh.rs",
         "crates/core/src/memory/nightly.rs",
-        "crates/core/src/memory/processing.rs"
+        "crates/core/src/memory/processing.rs",
+        "crates/core/src/memory/semantic.rs",
+        "crates/core/src/memory/material_cache.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
@@ -93,7 +96,8 @@
         "crates/webui/tests/memories_api.rs",
         "webui-frontend/tests/memories-flow.spec.js",
         "crates/core/tests/profile_refresh.rs",
-        "crates/core/tests/memory_storage.rs"
+        "crates/core/tests/memory_storage.rs",
+        "crates/core/tests/context_runtime.rs"
       ],
       "module": "core"
     },
@@ -123,11 +127,16 @@
         "crates/core/src/tools.rs",
         "crates/core/src/tools/sandbox.rs",
         "crates/webui/src/tasks_api.rs",
-        "webui-frontend/src/views/Tasks.vue"
+        "webui-frontend/src/views/Tasks.vue",
+        "crates/core/src/agent/runtime.rs",
+        "crates/core/src/agent/delivery.rs",
+        "crates/webui/src/runtime_api.rs"
       ],
       "tests": [
         "crates/core/tests/agent_loop.rs",
-        "crates/core/tests/sandbox_docker.rs"
+        "crates/core/tests/sandbox_docker.rs",
+        "crates/core/tests/context_runtime.rs",
+        "webui-frontend/tests/tasks-flow.spec.js"
       ],
       "module": "core"
     },
@@ -145,7 +154,8 @@
         "crates/plugin-api/src/tools.rs",
         "crates/webui/src/plugins_api.rs",
         "webui-frontend/src/views/Plugins.vue",
-        "crates/plugin-api/src/membership.rs"
+        "crates/plugin-api/src/membership.rs",
+        "crates/core/src/capabilities.rs"
       ],
       "tests": [
         "crates/core/tests/plugin_host.rs",

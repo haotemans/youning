@@ -229,7 +229,8 @@ fn people_filtered(q: &MemQuery, count: bool) -> QueryBuilder<'static, Sqlite> {
             .push(" OR EXISTS(SELECT 1 FROM member_profiles mp WHERE mp.person_id=p.person_id AND instr(lower(COALESCE(mp.card,'')),").push_bind(term.clone()).push(")>0)")
             .push(" OR EXISTS(SELECT 1 FROM long_memories lm WHERE lm.owner_type='person' AND lm.owner_id=p.person_id AND instr(lower(COALESCE(lm.content,'')),").push_bind(term.clone()).push(")>0)")
             .push(" OR EXISTS(SELECT 1 FROM summaries s WHERE s.owner_type='person' AND s.owner_id=p.person_id AND instr(lower(COALESCE(s.summary,'')),").push_bind(term.clone()).push(")>0)")
-            .push(" OR EXISTS(SELECT 1 FROM person_profile_facts pf WHERE pf.person_id=p.person_id AND instr(lower(pf.content),").push_bind(term).push(")>0))");
+            .push(" OR EXISTS(SELECT 1 FROM person_profile_facts pf WHERE pf.person_id=p.person_id AND instr(lower(pf.content),").push_bind(term.clone()).push(")>0)")
+            .push(" OR EXISTS(SELECT 1 FROM memory_items mi WHERE mi.owner_type='person' AND mi.owner_id=p.person_id AND instr(lower(mi.content),").push_bind(term).push(")>0))");
     }
     b
 }
@@ -261,6 +262,21 @@ pub async fn people(State(state): State<AppState>, Query(q): Query<MemQuery>) ->
     let mut portraits = yuantuan_core::memory::profiles(&mut tx, &ids, i64::MAX)
         .await
         .map_err(db_error)?;
+    let previews=sqlx::query("WITH latest AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY owner_id,item_key,source_chat_type,source_chat_id ORDER BY source_end_id DESC,id DESC) AS rn FROM memory_items WHERE owner_type='person' AND owner_id IN (SELECT value FROM json_each(?1))), ranked AS (SELECT *,ROW_NUMBER() OVER(PARTITION BY owner_id ORDER BY CASE WHEN item_key='summary' THEN 0 ELSE 1 END,source_end_id DESC,id DESC) AS person_rank FROM latest WHERE rn=1 AND status IN ('current','uncertain') AND (valid_until IS NULL OR valid_until>unixepoch())) SELECT owner_id,substr(content,1,300) AS content,recorded_at FROM ranked WHERE person_rank=1")
+        .bind(serde_json::to_string(&ids).map_err(db_error)?).fetch_all(&mut *tx).await.map_err(db_error)?;
+    let mut preview_by_person = std::collections::BTreeMap::new();
+    for row in previews {
+        let content: String = row.try_get("content").map_err(db_error)?;
+        if !yuantuan_core::consolidation::is_sensitive(&content) {
+            preview_by_person.insert(
+                row.try_get::<String, _>("owner_id").map_err(db_error)?,
+                (
+                    content,
+                    row.try_get::<i64, _>("recorded_at").map_err(db_error)?,
+                ),
+            );
+        }
+    }
     let items = rows
         .iter()
         .take(size as usize)
@@ -268,7 +284,13 @@ pub async fn people(State(state): State<AppState>, Query(q): Query<MemQuery>) ->
             let id: String = r.try_get("person_id")?;
             let mut person = identity(&id, r.try_get("display_name")?, r.try_get("qq")?, "person");
             let facts = portraits.remove(&id).unwrap_or_default();
-            person["profile_updated_at"] = json!(facts.iter().map(|f| f.updated_at).max());
+            let preview = preview_by_person.remove(&id);
+            person["portrait_preview"] = json!(preview.as_ref().map(|(text, _)| text));
+            person["profile_updated_at"] = json!(facts
+                .iter()
+                .map(|f| f.updated_at)
+                .chain(preview.iter().map(|(_, at)| *at))
+                .max());
             person["profile"] = json!(facts);
             Ok(person)
         })

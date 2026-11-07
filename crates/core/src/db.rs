@@ -409,6 +409,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         END;
         "#,
     ),
+    (
+        "V0.12 上下文证据、版本化记忆与可恢复任务",
+        include_str!("db/runtime_v12.sql"),
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -437,6 +441,10 @@ pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
             .await?;
         if locked_version >= version {
             continue;
+        }
+        if version == 12 {
+            add_column_if_missing(&mut tx, "llm_usage", "cache_hit_tokens", "INTEGER").await?;
+            add_column_if_missing(&mut tx, "llm_usage", "cache_miss_tokens", "INTEGER").await?;
         }
         if version == 4 {
             add_column_if_missing(&mut tx, "messages", "processed_at", "INTEGER").await?;

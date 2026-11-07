@@ -4,23 +4,28 @@
 mod auth;
 mod backup_api;
 mod config_api;
-mod mcp_api;
-mod plugins_api;
 mod dashboard;
 mod events_api;
 mod llm_test;
+mod mcp_api;
 mod memes;
 mod memories;
 mod overview;
 mod personality;
+mod plugins_api;
 mod relations;
+mod runtime_api;
 mod state;
 mod static_files;
 mod tasks_api;
 mod ws;
 
 use anyhow::{Context, Result};
-use axum::{middleware, routing::{get, post}, Router};
+use axum::{
+    middleware,
+    routing::{get, post},
+    Router,
+};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tower_http::trace::TraceLayer;
@@ -44,24 +49,51 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/meme-file/{id}", get(memes::file))
         .route("/api/memories", get(memories::memories))
         .route("/api/memories/people", get(memories::people))
-        .route("/api/memories/people/{id}/refresh", post(memories::refresh_profile))
-        .route("/api/memories/people/{id}/activity", get(memories::activity::status))
-        .route("/api/memories/people/{id}/profile-history", get(memories::activity::profile_history))
-        .route("/api/memories/people/{id}/messages", get(memories::activity::messages))
+        .route(
+            "/api/memories/people/{id}/refresh",
+            post(memories::refresh_profile),
+        )
+        .route(
+            "/api/memories/people/{id}/activity",
+            get(memories::activity::status),
+        )
+        .route(
+            "/api/memories/people/{id}/profile-history",
+            get(memories::activity::profile_history),
+        )
+        .route(
+            "/api/memories/people/{id}/messages",
+            get(memories::activity::messages),
+        )
         .route("/api/memories/conversations", get(memories::conversations))
         .route("/api/memories/{id}/source", get(memories::source))
         .route("/api/summaries", get(memories::summaries))
         .route("/api/relations", get(relations::relations))
         .route("/api/relations/person/{id}", get(relations::person_detail))
-        .route("/api/config", get(config_api::get_config).post(config_api::post_config))
+        .route(
+            "/api/config",
+            get(config_api::get_config).post(config_api::post_config),
+        )
         .route("/api/config/restart", post(config_api::restart))
         .route("/api/llm/test", post(llm_test::test))
         .route("/api/llm/models", get(llm_test::list_models))
         .route("/api/llm/models/probe", post(llm_test::probe_models))
         .route("/api/personality/defaults", get(personality::defaults))
-        .route("/api/personality/versions", get(personality::list).post(personality::create))
+        .route(
+            "/api/personality/versions",
+            get(personality::list).post(personality::create),
+        )
         .route("/api/personality/versions/{no}", get(personality::get_one))
-        .route("/api/personality/rollback/{no}", post(personality::rollback))
+        .route(
+            "/api/personality/rollback/{no}",
+            post(personality::rollback),
+        )
+        .route(
+            "/api/capabilities",
+            get(runtime_api::capabilities).post(runtime_api::toggle),
+        )
+        .route("/api/tasks/{id}/runtime", get(runtime_api::task))
+        .route("/api/tasks/{id}/control", post(runtime_api::control))
         .route("/api/tasks", get(tasks_api::list))
         .route("/api/tasks/{id}/events", get(tasks_api::events))
         .route("/api/kb/status", get(kb_status))
@@ -99,7 +131,9 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .await
         .with_context(|| format!("WebUI 监听失败: {addr}"))?;
     tracing::info!(%addr, "WebUI 开始监听");
-    axum::serve(listener, app).await.context("WebUI 服务异常退出")
+    axum::serve(listener, app)
+        .await
+        .context("WebUI 服务异常退出")
 }
 
 async fn healthz() -> axum::Json<serde_json::Value> {

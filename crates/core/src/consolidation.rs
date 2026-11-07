@@ -301,8 +301,9 @@ async fn process_chat(
         let visual_rows=sqlx::query("SELECT i.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id WHERE m.chat_id=?1 AND m.chat_type=?2 AND i.status='ready' AND i.msg_id BETWEEN ?3 AND ?4 ORDER BY i.msg_id LIMIT 6")
             .bind(chat_id).bind(chat_type).bind(outcome.msg_start).bind(outcome.msg_end).fetch_all(&mut *conn).await?;
         let visuals:Vec<Value>=visual_rows.iter().map(|r|->sqlx::Result<Value>{Ok(json!({"source_msg_id":r.try_get::<i64,_>("msg_id")?,"observation":r.try_get::<String,_>("observation")?}))}).collect::<sqlx::Result<_>>()?;
+        let current_memory=crate::memory::semantic::current(&mut conn,"chat",chat_id,chat_id,chat_type,outcome.msg_end,rows.last().unwrap().ts).await?;
         drop(conn);
-        let distilled=tokio::time::timeout(Duration::from_secs(180),distill(deps.llm.as_ref().unwrap(),chat_id,chat_type,&rows,&visuals)).await.ok().flatten();
+        let distilled=tokio::time::timeout(Duration::from_secs(180),distill(deps.llm.as_ref().unwrap(),chat_id,chat_type,&rows,&visuals,&current_memory)).await.ok().flatten();
         let mut conn=crate::db::connect(&deps.db_path).await?;
         match distilled {
             Some(data)=>match write_distilled(&mut conn,chat_id,chat_type,&rows[0].date,&data,&outcome,&batch).await {
@@ -410,6 +411,8 @@ async fn bump_edge(
 struct DistillOut {
     chat_summary: String,
     #[serde(default)]
+    memory_updates: Vec<crate::memory::semantic::Update>,
+    #[serde(default)]
     person_facts: Vec<PersonFact>,
     #[serde(default)]
     group_facts: Vec<SourcedFact>,
@@ -469,12 +472,18 @@ async fn distill(
     chat_type: &str,
     rows: &[MsgRow],
     visuals: &[Value],
+    current_memory: &[Value],
 ) -> Option<DistillOut> {
     let _guard = crate::memory::refresh::MODEL_LOCK.lock().await;
     let messages:Vec<Value>=rows.iter().map(|r|json!({"msg_id":r.msg_id,"person_id":r.sender_pid,"nickname":r.nickname,"ts":r.ts,"text":if is_sensitive(&r.text){"敏感内容已隐藏".to_owned()}else{r.text.chars().take(4000).collect::<String>()},"text_truncated":r.text.chars().count()>4000})).collect();
-    let user=json!({"chat_id":chat_id,"chat_type":chat_type,"messages":messages,"visual_observations_not_personal_confirmation":visuals}).to_string();
+    let user=json!({"chat_id":chat_id,"chat_type":chat_type,"messages":messages,"current_group_memory":current_memory,"visual_observations_not_personal_confirmation":visuals}).to_string();
     let first = gw
-        .chat(Role::Decision, DISTILL_SYSTEM, &user, true)
+        .chat(
+            Role::Decision,
+            &format!("{DISTILL_SYSTEM}{}", crate::memory::semantic::CONTRACT),
+            &user,
+            true,
+        )
         .await
         .ok()
         .and_then(|c| parse_distill(&c).ok());
@@ -484,10 +493,15 @@ async fn distill(
     debug!(chat_id, "归纳提炼首轮校验失败，重试一次");
     let retry =
         format!("{user}\n\n上一次输出未通过 Schema 校验，请严格按 Schema 重新输出，只输出 JSON。");
-    gw.chat(Role::Decision, DISTILL_SYSTEM, &retry, true)
-        .await
-        .ok()
-        .and_then(|c| parse_distill(&c).ok())
+    gw.chat(
+        Role::Decision,
+        &format!("{DISTILL_SYSTEM}{}", crate::memory::semantic::CONTRACT),
+        &retry,
+        true,
+    )
+    .await
+    .ok()
+    .and_then(|c| parse_distill(&c).ok())
 }
 
 fn parse_distill(content: &str) -> std::result::Result<DistillOut, String> {
@@ -533,6 +547,23 @@ async fn write_distilled(
     let now = now_secs();
     let mut tx = conn.transaction().await?;
     let mut facts_written = 0;
+    for update in d.memory_updates.iter().take(16) {
+        match crate::memory::semantic::write(
+            &mut tx,
+            "chat",
+            chat_id,
+            outcome.msg_start,
+            outcome.msg_end,
+            update,
+        )
+        .await
+        {
+            Ok(true) => facts_written += 1,
+            Ok(false) => {}
+            Err(e) if e.downcast_ref::<sqlx::Error>().is_some() => return Err(e),
+            Err(_) => tracing::warn!("群画像/事件依据校验未通过"),
+        }
+    }
     let mut personal = std::collections::BTreeMap::<String, Vec<String>>::new();
     for fact in d.person_facts.iter().take(100) {
         let f = &fact.source;

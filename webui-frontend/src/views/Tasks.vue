@@ -30,6 +30,16 @@
       <n-gi>
         <n-card :title="cur ? `${cur.task_id} · ${cur.goal}` : '执行时间轴'" size="small">
           <template v-if="cur">
+            <n-alert v-if="loadError" type="error">{{ loadError }}</n-alert>
+            <div v-if="runtime" class="yt-toolbar">
+              <n-tag>{{ phaseLabel(runtime.phase) }}</n-tag>
+              <n-tag>{{ deliveryLabel(runtime.delivery_state) }}</n-tag>
+              <n-button v-if="cur.state === 'running' && !runtime.parent_id && !['cancelled','finished','failed'].includes(runtime.phase)" size="small" :disabled="controlling" @click="control(['paused','waiting_input'].includes(runtime.phase) ? 'resume' : 'pause')">{{ ['paused','waiting_input'].includes(runtime.phase) ? '继续' : '暂停' }}</n-button>
+              <n-button v-if="cur.state === 'running' && !runtime.parent_id && !['cancelled','finished','failed'].includes(runtime.phase)" size="small" :disabled="controlling" @click="control('cancel')">取消任务</n-button>
+            </div>
+            <p v-if="runtime?.stop_reason">{{ runtime.stop_reason }}</p>
+            <p v-if="runtime?.final_text">{{ runtime.final_text }}</p>
+            <n-collapse v-if="invocations.length"><n-collapse-item title="工具执行记录" name="calls"><p v-for="call in invocations" :key="call.id">{{ call.tool }} · {{ call.state }} · {{ fmtTs(call.started_at) }}</p></n-collapse-item></n-collapse>
             <n-timeline v-if="events.length">
               <n-timeline-item v-for="e in events" :key="e.id" :title="`#${e.seq} ${e.kind}`" :content="textOf(e)" :time="fmtTs(e.ts)" />
             </n-timeline>
@@ -52,6 +62,11 @@ const list = ref([])
 const cur = ref(null)
 const events = ref([])
 const state = ref(null)
+const runtime=ref(null)
+const invocations=ref([])
+const loadError=ref('')
+const controlling=ref(false)
+let requestVersion=0
 const firstLoaded = ref(false)
 const stateOptions = ['pending', 'running', 'finished', 'failed', 'archived'].map((s) => ({ label: s, value: s }))
 
@@ -71,10 +86,22 @@ async function load() {
   firstLoaded.value = true
   if (list.value.length && !cur.value) open(list.value[0])
 }
+function phaseLabel(value) { return ({queued:'排队中',executing:'执行中',waiting_input:'等待补充',waiting_children:'等待子任务',paused:'已暂停',cancelled:'已取消',finished:'已完成',failed:'已停止'})[value] || value }
+function deliveryLabel(value) { return ({none:'尚无待发送结果',pending:'等待整理回复',preparing:'整理回复中',sent:'已发送',failed:'回复失败',unknown:'送达待核实'})[value] || value }
+async function control(action) {
+  if (!cur.value || controlling.value) return
+  controlling.value=true;loadError.value=''
+  try { await api.post(`/tasks/${cur.value.task_id}/control`,{action}); await load(); await open(cur.value) }
+  catch(e) {loadError.value=e.response?.data?.error || '操作失败'}
+  finally {controlling.value=false}
+}
 async function open(t) {
-  cur.value = t
-  const { data } = await api.get(`/tasks/${t.task_id}/events`)
-  events.value = data.events || []
+  cur.value=t;const version=++requestVersion;runtime.value=null;invocations.value=[];events.value=[];loadError.value=''
+  try {
+    const [eventResponse,runtimeResponse]=await Promise.all([api.get(`/tasks/${t.task_id}/events`),api.get(`/tasks/${t.task_id}/runtime`)])
+    if(version!==requestVersion)return
+    events.value=eventResponse.data.events || [];runtime.value=runtimeResponse.data.runtime;invocations.value=runtimeResponse.data.invocations || []
+  } catch(e) {if(version===requestVersion)loadError.value=e.response?.data?.error || '加载失败'}
 }
 onMounted(load)
 </script>

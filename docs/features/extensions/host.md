@@ -37,3 +37,9 @@
 - [`crates/core/tests/plugin_attachments.rs`](../../../crates/core/tests/plugin_attachments.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+V12增加SQLite能力目录与技能调用记录；能力启停和类型化会话范围叠加在插件自身权限之上，不能凭元数据创建可执行代码。模型/命令调用技能前登记来源消息，同一来源不重放副作用。管理页提供技能开关及持久调用数，旧插件计数仍表示本次服务启动后的统计。工具参数检查覆盖基础type/required/enum/properties/items/minimum/maximum，复杂Schema和业务权限仍由插件校验。源码 [`capabilities.rs`](../../../crates/core/src/capabilities.rs)。
+
+Decision和Chat能力目录也读取持久启停/范围，避免把已禁用能力继续推荐给模型。
+
+回放/测试合成消息的非正数编号不作为真实来源幂等键；真实消息编号仍确保同一技能不重复执行。

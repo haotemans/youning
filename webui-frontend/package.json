@@ -11,7 +11,8 @@
     "test:plugins": "playwright test plugins-flow.spec.js",
     "test:memes": "playwright test memes-flow.spec.js",
     "test:memories": "playwright test memories-flow.spec.js",
-    "test:relations": "playwright test relations-flow.spec.js"
+    "test:relations": "playwright test relations-flow.spec.js",
+    "test:tasks": "playwright test tasks-flow.spec.js"
   },
   "dependencies": {
     "axios": "1.20.0",

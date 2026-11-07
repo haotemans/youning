@@ -160,9 +160,19 @@ pub async fn post_config(
         let orig = read_toml_as_json(&state.extras.config_path).unwrap_or_else(|| json!({}));
         unmask_in_place(&mut cfg_clean, &orig);
         if let Some(section) = cfg_clean.get("consolidation") {
-            let options: yuantuan_core::consolidation::ConsolidationCfg = serde_json::from_value(section.clone())
-                .map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":format!("归纳配置错误: {e}")}))))?;
-            options.validate().map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":e.to_string()}))))?;
+            let options: yuantuan_core::consolidation::ConsolidationCfg =
+                serde_json::from_value(section.clone()).map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":format!("归纳配置错误: {e}")})),
+                    )
+                })?;
+            options.validate().map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":e.to_string()})),
+                )
+            })?;
         }
         let toml_text = to_toml_text(&cfg_clean)?;
         let back: toml::Value = toml::from_str(&toml_text).map_err(|e| {
@@ -293,7 +303,13 @@ pub async fn post_config(
 
         // [consolidation] → 取消旧定时器，按新配置重建（句柄注册表在 Extras）
         if let Some(cs) = back.get("consolidation") {
-            let options: yuantuan_core::consolidation::ConsolidationCfg = cs.clone().try_into().map_err(|e| (StatusCode::BAD_REQUEST,Json(json!({"error":format!("归纳配置错误: {e}")}))))?;
+            let options: yuantuan_core::consolidation::ConsolidationCfg =
+                cs.clone().try_into().map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error":format!("归纳配置错误: {e}")})),
+                    )
+                })?;
             let enabled = options.enabled;
             if let Some(old) = state.extras.consolidation.lock().unwrap().take() {
                 old.abort();
@@ -402,13 +418,15 @@ pub async fn post_config(
                         .map(|d| d.as_secs() as i64)
                         .unwrap_or(0);
                     conn.execute(
-                        "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO llm_usage(ts, role, model, prompt_tokens, completion_tokens, total_tokens,cache_hit_tokens,cache_miss_tokens)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6,?7,?8)",
                         yuantuan_core::db::params![
                             now, rec.role.to_string(), rec.model,
                             rec.usage.prompt_tokens as i64,
                             rec.usage.completion_tokens as i64,
                             rec.usage.total_tokens as i64,
+                            rec.usage.cache_hit_tokens.map(|v|v as i64),
+                            rec.usage.cache_miss_tokens.map(|v|v as i64),
                         ],
                     ).await.ok()
                 }).await;

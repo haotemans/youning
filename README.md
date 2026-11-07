@@ -12,6 +12,8 @@
 
 > **更名与兼容性**：仓库与项目展示名称已改为 `youning` / 攸宁。当前 Cargo 包、可执行文件、发布产物及默认数据库仍沿用 `yuantuan` 命名，下面的运行命令与文件路径因此保留原名。此次 README 更新不涉及代码重命名或数据迁移，请勿直接把这些路径替换为 `youning`。
 
+架构与实现入口：[上下文与记忆](docs/features/core/memory.md)、[任务调度](docs/features/core/tasks.md)、[本次架构裁决](docs/adr/0012-context-memory-task-runtime.md)。实现、mock测试与真实部署验收的边界见各功能文档。
+
 ## 现在能做什么
 
 | 能力 | 说明 |

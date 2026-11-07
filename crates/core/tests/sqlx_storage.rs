@@ -218,10 +218,14 @@ async fn backup_restores_a_consistent_snapshot_during_concurrent_writes() {
         .fetch_one(&mut *c)
         .await
         .unwrap();
-    assert_eq!((integrity.as_str(), version), ("ok", 11));
-    let image_source: (i64,String) = sqlx::query_as("SELECT m.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id")
-        .fetch_one(&mut *c).await.unwrap();
-    assert_eq!(image_source.0,1);
+    assert_eq!((integrity.as_str(), version), ("ok", 12));
+    let image_source: (i64, String) = sqlx::query_as(
+        "SELECT m.msg_id,i.observation FROM message_images i JOIN messages m ON m.msg_id=i.msg_id",
+    )
+    .fetch_one(&mut *c)
+    .await
+    .unwrap();
+    assert_eq!(image_source.0, 1);
     assert!(image_source.1.contains("项目截图"));
     assert_eq!(pair.0, pair.1, "备份不能落在写事务的中间");
     assert_eq!(text, value);

@@ -149,7 +149,11 @@ async fn repair_uses_own_group_and_private_messages_preserves_current_and_group_
         INSERT INTO summaries(owner_type,owner_id,period,date,summary,created_at) VALUES('chat','g1','daily','2026-11-04','群聊每日摘要保留',1);").await.unwrap();
     let first = refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
     assert_eq!(first.status, "updated");
-    assert_eq!(first.updated_fields, 2);
+    assert_eq!(first.updated_fields, 1);
+    // Scope batches cannot expose private facts to a group-derived synthesis.
+    conn.execute_batch("UPDATE state_kv SET value=json_set(value,'$.attempt',0) WHERE key='profile_refresh:v1:p_a'").await.unwrap();
+    let private_pass = refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
+    assert_eq!(private_pass.updated_fields, 1);
     let facts = memory::profile(&mut conn, "p_a", i64::MAX).await.unwrap();
     assert_eq!(facts.len(), 3);
     assert!(facts
@@ -165,11 +169,11 @@ async fn repair_uses_own_group_and_private_messages_preserves_current_and_group_
     let second = refresh::person(&r.path, &r.gw, "p_a", true).await.unwrap();
     assert_eq!(second.status, "unchanged");
     let calls = r.calls.lock().unwrap();
-    assert_eq!(calls.len(), 1);
+    assert_eq!(calls.len(), 2);
     let input: Value =
         serde_json::from_str(calls[0]["messages"][1]["content"].as_str().unwrap()).unwrap();
-    assert_eq!(input["messages"].as_array().unwrap().len(), 3);
-    assert!(input["messages"]
+    assert_eq!(input["messages"].as_array().unwrap().len(), 1);
+    assert!(!input["messages"]
         .as_array()
         .unwrap()
         .iter()
@@ -265,6 +269,7 @@ async fn nightly_updates_existing_portraits_and_requires_new_messages() {
       (1,'g1','group','p_a','我长期使用 Rust',1),(2,'private','private','p_a','我现在主要使用 Python',CAST(strftime('%s','now') AS INTEGER));
       INSERT INTO person_profile_facts(person_id,field,content,source_msg_id,evidence_quote,updated_at)
       VALUES('p_a','technical_preferences','Rust',1,'我长期使用 Rust',1);").await.unwrap();
+    conn.execute_batch("INSERT INTO memory_progress(stage,owner_id,chat_type,cursor,baseline) VALUES('portrait','p_a','',1,1)").await.unwrap();
     nightly::run(&r.path, &r.gw, &night_options("2026-11-06", 10))
         .await
         .unwrap();

@@ -36,3 +36,7 @@ V11仅追加增量游标/批次、事实、会话日记、画像版本和相关�
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
 
 V11迁移可幂等重放，已有处理游标和画像版本不被重置或重复插入；数据库版本断言与当前V11保持一致。
+
+V12采用追加迁移：memory_items、task_runtime、task_invocations、task_outbox、capability_catalog、capability_invocations；llm_usage新增可空cache_hit_tokens/cache_miss_tokens。旧数据保留，迁移与新增列均幂等。SQL定义见 crates/core/src/db/runtime_v12.sql。
+
+材料缓存使用SQLite `memory_material_epoch` 与画像/记忆/原文更改触发器实现失效；缓存自身不写入历史或改变原文。
