@@ -2,6 +2,9 @@
 
 [文档索引](../README.md) · [实现参考](../reference/message-flow-rules.md) · [决策台账](../decision-log.md)
 
+
+2026-11-08：下文10秒首消息窗口、others提前标记和逐条启动回放属于历史实现，已由[ADR-0013](../adr/0013-periodic-decisions.md)修订。当前普通群聊每30秒读未处理前缀，@/私聊即时；成功判断后才消费，推理失败退避、执行中断待核实。当前契约见[会话调度](../features/core/conversation.md)。
+
 > 文档性质：设计目标与约束。历史修订中的实施进度只对应当时版本；当前实现及差距集中记录在实现参考中。
 
 2026-10-10 的 Runtime 参与约束、回复方式传递与 Trace 扩展见[语义参与框架](../reference/decision-framework.md)，数据库回复归属为 V7；未改变既有窗口和任务调度边界。

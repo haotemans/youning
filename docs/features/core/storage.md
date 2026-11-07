@@ -40,3 +40,5 @@ V11迁移可幂等重放，已有处理游标和画像版本不被重置或重�
 V12采用追加迁移：memory_items、task_runtime、task_invocations、task_outbox、capability_catalog、capability_invocations；llm_usage新增可空cache_hit_tokens/cache_miss_tokens。旧数据保留，迁移与新增列均幂等。SQL定义见 crates/core/src/db/runtime_v12.sql。
 
 材料缓存使用SQLite `memory_material_epoch` 与画像/记忆/原文更改触发器实现失效；缓存自身不写入历史或改变原文。
+
+V13追加消息 `sender_bot`、`decision_state`、`decision_attempts`、`decision_retry_at` 及待判断索引；已有processed_at和原文不变。pending→deciding→executing→done分开记录，模型失败回pending并退避；重启的executing转uncertain而非重复执行。已有完成消息迁移为done，原始群聊/私聊记忆、凭据和配置均不清理。SQL定义见 [`crates/core/src/db/decision_v13.sql`](../../../crates/core/src/db/decision_v13.sql)，最新迁移版本为V13。

@@ -4,7 +4,7 @@
 
 > 决策记录：保留决定形成时的背景与实施状态；`accepted` 不表示实现已完成。后续实施差距见[信息流参考](../reference/message-flow-rules.md)。
 
-Status: accepted
+Status: accepted；调度/恢复实现部分 superseded by [ADR-0013](0013-periodic-decisions.md)
 
 日期：2026-10-03。对应 Q55，修订 Q37 的全事件完整落库要求。ADR-0005 编号保留给台账中待定的插件设计。
 

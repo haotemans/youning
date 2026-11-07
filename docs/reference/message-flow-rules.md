@@ -2,6 +2,9 @@
 
 [文档索引](../README.md) · [运行时设计](../design/runtime-design.md) · [后端工作记录](../changes/backend-hardening-workbench.md)
 
+
+2026-11-08：下文10秒首消息窗口、others提前标记和逐条启动回放属于历史实现，已由[ADR-0013](../adr/0013-periodic-decisions.md)修订。当前普通群聊每30秒读未处理前缀，@/私聊即时；成功判断后才消费，推理失败退避、执行中断待核实。当前契约见[会话调度](../features/core/conversation.md)。
+
 > 文档性质：实现记录与已知差距。2026-10-09 整理时对照 `c6f3f5b` 的相关代码核对裁决编号与窗口边界；本次未重新执行全量运行验收。
 
 > 本文记录消息处理实现及其边界，对照[运行时设计](../design/runtime-design.md)与[决策台账](../decision-log.md)。历史实现描述保留；本次明确核对的裁决及差距见文末，不以局部实现替代完整验收。

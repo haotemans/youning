@@ -73,3 +73,5 @@
 - [`plugins/moderator/src/membership/tests.rs`](../../../../plugins/moderator/src/membership/tests.rs)
 
 申请队列的迁移回滚测试随数据库V11更新版本断言，继续验证重放迁移不会丢失已有群聊记忆。
+
+V13消息调度迁移后，申请队列回归的最新版本断言同步到13，继续验证既有群聊记忆和申请状态不丢失；审核策略未改变。

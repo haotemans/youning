@@ -149,18 +149,18 @@ fn at_message(id: u64, uid: u64, text: &str) -> Value {
 }
 
 async fn wait_until<F: AsyncFnMut() -> bool>(mut cond: F, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(25); // Q54 窗口 10s,加 buffer
+    let deadline = Instant::now() + Duration::from_secs(45); // 默认30秒周期，另留处理余量
     while !cond().await {
         assert!(Instant::now() < deadline, "超时未完成：{what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-/// Q54 语义:同 chat 窗口内 N 条消息聚合 1 次 Decide。
-/// 三条普通消息同 chat 紧凑发送 → 1 次窗口 → 1 次 DecisionMade(回复锚定 A)。
+/// 同会话普通消息由30秒时钟触发一次批次Decision。
+/// 三条普通消息同chat紧凑发送，模型选择第二条的真实作者。
 /// mock LLM 只喂一次响应,验证 memory_write / 落库在 Q54 语义下仍成立。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn decision_pipeline_q54_window_aggregation() {
+async fn decision_pipeline_periodic_batch_selection() {
     check_dispatch(false, false).await;
 }
 
@@ -180,7 +180,7 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
 
     // Q54 下 3 条同 chat 消息 = 1 次 Decide;只喂一个 content
     let good = json!({
-        "action": "ignore", "mood": "calm", "mention": false, "reply_len": "short",
+        "action": "ignore", "mood": "calm", "mention": false, "reply_len": "short", "target_msg_id":2,
         "meme_type": null, "task_goal": null,
         "memory_write": "小明是 Rust 爱好者",
         "reason": "Q54 窗口聚合一次 Decide"
@@ -208,7 +208,7 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
     let nap_port = free_port();
     let mut nap_events = vec![
         at_message(201, 2001, "最近怎么样"),
-        at_message(202, 2001, "我很喜欢 Rust"),
+        at_message(202, if addressed { 2001 } else { 2002 }, "我很喜欢 Rust"),
         at_message(203, 2001, "Q54 同窗口追加"),
     ];
     if !addressed {
@@ -276,7 +276,7 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
                 .unwrap();
             n == expected as i64 && pending == 0
         },
-        "Q54 同 chat 3 条 → 1 次 DecisionMade(10s 窗口到期)",
+        "Q54 同 chat 3 条 → 1 次 DecisionMade(30s 周期到期)",
     )
     .await;
     // 再多等一段时间,确认不会突然冒出第二次(即不会 leak 二窗)
@@ -301,9 +301,9 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
         .await
         .unwrap();
     let p: Value = serde_json::from_str(&payload_str).unwrap();
-    // 回复锚定第一条(Q54 设计:anchor 固定为 A)
+    // 普通批次选择第二条的作者；直接呼叫保持本人的原锚点。
     assert_eq!(p["chat_id"], "555666");
-    assert_eq!(p["sender_pid"], "p_2001");
+    assert_eq!(p["sender_pid"], if addressed { "p_2001" } else { "p_2002" });
     assert_eq!(p["fallback"], false);
     assert_eq!(p["action"], "ignore");
     if image_flood {
@@ -313,14 +313,14 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
     // memory_write 落 long_memories(Q54 单 decide 也应该写)
     let (content, source): (String, String) = conn
         .query_row(
-            "SELECT content, source FROM long_memories WHERE owner_type = 'person' AND owner_id = 'p_2001'", yuantuan_core::db::params![],
+            "SELECT content, source FROM long_memories WHERE owner_type = 'person' AND owner_id = ?1", yuantuan_core::db::params![if addressed {"p_2001"} else {"p_2002"}],
             |r| Ok((r.try_get(0)?, r.try_get(1)?)),
         ).await
         .unwrap();
     assert_eq!(content, "小明是 Rust 爱好者");
     assert_eq!(source, "explicit");
 
-    // messages 3 条全部落库(摄取未受影响)且 processed_at 全标记(Q54 others 立即回写)
+    // messages 3 条全部落库(摄取未受影响)且 processed_at 全标记(Q54 批次成功后回写)
     let mcount: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM messages",
@@ -338,7 +338,7 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
         )
         .await
         .unwrap();
-    assert_eq!(unprocessed, 0, "Q54 others 也要立刻 processed_at 回写");
+    assert_eq!(unprocessed, 0, "Q54 批次成功后全部 processed_at 回写");
 }
 
 /// 垃圾输出 fallback 兜底:第一次返回非 JSON → 重试一次仍是非法 → fallback ignore,retries=1。
