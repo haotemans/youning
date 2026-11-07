@@ -187,8 +187,8 @@ pub async fn ingest_message(
     }
     let mentions_json = serde_json::to_string(&mentions)?;
     tx.execute(
-        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, reply_to, at_me, has_image, ts, external_msg_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, reply_to, at_me, has_image, ts, external_msg_id, sender_bot)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             chat_id,
             chat_type,
@@ -200,7 +200,8 @@ pub async fn ingest_message(
             at_me as i64,
             has_image as i64,
             ts,
-            napcat_msg_id
+            napcat_msg_id,
+            sender_bot as i64
         ],
     ).await?;
     let msg_id = tx.last_insert_rowid().await?;

@@ -261,8 +261,7 @@ async fn main() -> Result<()> {
         per_chat_cap: per_chat_cap_slot.clone(),
     };
 
-    // h''. Q55 恢复消费：把上次进程退出前来不及处理的 messages 回放进管线
-    //      （跳过 /image 直派命令；自身消息 ingest 时已标记不扫入）
+    // h''. 只修复持久消息状态；由30秒增量读取恢复，启动时不逐条调用模型。
     let replay = tokio::select! {
         result = yuantuan_core::bot::replay_pending(&pipeline_deps) => result,
         signal = shutdown_signal.wait() => {
@@ -271,9 +270,9 @@ async fn main() -> Result<()> {
         }
     };
     match replay {
-        Ok(n) if n > 0 => info!(count = n, "Q55 重启回放完成"),
+        Ok(n) if n > 0 => info!(count = n, "消息推理状态已恢复"),
         Ok(_) => {}
-        Err(e) => warn!(error = %e, "Q55 回放扫描失败（不阻断启动）"),
+        Err(e) => warn!(error = %e, "消息恢复扫描失败（管线启动时重试）"),
     }
     {
         let deps = pipeline_deps.clone();

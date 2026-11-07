@@ -386,3 +386,7 @@ CREATE INDEX idx_events_ts ON events(ts);
 | `person_profile_versions` | 保存每次资料来源推进，当前表person_profile_facts仍保留；触发器原子归档，不构造旧版本 |
 
 消息增加会话类型/编号/消息ID及人物/消息ID索引，支撑连续前缀读取。迁移不删除原表与原始消息，不清理配置或凭据；旧窗口和画像整理进度仅作为兼容基线，不能等同于新处理器的完整覆盖证明。
+
+## V13：周期判断与即时入口（2026-11-08）
+
+`messages` 追加 `sender_bot INTEGER DEFAULT 0`、`decision_state TEXT DEFAULT pending`、`decision_attempts INTEGER DEFAULT 0`、`decision_retry_at INTEGER DEFAULT 0`；不删除原始记录。`processed_at` 继续表示消费完成，失败不会回写。`pending/deciding/executing/done/uncertain` 区分尚未判断、正在推理、开始执行、完成与待核实；处理按会话类型/编号隔离。新待处理索引只包含未完成的非self、非机器人消息。行为契约见[会话调度](../features/core/conversation.md)。

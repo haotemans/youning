@@ -80,7 +80,7 @@ async fn request_identities_deduplicate_without_losing_group_memory_and_flags_st
         conn.query_row("PRAGMA user_version", params![], |r| r.try_get::<i64, _>(0))
             .await
             .unwrap(),
-        12
+        13
     );
     membership::finish(&path, r.id, "assessing", "pending", "迟到回调", None)
         .await

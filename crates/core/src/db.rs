@@ -413,6 +413,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "V0.12 上下文证据、版本化记忆与可恢复任务",
         include_str!("db/runtime_v12.sql"),
     ),
+    (
+        "V0.13 分离即时消息与周期批量判断",
+        include_str!("db/decision_v13.sql"),
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -445,6 +449,36 @@ pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
         if version == 12 {
             add_column_if_missing(&mut tx, "llm_usage", "cache_hit_tokens", "INTEGER").await?;
             add_column_if_missing(&mut tx, "llm_usage", "cache_miss_tokens", "INTEGER").await?;
+        }
+        if version == 13 {
+            add_column_if_missing(
+                &mut tx,
+                "messages",
+                "sender_bot",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            .await?;
+            add_column_if_missing(
+                &mut tx,
+                "messages",
+                "decision_state",
+                "TEXT NOT NULL DEFAULT 'pending'",
+            )
+            .await?;
+            add_column_if_missing(
+                &mut tx,
+                "messages",
+                "decision_attempts",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            .await?;
+            add_column_if_missing(
+                &mut tx,
+                "messages",
+                "decision_retry_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            .await?;
         }
         if version == 4 {
             add_column_if_missing(&mut tx, "messages", "processed_at", "INTEGER").await?;
