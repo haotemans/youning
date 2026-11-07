@@ -327,9 +327,14 @@ pub async fn capture_reply_snapshot(
         limitations
             .push("消息带图片但无可用识图记录，不能推测图中内容；旧图片可能没有保存地址。".into());
     }
+    let relationship_ids: BTreeSet<&str> = ids
+        .iter()
+        .copied()
+        .chain(recent.iter().map(|m| m.person_id.as_str()))
+        .collect();
     let relationships = tx.prepare("SELECT from_pid,to_pid,trust,familiar FROM relationship_edges WHERE updated_at<=?1 ORDER BY updated_at DESC LIMIT 256").await?
         .query_map(params![anchor.ts], |r| Ok((r.try_get::<String,_>(0)?,r.try_get::<String,_>(1)?,r.try_get::<f64,_>(2)?,r.try_get::<f64,_>(3)?))).await?
-        .collect::<sqlx::Result<Vec<_>>>()?.into_iter().filter(|(from,to,_,_)| ids.contains(from.as_str()) && ids.contains(to.as_str()))
+        .collect::<sqlx::Result<Vec<_>>>()?.into_iter().filter(|(from,to,_,_)| relationship_ids.contains(from.as_str()) && relationship_ids.contains(to.as_str()))
         .take(12).map(|(from,to,trust,familiar)| json!({"from":from,"to":to,"trust":trust,"familiar":familiar,"meaning":"历史互动指标，不证明现实身份或亲密关系"})).collect();
     let (content, examples) = tx.query_row(
         "SELECT content,reply_examples FROM personality_versions WHERE active=1 ORDER BY version_no DESC LIMIT 1",
