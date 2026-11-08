@@ -1,6 +1,6 @@
 # 语义参与判断与运行时约束分开
 
-Status: partially superseded by [ADR-0015](0015-heat-aware-social-participation.md)
+Status: partially superseded by [ADR-0015](0015-heat-aware-social-participation.md) and [ADR-0016](0016-protocol-target-before-quote-author.md)
 
 2026-11-08：自然接话新增social路径，修订主动参与必须有新帮助且排除玩梗的限制；执行授权、依据验证和答疑路径保留。下文保留原决定。
 

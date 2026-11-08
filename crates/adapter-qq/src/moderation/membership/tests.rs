@@ -1,6 +1,13 @@
 use super::*;
 use async_trait::async_trait;
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
+};
 
 struct Fake {
     roles: HashMap<u64, &'static str>,
@@ -55,19 +62,26 @@ impl Drop for Db {
     }
 }
 async fn db() -> Db {
+    static NEXT_DB: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT_DB.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
-        "yt-membership-{}-{}",
+        "yt-membership-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        sequence,
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    // A timestamp alone can collide across concurrent fixtures. Never silently
+    // reuse another test's SQLite files via create_dir_all.
+    std::fs::create_dir(&dir).unwrap();
     let path = dir.join("db.sqlite");
-    db::migrate(&mut db::connect(&path).await.unwrap())
+    let mut conn = db::connect(&path)
         .await
+        .with_context(|| format!("open isolated fixture {}", path.display()))
         .unwrap();
+    db::migrate(&mut conn).await.unwrap();
     Db(path)
 }
 async fn add(path: &Path, kind: &str, group: u64, flag: &str) -> i64 {
