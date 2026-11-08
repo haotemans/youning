@@ -44,3 +44,5 @@ V12采用追加迁移：memory_items、task_runtime、task_invocations、task_ou
 V13追加消息 `sender_bot`、`decision_state`、`decision_attempts`、`decision_retry_at` 及待判断索引；已有processed_at和原文不变。pending→deciding→executing→done分开记录，模型失败回pending并退避；重启的executing转uncertain而非重复执行。已有完成消息迁移为done，原始群聊/私聊记忆、凭据和配置均不清理。SQL定义见 [`crates/core/src/db/decision_v13.sql`](../../../crates/core/src/db/decision_v13.sql)，最新迁移版本为V13。
 
 DecisionMade观察事件追加入口类型、会话类型、实际作者名、锚点与批次成员编号；不改变事件表结构，不以Trace代替messages中的持久处理状态。
+
+V14给messages追加可空 `decision_error`，保留原始数据、已有失败次数、配置和记忆。`failed`表示停止自动判断，与执行结果未知的`uncertain`区分。队列终止可回写processed_at，但不能解释为模型已回复；状态与原因是事实来源。最新迁移与数据库回归断言为14。

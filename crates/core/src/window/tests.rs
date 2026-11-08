@@ -22,8 +22,8 @@ async fn fixture() -> std::path::PathBuf {
 async fn insert(path: &Path, kind: &str, text: &str) -> i64 {
     let mut conn = crate::db::connect(path).await.unwrap();
     conn.execute(
-        "INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42',?1,'p_1',?2,1)",
-        params![kind, text],
+        "INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42',?1,'p_1',?2,?3)",
+        params![kind, text, now()],
     )
     .await
     .unwrap();
@@ -142,4 +142,81 @@ async fn retry_backoff_and_empty_ticks_do_not_claim_or_consume() {
     .await
     .unwrap();
     assert!(claim(&path, id).await.unwrap());
+}
+
+#[tokio::test]
+async fn failure_limit_expiry_and_permanent_errors_stop_without_deleting_messages() {
+    let path = fixture().await;
+    let id = insert(&path, "group", "needs bounded retries").await;
+    for n in 1..=MAX_FAILURES {
+        let mut c = crate::db::connect(&path).await.unwrap();
+        c.execute(
+            "UPDATE messages SET decision_retry_at=0 WHERE msg_id=?1",
+            params![id],
+        )
+        .await
+        .unwrap();
+        drop(c);
+        assert!(claim(&path, id).await.unwrap());
+        fail(&path, &[id], "schema invalid", false).await.unwrap();
+        let attempts: i64 = crate::db::connect(&path)
+            .await
+            .unwrap()
+            .query_row(
+                "SELECT decision_attempts FROM messages WHERE msg_id=?1",
+                params![id],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(attempts, n);
+    }
+    assert!(!claim(&path, id).await.unwrap());
+    recover(&path).await.unwrap();
+    let stale = insert(&path, "group", "old source retained").await;
+    let terminal = insert(&path, "group", "bad provider").await;
+    assert!(claim(&path, terminal).await.unwrap());
+    fail(&path, &[terminal], "HTTP 400", true).await.unwrap();
+    let mut c = crate::db::connect(&path).await.unwrap();
+    c.execute("UPDATE messages SET ts=1 WHERE msg_id=?1", params![stale])
+        .await
+        .unwrap();
+    assert!(pending(&path).await.unwrap().is_empty());
+    for target in [id, stale, terminal] {
+        let state: String = c
+            .query_row(
+                "SELECT decision_state FROM messages WHERE msg_id=?1",
+                params![target],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(state, "failed");
+    }
+    let count: i64 = c
+        .query_row("SELECT COUNT(*) FROM messages", params![], |r| r.try_get(0))
+        .await
+        .unwrap();
+    assert_eq!(count, 3);
+    let fresh = insert(&path, "group", "new input still eligible").await;
+    assert!(claim(&path, fresh).await.unwrap());
+}
+
+#[tokio::test]
+async fn queue_backpressure_does_not_spend_a_model_failure() {
+    let path = fixture().await;
+    let id = insert(&path, "group", "queue full").await;
+    assert!(claim(&path, id).await.unwrap());
+    release(&path, &[id]).await.unwrap();
+    let count: i64 = crate::db::connect(&path)
+        .await
+        .unwrap()
+        .query_row(
+            "SELECT decision_attempts FROM messages WHERE msg_id=?1",
+            params![id],
+            |r| r.try_get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
 }

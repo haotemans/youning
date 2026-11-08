@@ -95,7 +95,7 @@ pub async fn decision_status(
     use yuantuan_core::{db::params_from_iter, window};
     if q.state
         .as_deref()
-        .is_some_and(|v| !["pending", "deciding", "executing", "uncertain"].contains(&v))
+        .is_some_and(|v| !["pending", "deciding", "executing", "uncertain", "failed"].contains(&v))
     {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -104,7 +104,7 @@ pub async fn decision_status(
     }
     let self_qq = s.extras.self_qq.load(std::sync::atomic::Ordering::Relaxed);
     let mut binds: Vec<yuantuan_core::db::Value> = vec![format!("p_{self_qq}").into()];
-    let mut filter=String::from("m.sender_pid!='self' AND m.sender_pid!=?1 AND m.sender_bot=0 AND ((m.processed_at IS NULL AND m.decision_state IN ('pending','deciding','executing')) OR m.decision_state='uncertain')");
+    let mut filter=String::from("m.sender_pid!='self' AND m.sender_pid!=?1 AND m.sender_bot=0 AND ((m.processed_at IS NULL AND m.decision_state IN ('pending','deciding','executing')) OR m.decision_state IN ('uncertain','failed'))");
     if let Some(chat) = q
         .chat_id
         .as_deref()
@@ -131,7 +131,7 @@ pub async fn decision_status(
         .map_err(|e| err(&e.to_string()))?;
     drop(stmt);
     let mut counts =
-        json!({"pending":0,"deciding":0,"executing":0,"uncertain":0,"retry_waiting":0});
+        json!({"pending":0,"deciding":0,"executing":0,"uncertain":0,"failed":0,"retry_waiting":0});
     for (state, count, retry) in rows {
         counts[&state] = json!(count);
         if state == "pending" {
@@ -144,13 +144,20 @@ pub async fn decision_status(
     }
     let limit = q.limit.unwrap_or(30).clamp(0, 100);
     binds.push(limit.into());
-    let mut stmt=tx.prepare(&format!("SELECT m.msg_id,m.chat_type,m.chat_id,m.sender_pid,COALESCE(NULLIF(m.nickname,''),NULLIF(p.display_name,''),m.sender_pid),substr(COALESCE(m.text,''),1,180),m.ts,m.decision_state,m.decision_attempts,m.decision_retry_at FROM messages m LEFT JOIN persons p ON p.person_id=m.sender_pid WHERE {filter} ORDER BY CASE WHEN m.decision_state='uncertain' THEN 1 ELSE 0 END,m.msg_id LIMIT ?{}",binds.len())).await.map_err(|e|err(&e.to_string()))?;
+    let mut stmt=tx.prepare(&format!("SELECT m.msg_id,m.chat_type,m.chat_id,m.sender_pid,COALESCE(NULLIF(m.nickname,''),NULLIF(p.display_name,''),m.sender_pid),substr(COALESCE(m.text,''),1,180),m.ts,m.decision_state,m.decision_attempts,m.decision_retry_at,m.decision_error FROM messages m LEFT JOIN persons p ON p.person_id=m.sender_pid WHERE {filter} ORDER BY CASE WHEN m.decision_state IN ('uncertain','failed') THEN 1 ELSE 0 END,m.msg_id LIMIT ?{}",binds.len())).await.map_err(|e|err(&e.to_string()))?;
     let items=stmt.query_map(params_from_iter(binds),|r|Ok(json!({
-        "msg_id":r.try_get::<i64,_>(0)?,"chat_type":r.try_get::<String,_>(1)?,"chat_id":r.try_get::<String,_>(2)?,"sender_pid":r.try_get::<String,_>(3)?,"sender_name":r.try_get::<String,_>(4)?,"text":r.try_get::<String,_>(5)?,"ts":r.try_get::<i64,_>(6)?,"state":r.try_get::<String,_>(7)?,"attempts":r.try_get::<i64,_>(8)?,"retry_at":r.try_get::<i64,_>(9)?,
+        "msg_id":r.try_get::<i64,_>(0)?,"chat_type":r.try_get::<String,_>(1)?,"chat_id":r.try_get::<String,_>(2)?,"sender_pid":r.try_get::<String,_>(3)?,"sender_name":r.try_get::<String,_>(4)?,"text":r.try_get::<String,_>(5)?,"ts":r.try_get::<i64,_>(6)?,"state":r.try_get::<String,_>(7)?,"attempts":r.try_get::<i64,_>(8)?,"retry_at":r.try_get::<i64,_>(9)?,"error":r.try_get::<Option<String>,_>(10)?,
     }))).await.map_err(|e|err(&e.to_string()))?.collect::<sqlx::Result<Vec<_>>>().map_err(|e|err(&e.to_string()))?;
     drop(stmt);
     tx.commit().await.map_err(|e| err(&e.to_string()))?;
+    let blocked = s
+        .extras
+        .llm_slot
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|g| g.decision_blocked_reason());
     Ok(Json(
-        json!({"policy":{"group_interval_secs":window::DEFAULT_POLL_SECS,"periodic_concurrency":window::DEFAULT_PERIODIC_CONCURRENCY,"max_batch_messages":window::MAX_MESSAGES,"max_batch_chars":window::MAX_INPUT_CHARS,"direct_mode":"immediate"},"counts":counts,"messages":items}),
+        json!({"blocked_reason":blocked,"policy":{"max_failures":window::MAX_FAILURES,"max_pending_age_secs":window::MAX_PENDING_AGE_SECS,"group_interval_secs":window::DEFAULT_POLL_SECS,"periodic_concurrency":window::DEFAULT_PERIODIC_CONCURRENCY,"max_batch_messages":window::MAX_MESSAGES,"max_batch_chars":window::MAX_INPUT_CHARS,"direct_mode":"immediate"},"counts":counts,"messages":items}),
     ))
 }

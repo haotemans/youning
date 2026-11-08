@@ -210,6 +210,31 @@ pub struct LlmUsageRecord {
 /// 用量汇聚回调：装配侧注入（一般写 llm_usage 表）；LLM 网关不依赖 db（core 纯净性）
 pub type UsageSink = std::sync::Arc<dyn Fn(LlmUsageRecord) + Send + Sync>;
 
+#[derive(Debug)]
+pub struct HttpFailure {
+    pub status: u16,
+    pub detail: String,
+}
+impl fmt::Display for HttpFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "HTTP {}: {}", self.status, self.detail)
+    }
+}
+impl std::error::Error for HttpFailure {}
+impl HttpFailure {
+    pub fn permanent(&self) -> bool {
+        matches!(self.status, 400 | 401 | 403 | 404 | 405 | 410 | 422)
+    }
+}
+#[derive(Debug)]
+pub struct DecisionBlocked(pub String);
+impl fmt::Display for DecisionBlocked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for DecisionBlocked {}
+
 pub struct LlmGateway {
     roles: HashMap<Role, ResolvedRole>,
     /// 原始 provider 配置（base_url + api_key），用于 WebUI 的「获取可用模型」功能
@@ -220,6 +245,7 @@ pub struct LlmGateway {
     concurrency: Arc<Semaphore>,
     /// 可选：每次成功 chat 后回调。None = 不统计（测试/未装配）
     usage_sink: Option<UsageSink>,
+    decision_blocked: Mutex<Option<String>>,
 }
 
 /// 运行时的 provider 凭据（解析后），用于按名查询
@@ -306,6 +332,7 @@ impl LlmGateway {
             gate: CostGate::new(30),
             concurrency: Arc::new(Semaphore::new(DEFAULT_LLM_CONCURRENCY)),
             usage_sink: None,
+            decision_blocked: Mutex::new(None),
         })
     }
 
@@ -316,6 +343,11 @@ impl LlmGateway {
 
     pub fn role(&self, role: Role) -> Option<&ResolvedRole> {
         self.roles.get(&role)
+    }
+
+    /// A fresh gateway after model configuration is saved clears this circuit.
+    pub fn decision_blocked_reason(&self) -> Option<String> {
+        self.decision_blocked.lock().unwrap().clone()
     }
 
     /// 热应用：调整 Decision 成本闸（次/分）
@@ -581,6 +613,11 @@ impl LlmGateway {
         user: Value,
         json_mode: bool,
     ) -> Result<String> {
+        if role == Role::Decision {
+            if let Some(reason) = self.decision_blocked_reason() {
+                return Err(DecisionBlocked(reason).into());
+            }
+        }
         let r = self
             .roles
             .get(&role)
@@ -593,6 +630,11 @@ impl LlmGateway {
             .acquire()
             .await
             .map_err(|_| anyhow!("LLM 并发信号量已关闭"))?;
+        if role == Role::Decision {
+            if let Some(reason) = self.decision_blocked_reason() {
+                return Err(DecisionBlocked(reason).into());
+            }
+        }
 
         // Byte-based conservative estimate; keep output room and do not count image base64 as text.
         let text_bytes = user.as_str().map(str::len).unwrap_or_else(|| {
@@ -639,10 +681,18 @@ impl LlmGateway {
         let status = resp.status();
         let text = resp.text().await.context("读取 LLM 响应体失败")?;
         if !status.is_success() {
-            bail!(
-                "角色 {role} HTTP {status}: {}",
-                &text[..text.floor_char_boundary(300)]
-            );
+            let error = HttpFailure {
+                status: status.as_u16(),
+                detail: text.chars().take(300).collect(),
+            };
+            if role == Role::Decision && error.permanent() {
+                *self.decision_blocked.lock().unwrap() = Some(format!(
+                    "Decision 模型路由或凭据不可用（HTTP {}），请检查并重新保存模型服务配置",
+                    error.status
+                ));
+            }
+            let message = format!("角色 {role} HTTP {status}: {}", error.detail);
+            return Err(anyhow::Error::new(error).context(message));
         }
         let v: Value = serde_json::from_str(&text).context("LLM 响应非 JSON")?;
         self.record_usage(role, &r.model, &v);
