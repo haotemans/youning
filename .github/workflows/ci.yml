@@ -49,6 +49,9 @@ jobs:
       - name: Task runtime browser tests
         working-directory: webui-frontend
         run: npm run test:tasks
+      - name: Decision scheduling browser tests
+        working-directory: webui-frontend
+        run: npm run test:trace
       - name: Model configuration browser tests
         working-directory: webui-frontend
         run: npm run test:models

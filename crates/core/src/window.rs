@@ -7,8 +7,9 @@ use sqlx::Row;
 use std::path::Path;
 
 pub const DEFAULT_POLL_SECS: u64 = 30;
-const MAX_MESSAGES: usize = 40;
-const MAX_INPUT_CHARS: usize = 10_000;
+pub const DEFAULT_PERIODIC_CONCURRENCY: usize = 2;
+pub const MAX_MESSAGES: usize = 40;
+pub const MAX_INPUT_CHARS: usize = 10_000;
 
 #[derive(Debug)]
 pub struct PendingBatch {

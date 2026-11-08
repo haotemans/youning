@@ -42,3 +42,5 @@ V12采用追加迁移：memory_items、task_runtime、task_invocations、task_ou
 材料缓存使用SQLite `memory_material_epoch` 与画像/记忆/原文更改触发器实现失效；缓存自身不写入历史或改变原文。
 
 V13追加消息 `sender_bot`、`decision_state`、`decision_attempts`、`decision_retry_at` 及待判断索引；已有processed_at和原文不变。pending→deciding→executing→done分开记录，模型失败回pending并退避；重启的executing转uncertain而非重复执行。已有完成消息迁移为done，原始群聊/私聊记忆、凭据和配置均不清理。SQL定义见 [`crates/core/src/db/decision_v13.sql`](../../../crates/core/src/db/decision_v13.sql)，最新迁移版本为V13。
+
+DecisionMade观察事件追加入口类型、会话类型、实际作者名、锚点与批次成员编号；不改变事件表结构，不以Trace代替messages中的持久处理状态。

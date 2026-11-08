@@ -216,7 +216,8 @@
       "tests": [
         "crates/webui/tests/config_hot.rs",
         "crates/webui/tests/llm_test.rs",
-        "webui-frontend/tests/models-flow.spec.js"
+        "webui-frontend/tests/models-flow.spec.js",
+        "webui-frontend/tests/trace-flow.spec.js"
       ],
       "module": "webui"
     },
@@ -240,7 +241,8 @@
       ],
       "tests": [
         "crates/webui/tests/auth_status.rs",
-        "crates/webui/tests/pages_api.rs"
+        "crates/webui/tests/pages_api.rs",
+        "webui-frontend/tests/trace-flow.spec.js"
       ],
       "module": "webui"
     },

@@ -38,3 +38,5 @@ BotChat 视觉输入统一携带 PNG 像素：定向消息先在应用侧下载�
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
 
 LLM用量记录可空缓存命中/未命中数；支持prompt_cache_hit_tokens、prompt_cache_miss_tokens及prompt_tokens_details.cached_tokens。缺失表示未知，不记为零或宣称命中。模型请求增加300k保守文本预算和8192输出预留；尚未接入供应商模型上下文能力目录。
+
+运行参数从 `/api/decisions/status?limit=0`读取实际普通群聊间隔、即时入口、批次并发与消息容量，展示为只读值；即时队列容量继续使用原配置，保存时不把只读策略伪装成可热调字段。相关记忆字段改为与当前召回行为一致的名称。浏览器验证：[`webui-frontend/tests/trace-flow.spec.js`](../../../webui-frontend/tests/trace-flow.spec.js)。

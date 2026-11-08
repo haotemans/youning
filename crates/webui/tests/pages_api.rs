@@ -199,6 +199,54 @@ async fn seed(db_path: &PathBuf) {
     ).await.unwrap();
 }
 
+#[tokio::test]
+async fn decision_status_reads_real_states_without_replaying_uncertain_actions() {
+    let rig = start().await;
+    let mut c = db::connect(&rig.db_path).await.unwrap();
+    c.execute_batch("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,ts,decision_state,decision_retry_at,decision_attempts,processed_at) VALUES
+      ('42','group','p_2001','群名片','等待重试',1,'pending',4102444800,2,NULL),
+      ('42','private','p_2001',NULL,'私聊消息',2,'deciding',0,0,NULL),
+      ('42','group','p_2001',NULL,'执行结果未知',3,'uncertain',0,0,4),
+      ('42','group','p_2001',NULL,'完成',4,'done',0,0,4),
+      ('42','group','self',NULL,'云团自己',5,'pending',0,0,NULL);
+      INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,sender_bot) VALUES('42','group','p_2001','其他机器人',6,1);").await.unwrap();
+    let (_, data) = rig.get("/api/decisions/status?chat_id=42").await;
+    assert_eq!(data["policy"]["group_interval_secs"], 30);
+    assert_eq!(data["policy"]["periodic_concurrency"], 2);
+    assert_eq!(
+        data["counts"],
+        json!({"pending":1,"deciding":1,"executing":0,"uncertain":1,"retry_waiting":1})
+    );
+    assert_eq!(data["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(data["messages"][0]["sender_name"], "群名片");
+    assert_eq!(data["messages"][1]["chat_type"], "private");
+    let (_, uncertain) = rig
+        .get("/api/decisions/status?chat_id=42&state=uncertain")
+        .await;
+    assert_eq!(uncertain["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(uncertain["messages"][0]["state"], "uncertain");
+    assert_eq!(uncertain["counts"], data["counts"]);
+    let (_, empty) = rig.get("/api/decisions/status?chat_id=42&limit=0").await;
+    assert!(empty["messages"].as_array().unwrap().is_empty());
+    assert_eq!(rig.get("/api/decisions/status?state=bad").await.0, 400);
+    let unauthorized = rig
+        .http
+        .get(format!("{}/api/decisions/status", rig.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status().as_u16(), 401);
+    let state: String = c
+        .query_row(
+            "SELECT decision_state FROM messages WHERE text='执行结果未知'",
+            yuantuan_core::db::params![],
+            |r| r.try_get(0),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state, "uncertain");
+}
+
 struct Rig {
     http: reqwest::Client,
     base: String,

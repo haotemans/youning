@@ -52,7 +52,7 @@
                 <n-form-item label="近期会话窗口 (条)">
                   <n-input-number v-model:value="f.context.k" :min="5" :max="100" style="width: 160px" />
                 </n-form-item>
-                <n-form-item label="每人注入记忆 (条)">
+                <n-form-item label="相关记忆条数">
                   <n-input-number v-model:value="f.context.roster_mem_per" :min="0" :max="10" style="width: 160px" />
                 </n-form-item>
               </n-form>
@@ -104,7 +104,11 @@
 
             <n-card title="消息管线与表情采集" size="small">
               <n-form label-placement="left" label-width="150" :show-feedback="false" class="clean-form">
-                <n-form-item label="单会话队列容量">
+                <n-form-item label="普通群聊判断"><span>{{ policy ? `每 ${policy.group_interval_secs} 秒` : '—' }}</span></n-form-item>
+                <n-form-item label="@ / 私聊判断"><span>{{ policy ? '即时处理' : '—' }}</span></n-form-item>
+                <n-form-item label="普通批次并发"><span>{{ policy?.periodic_concurrency ?? '—' }}</span></n-form-item>
+                <n-form-item label="每批消息上限"><span>{{ policy ? `${policy.max_batch_messages} 条 / ${policy.max_batch_chars} 字符` : '—' }}</span></n-form-item>
+                <n-form-item label="即时队列容量">
                   <n-input-number v-model:value="f.pipeline.per_chat_queue_cap" :min="4" :max="512" style="width: 160px" />
                 </n-form-item>
                 <n-form-item label="自发消息缓存数">
@@ -129,6 +133,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 
+/** @type {import('vue').Ref<any>} */
+const policy = ref(null)
 const loaded = ref(false)
 const saving = ref(false)
 const text = ref('')
@@ -166,6 +172,7 @@ onMounted(async () => {
     if (c[k]) f.value[k] = { ...f.value[k], ...c[k] }
   }
   loaded.value = true
+  try { policy.value = (await api.get('/decisions/status?limit=0')).data.policy } catch { /* unknown policy stays explicit */ }
 })
 
 async function save() {

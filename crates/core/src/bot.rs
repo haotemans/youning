@@ -132,7 +132,9 @@ fn spawn_pipeline_with_period(deps: PipelineDeps, period: std::time::Duration) -
         let deps = Arc::new(deps);
         let mut lanes = DirectLanes::new();
         let mut busy = std::collections::HashSet::new();
-        let periodic_slots = Arc::new(tokio::sync::Semaphore::new(2));
+        let periodic_slots = Arc::new(tokio::sync::Semaphore::new(
+            crate::window::DEFAULT_PERIODIC_CONCURRENCY,
+        ));
         let mut workers = PipelineWorkers::new();
         let delivery_deps = Arc::clone(&deps);
         workers.spawn(async move {

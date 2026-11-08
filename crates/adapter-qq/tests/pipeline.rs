@@ -306,6 +306,19 @@ async fn check_dispatch(addressed: bool, image_flood: bool) {
     assert_eq!(p["sender_pid"], if addressed { "p_2001" } else { "p_2002" });
     assert_eq!(p["fallback"], false);
     assert_eq!(p["action"], "ignore");
+    assert_eq!(p["chat_type"], "group");
+    assert_eq!(
+        p["trigger"],
+        if addressed { "immediate" } else { "periodic" }
+    );
+    assert_eq!(
+        p["batch_message_ids"].as_array().unwrap().len(),
+        if addressed { 0 } else { 3 }
+    );
+    assert_eq!(
+        p["anchor_msg_id"],
+        if image_flood || !addressed { 2 } else { 1 }
+    );
     if image_flood {
         assert_eq!(p["text"], "禁言猫猫");
     }
