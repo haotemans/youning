@@ -1236,3 +1236,144 @@ async fn group_heat_and_public_continuity_use_typed_immutable_snapshot_end() {
         serde_json::json!([])
     );
 }
+
+#[tokio::test]
+async fn protocol_bot_mention_and_quote_material_do_not_become_another_addressee() {
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use yuantuan_core::{decision, event, llm, state};
+    let rig = Rig::new().await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    conn.execute("INSERT INTO persons(person_id,display_name,first_seen,last_seen) VALUES('self','云团',1,1)",params![]).await.unwrap();
+    conn.execute(
+        "INSERT INTO identities(person_id,platform,platform_uid) VALUES('self','qq','1342516957')",
+        params![],
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let app=axum::Router::new().route("/chat/completions",axum::routing::post(move |axum::Json(body):axum::Json<Value>| {
+        let counter=counter.clone();
+        async move {
+            counter.fetch_add(1,Ordering::SeqCst);
+            let context:Value=serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+            assert_eq!(context["bot_identity"]["person_id"],"self");
+            assert_eq!(context["bot_identity"]["mention_aliases"],json!(["p_1342516957"]));
+            assert_eq!(context["addressing"]["quoted_author_person_id"],"p_source");
+            assert_eq!(context["quoted_messages"][0]["text"],"今日介绍的是一位西装丽人，她也是故事里的通缉犯。");
+            assert!(body["messages"][0]["content"].as_str().unwrap().contains("引用只是改写素材"));
+            let out=json!({"action":"ignore","reply_mode":"answer","mood":"calm","mention":false,"reply_len":"short","reason":"用户@了其他人请求改写，不是在叫我",
+                "assessment":{"audience":"other","intent":"request","continuity":"continuing","confidence":"high","benefit":"low","novelty":"new","evidence":"not_needed","evidence_msg_ids":[context["anchor"]["msg_id"]]}});
+            axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let providers = rig.dir.join("providers.toml");
+    std::fs::write(&providers,format!("[provider.mock]\nbase_url=\"http://{addr}\"\n[roles]\ndecision={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+    let gateway = llm::LlmGateway::load(&providers).unwrap();
+    for (index, (direct, private, mentions, expected)) in [
+        (true, false, json!(["p_1342516957"]), "reply"),
+        (false, false, json!(["p_source"]), "ignore"),
+        (true, false, json!(["p_1342516957", "p_source"]), "ignore"),
+        (false, true, json!([]), "reply"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let chat = format!("g{index}");
+        rig.message(
+            "p_source",
+            &chat,
+            "今日介绍的是一位西装丽人，她也是故事里的通缉犯。",
+            Some(901),
+            None,
+        )
+        .await;
+        let mut msg = rig
+            .message("p_user", &chat, " 改写一下", None, Some(901))
+            .await;
+        msg.at_me = *direct;
+        conn.execute(
+            "UPDATE messages SET mentions=?1,at_me=?2 WHERE msg_id=?3",
+            params![mentions.to_string(), *direct as i64, msg.msg_id],
+        )
+        .await
+        .unwrap();
+        if *private {
+            conn.execute(
+                "UPDATE messages SET chat_type='private' WHERE chat_id=?1",
+                params![chat],
+            )
+            .await
+            .unwrap();
+            msg.chat_type = "private".into();
+        }
+        let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
+            .await
+            .unwrap();
+        let context =
+            render_bot_context(&snapshot, MoodValue::Calm, &ContextCfg::default()).unwrap();
+        let rendered: Value = serde_json::from_str(&context.user).unwrap();
+        assert_eq!(
+            rendered["addressing"]["explicit_target"] == "bot",
+            *expected == "reply"
+        );
+        assert_eq!(rendered["quoted_messages"][0]["person_id"], "p_source");
+        // Keep the original protocol evidence in SQLite; aliases are context metadata.
+        let raw: String = conn
+            .query_row(
+                "SELECT mentions FROM messages WHERE msg_id=?1",
+                params![msg.msg_id],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(raw, mentions.to_string());
+        let bus = event::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let outcome = decision::decide(
+            &rig.path,
+            &gateway,
+            &bus,
+            &state::MoodState::default(),
+            &msg,
+            None,
+            &snapshot,
+        )
+        .await;
+        assert!(!outcome.fallback);
+        assert_eq!(outcome.output.action.as_str(), *expected);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            index + 1,
+            "协议矛盾纠正不额外调用Decision"
+        );
+        assert!(
+            outcome.output.skill_name.is_none()
+                && outcome.output.task_goal.is_none()
+                && outcome.output.task_control.is_none()
+        );
+        if *expected == "reply" {
+            assert_eq!(
+                outcome.output.assessment.unwrap().audience,
+                yuantuan_core::engagement::Audience::Bot
+            );
+            loop {
+                if let event::Event::DecisionMade(d) = rx.recv().await.unwrap() {
+                    assert_eq!(d.policy.suggested_action, "ignore");
+                    assert!(d.policy.notes.iter().any(|note| note.contains("协议确认")));
+                    break;
+                }
+            }
+        }
+    }
+    server.abort();
+}

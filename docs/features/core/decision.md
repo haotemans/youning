@@ -50,3 +50,5 @@ V12增加可选 history_query、task_plan、task_control。Chat执行建议回�
 热度来自固定快照内同群人类近2/5分钟消息数、参与人数、前一窗口趋势、单人刷屏占比、Bot已发轮数与新增人类消息；排除其他机器人及同号私聊，多泡按reply_anchor_id合并为一轮。安静/渐热/活跃/密集默认参与间隔180/90/45/90秒，5分钟最多4轮、Bot占比过高或一人密集刷屏时等待。间隔距实际发送计，@、私聊和真实同人承接沿用即时回应路径。
 
 social只允许简短正文或现有表情，不授权技能、派工和任务控制；Chat执行需求不会在此模式回环。旧答疑路径及执行原话校验保留。完整参数、边界和验证入口见[决策框架](../../reference/decision-framework.md)与[ADR-0015](../../adr/0015-heat-aware-social-participation.md)。以上为代码契约，真实模型的选话题及接话自然度需部署后观察，mock不能证明线上效果。
+
+协议指向优先：输入携带bot_identity及addressing，云团的QQ别名仍代表self。私聊或协议确认仅@云团时，模型不能因引用作者是其他人而改判接收对象；对高把握、有效可见依据、未收尾的request/question/follow_up/correction，若模型因audience=other而ignore，Runtime纠正为普通文字回应，清除执行字段且不补调Decision。多人被@、普通ignore、低把握、无效依据、停止和收尾不升级；引用内容不提供执行授权。policy版本4记录原建议与纠正原因。具体边界见[ADR-0016](../../adr/0016-protocol-target-before-quote-author.md)，bot_context.rs复现真实消息形态并覆盖反例。

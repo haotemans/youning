@@ -104,6 +104,8 @@ pub struct PolicyTrace {
 pub struct PolicyInput<'a> {
     pub is_group: bool,
     pub direct: bool,
+    /// A private channel or unambiguous protocol @, never inferred from prose.
+    pub protocol_direct: bool,
     pub information_lookup: bool,
     pub anchor_id: i64,
     pub visible_ids: &'a BTreeSet<i64>,
@@ -144,7 +146,7 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
             return;
         }
     }
-    let Some(a) = out.assessment.clone() else {
+    let Some(mut a) = out.assessment.clone() else {
         return;
     };
     let valid = !a.evidence_msg_ids.is_empty()
@@ -154,6 +156,39 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
             .iter()
             .all(|id| input.visible_ids.contains(id));
     trace.evidence_valid = Some(valid);
+    if input.protocol_direct && a.audience == Audience::Other {
+        a.audience = Audience::Bot;
+        out.assessment = Some(a.clone());
+        trace
+            .notes
+            .push("协议确认消息明确指向云团，引用作者或云团QQ编号不改变接收对象".into());
+        // Correct only a demonstrably contradictory target classification.
+        // An ordinary ignore, low confidence, closing or stop is still silent.
+        if out.action == DecisionAction::Ignore
+            && valid
+            && a.confidence == Level::High
+            && a.continuity != Continuity::Closing
+            && matches!(
+                a.intent,
+                Intent::Request | Intent::Question | Intent::FollowUp | Intent::Correction
+            )
+        {
+            out.action = DecisionAction::Reply;
+            out.reply_mode = ReplyMode::Answer;
+            out.reply_len = ReplyLen::Short;
+            out.mention = false;
+            out.task_control = None;
+            out.task_plan = None;
+            out.task_goal = None;
+            out.skill_name = None;
+            out.skill_slots = None;
+            out.request_quote = None;
+            out.reason = "当前用户明确向云团提出请求，按其要求回应".into();
+            trace
+                .notes
+                .push("修正other误判为普通文字回应，不补调Decision或授权执行".into());
+        }
+    }
     if out.action == DecisionAction::Ignore {
         return;
     }
@@ -299,6 +334,7 @@ mod tests {
         PolicyInput {
             is_group: true,
             direct: false,
+            protocol_direct: false,
             information_lookup: false,
             anchor_id: 1,
             visible_ids: ids,
@@ -479,6 +515,57 @@ mod tests {
             apply(&mut out, &ctx, &mut PolicyTrace::default());
             assert_eq!(out.action, DecisionAction::Ignore, "{case}");
             assert!(out.task_goal.is_none() && out.skill_name.is_none());
+        }
+    }
+    #[test]
+    fn protocol_target_corrects_only_a_grounded_request_misclassified_as_other() {
+        let ids = BTreeSet::from([1]);
+        let mut ctx = input(&ids);
+        ctx.direct = true;
+        ctx.protocol_direct = true;
+        for case in [
+            "request",
+            "closing",
+            "stop",
+            "ack",
+            "low",
+            "forged",
+            "normal_ignore",
+            "ambiguous_mentions",
+        ] {
+            let mut out = output();
+            out.action = DecisionAction::Ignore;
+            let a = out.assessment.as_mut().unwrap();
+            a.audience = Audience::Other;
+            a.intent = Intent::Request;
+            match case {
+                "closing" => a.continuity = Continuity::Closing,
+                "stop" => a.intent = Intent::Stop,
+                "ack" => a.intent = Intent::Acknowledgment,
+                "low" => a.confidence = Level::Low,
+                "forged" => a.evidence_msg_ids.push(999),
+                "normal_ignore" => a.audience = Audience::Bot,
+                _ => (),
+            }
+            ctx.protocol_direct = case != "ambiguous_mentions";
+            out.task_goal = Some("不应执行".into());
+            out.skill_name = Some("nai-image.generate".into());
+            let mut trace = PolicyTrace::default();
+            apply(&mut out, &ctx, &mut trace);
+            assert_eq!(
+                out.action,
+                if case == "request" {
+                    DecisionAction::Reply
+                } else {
+                    DecisionAction::Ignore
+                },
+                "{case}"
+            );
+            if case == "request" {
+                assert!(out.task_goal.is_none() && out.skill_name.is_none());
+                assert_eq!(out.assessment.unwrap().audience, Audience::Bot);
+                assert!(!trace.notes.is_empty());
+            }
         }
     }
 }

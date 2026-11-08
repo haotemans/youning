@@ -42,7 +42,7 @@
 ## Runtime 最终裁决
 
 1. 核对任务/技能引用的原话来自 anchor，并检查当前会话可用的技能目录；意图根据上下文判断，不再使用固定请求开头词表。
-2. 检查参与判断引用的消息确实出现在本次输入中且包含 anchor。不合格则 ignore；模型原先选择 ignore 的内容不会被强行变成回复。
+2. 检查参与判断引用的消息确实出现在本次输入中且包含 anchor。不合格则 ignore；普通ignore不会被强行变成回复；下述协议接收对象矛盾纠正是唯一有界例外。
 3. 停止请求、群聊收尾或明确面向他人时 ignore。孤立的收尾附和不再礼貌性回复一轮；公开共同话题的延续可走social，不能只因没有叫云团就判为面向其他人。
 4. 执行任务和普通技能要求面向 Bot、request 意图和 high 把握；插件声明的信息查询技能也接受 question/follow_up，让自然提问中的查证需求可调用搜索。隐式技能承接仍需要同一人的可见回复关联；停止、转发分享和面向其他人的内容不执行。
 5. 直接 @、私聊、引用 Bot、以“云团”开头，或有真实归属的对话承接，可进入回应路径；这不强制回复。隐式承接要求 high、continuing、Bot 对象、合适的承接意图以及关联消息 ID。模型单独声称 `audience=bot` 不能免除冷却。
@@ -75,7 +75,7 @@ social只允许reply/send_meme/ignore，清除任务/技能/控制字段；有�
 
 ## 可观察性与验证
 
-`DecisionMade.action` 是最终动作。新增 `assessment / reply_mode / policy`，其中policy版本3增加热度数据与建议参与模式，同时保留模型原始建议动作、消息依据校验结果、所用冷却和 Runtime 调整理由。WebUI Trace展示热度、消息/参与人数、采用的间隔、建议与最终动作、回复方式和限制原因，旧事件仍可查看；reason 是简短分类理由，不是模型完整思考过程。
+`DecisionMade.action` 是最终动作。新增 `assessment / reply_mode / policy`，其中policy版本4保留热度数据与建议参与模式，增加协议指向矛盾纠正的Trace说明，同时保留模型原始建议动作、消息依据校验结果、所用冷却和 Runtime 调整理由。WebUI Trace展示热度、消息/参与人数、采用的间隔、建议与最终动作、回复方式和限制原因，旧事件仍可查看；reason 是简短分类理由，不是模型完整思考过程。
 
 - 热度、社交参与边界与Chat空输出/执行拒绝单测在engagement/activity.rs、engagement.rs、reply_engine.rs；bot_context.rs验证固定上界、同号私聊/机器人隔离与跨人公开话题；bot/dispatch_tests.rs验证无@的周期接话仍只调用一次Decision。trace-flow浏览器测试覆盖热度、模式与窄屏布局。
 - `cargo test --workspace`：覆盖同一人的回复关联、跨人/跨会话隔离、伪造或已裁剪依据拒绝、负载冷却、收尾、回复方式到正文提示及 Trace 的实际管线、V7 回滚和历史行保留。
@@ -89,3 +89,9 @@ social只允许reply/send_meme/ignore，清除任务/技能/控制字段；有�
 引用存在只证明消息可见，不证明模型的语义解释正确；参与判断也不能证明最终正文完全忠实。`last_reply_to_sender` 只保存最后一个气泡，不是完整的问答状态机；旧未关联回复、跨过 5 分钟的承接可能被保守忽略。活跃任务会结合task_runtime.chat_type限定会话；旧缺少type的任务只作为有限状态提示，不扩大发起权限。
 
 主动发言仍由新消息触发，没有无人发言时的主动定时聊天。任务状态可帮助理解进度，完成回聊与回执以[任务功能](../features/core/tasks.md)为准。固定场景用于回归，不能当作生产正确率、接话自然度或幻觉降低比例；完整问答状态与线上反馈评测仍需继续完善。
+
+## 协议指向与引用素材
+
+`bot_identity`来自SQLite中已登记的self/QQ身份，不从引用正文认身份；`addressing`区分当前用户@的对象和quoted_messages的作者。私聊、或at_me=true且只有一个@/所有@均为Bot已知别名，才标explicit_target=bot。多个真实接收对象不作唯一指向结论；原始mentions保留不改写。引用群友的话请云团改写、解释或分析时，引用是素材，当前anchor才是请求者及请求原话来源。
+
+Runtime发现明确协议指向与模型audience=other矛盾时校正对象。只有高把握、有效可见消息依据、非closing、request/question/follow_up/correction的矛盾ignore可改为short普通reply；清空任务、技能、执行原话和控制字段，不增加Decision调用或扩大执行授权。普通ignore、stop/ack、低把握、伪造依据及多人@保持原处理。Chat随后仍按材料完整性回答或澄清，不凭空补引用。此为[ADR-0016](../adr/0016-protocol-target-before-quote-author.md)对“ignore不升级”的窄范围修订，不是每个@都必须回。
