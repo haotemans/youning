@@ -99,7 +99,7 @@ async fn dispatch_direct(
     if tx.try_send(m).is_err() {
         // SQLite remains pending; the next tick retries without blocking @ in
         // other conversations or spawning an unbounded overflow worker.
-        let _ = crate::window::retry(&deps.db_path, &[id]).await;
+        let _ = crate::window::release(&deps.db_path, &[id]).await;
         warn!("即时队列已满，消息保留在 SQLite 等待补读");
     }
 }
@@ -258,11 +258,26 @@ fn enqueue_image_plugin_disabled(deps: &PipelineDeps, m: &MessageReceivedPayload
 }
 
 async fn handle_claimed(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) {
-    if handle_inner(deps, m, cutoff).await {
+    if let Some(failure) = handle_inner(deps, m, cutoff).await {
+        if let Err(e) = crate::window::fail(
+            &deps.db_path,
+            &[m.msg_id],
+            &failure.reason,
+            failure.terminal,
+        )
+        .await
+        {
+            warn!(%e,"无法保存判断失败状态");
+        }
+    } else {
         mark_processed(&deps.db_path, m.msg_id).await;
-    } else if let Err(e) = crate::window::retry(&deps.db_path, &[m.msg_id]).await {
-        warn!(%e,"无法保存判断重试状态");
     }
+}
+fn pending_failure(reason: &str) -> Option<decision::DecisionFailure> {
+    Some(decision::DecisionFailure {
+        reason: reason.into(),
+        terminal: false,
+    })
 }
 
 async fn mark_processed(db_path: &std::path::Path, msg_id: i64) {
@@ -279,22 +294,26 @@ async fn mark_uncertain(path: &std::path::Path, id: i64) {
     }
 }
 
-async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i64) -> bool {
+async fn handle_inner(
+    deps: &PipelineDeps,
+    m: &MessageReceivedPayload,
+    cutoff: i64,
+) -> Option<decision::DecisionFailure> {
     if is_image_command(&m.text) || matches!(match_plugin_message(deps, m), Ok(Some(_))) {
         if crate::window::executing(&deps.db_path, &[m.msg_id])
             .await
             .is_err()
         {
-            return false;
+            return pending_failure("回复上下文或处理状态暂时不可用");
         }
     }
     if handle_plugin_command(deps, m).await {
-        return true;
+        return None;
     }
     // 生图只由已启用的 NAI 插件处理；不再回退到旧 Core 媒体实现。
     if is_image_command(&m.text) {
         enqueue_image_plugin_disabled(deps, m);
-        return true;
+        return None;
     }
 
     let q = deps.self_qq.load(Ordering::Relaxed);
@@ -308,13 +327,16 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             // self/bot filtering above and preserve image/quoted-message context.
             if is_bare_mention(m) {
                 enqueue_direct_reply(deps, m, "在呢，想让我帮你做什么？");
-                return true;
+                return None;
             }
             let gw = match deps.llm.read().unwrap().clone() {
                 Some(g) if g.role(Role::Decision).is_some() => g,
                 _ => {
-                    debug!(chat_id = %m.chat_id, "Decision 角色不可用，本条 ignore");
-                    return false;
+                    debug!(chat_id = %m.chat_id, "Decision 角色不可用");
+                    return Some(decision::DecisionFailure {
+                        reason: "Decision角色未配置，请在模型服务绑定模型".into(),
+                        terminal: true,
+                    });
                 }
             };
             // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
@@ -331,7 +353,7 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
                 Ok(snapshot) => snapshot,
                 result => {
                     warn!(error=?result,"无法读取回复上下文，跳过本轮");
-                    return false;
+                    return pending_failure("回复上下文或处理状态暂时不可用");
                 }
             };
             if decision::is_directed(m, &snapshot) {
@@ -372,18 +394,20 @@ async fn handle_inner(deps: &PipelineDeps, m: &MessageReceivedPayload, cutoff: i
             .await;
 
             if outcome.fallback {
-                return false;
+                return outcome
+                    .failure
+                    .or_else(|| pending_failure("Decision判断失败"));
             }
             if crate::window::executing(&deps.db_path, &[m.msg_id])
                 .await
                 .is_err()
             {
-                return false;
+                return pending_failure("回复上下文或处理状态暂时不可用");
             }
             execute_outcome(deps, m, snapshot, gw, outcome, ctx_cfg).await;
         }
     }
-    true
+    None
 }
 
 async fn execute_outcome(
@@ -729,13 +753,20 @@ async fn handle_periodic(deps: &PipelineDeps, mut batch: crate::window::PendingB
         )
         .await?;
         if outcome.fallback {
-            anyhow::bail!("周期判断失败");
+            return Err(anyhow::Error::new(outcome.failure.unwrap_or(
+                decision::DecisionFailure {
+                    reason: "周期判断失败".into(),
+                    terminal: false,
+                },
+            )));
         }
         if outcome.output.action != DecisionAction::Ignore
             && crate::window::interrupted(&deps.db_path, &m.chat_type, &m.chat_id, batch.cutoff)
                 .await?
         {
-            anyhow::bail!("本批判断期间有新的定向消息或云团回复，留到下一轮结合新上下文再判断");
+            crate::window::complete(&deps.db_path, &ids).await?;
+            info!("本批主动回应已让位给新对话，不再次重排旧消息");
+            return Ok(());
         }
         // Claim all observed messages before any external action. A crash during
         // execution requires verification; it must not repeat an old paid action.
@@ -746,10 +777,23 @@ async fn handle_periodic(deps: &PipelineDeps, mut batch: crate::window::PendingB
     .await;
     if let Err(e) = result {
         warn!(%e,"周期判断未完成，保留待处理范围");
-        if let Err(e) = crate::window::retry(&deps.db_path, &ids).await {
+        let failure = result_failure(&e);
+        if let Err(e) =
+            crate::window::fail(&deps.db_path, &ids, &failure.reason, failure.terminal).await
+        {
             warn!(%e,"无法保存批次重试状态");
         }
     }
+}
+
+fn result_failure(error: &anyhow::Error) -> decision::DecisionFailure {
+    error
+        .downcast_ref::<decision::DecisionFailure>()
+        .cloned()
+        .unwrap_or(decision::DecisionFailure {
+            reason: "判断上下文或数据库读取失败".into(),
+            terminal: false,
+        })
 }
 
 fn is_bare_mention(m: &MessageReceivedPayload) -> bool {
@@ -1134,9 +1178,9 @@ mod tests {
             image_urls: vec![],
             ts: 1,
         };
-        handle_inner(&deps, &message, 1).await;
+        let _ = handle_inner(&deps, &message, 1).await;
         message.text = "/下载 https://www.bilibili.com/video/BV1xx411c7mD".into();
-        handle_inner(&deps, &message, 1).await;
+        let _ = handle_inner(&deps, &message, 1).await;
         let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
         conn.execute(
             "INSERT INTO persons(person_id,first_seen,last_seen) VALUES ('p_1',1,1)",
@@ -1149,7 +1193,7 @@ mod tests {
         drop(conn);
         message.text = "/撤回".into();
         message.reply_to = Some(-321);
-        handle_inner(&deps, &message, 1).await;
+        let _ = handle_inner(&deps, &message, 1).await;
         message.sender_pid = "self".into();
         assert!(!handle_plugin_command(&deps, &message).await);
         message.sender_pid = "p_100".into();
@@ -1158,8 +1202,9 @@ mod tests {
         message.text = "分享文案 https://xhslink.cn/o/123 查看原文".into();
         message.reply_to = None;
         let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42','group','p_1',?1,2)",crate::db::params![message.text]).await.unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42','group','p_1',?1,?2)",crate::db::params![message.text,crate::window::now()]).await.unwrap();
         message.msg_id = conn.last_insert_rowid().await.unwrap();
+        message.ts = crate::window::now();
         drop(conn);
         let pipeline = spawn_pipeline(deps.clone());
         deps.bus.publish(Event::MessageReceived(message));
@@ -1199,12 +1244,12 @@ mod tests {
             ts: 1,
         };
         assert!(is_bare_mention(&mention));
-        handle_inner(&deps, &mention, 1).await; // No LLM configured; still sends a greeting.
+        let _ = handle_inner(&deps, &mention, 1).await; // No LLM configured; still sends a greeting.
         mention.sender_pid = "self".into();
-        handle_inner(&deps, &mention, 1).await; // Self and other bots must never receive it.
+        let _ = handle_inner(&deps, &mention, 1).await; // Self and other bots must never receive it.
         mention.sender_pid = "p_2".into();
         mention.sender_bot = true;
-        handle_inner(&deps, &mention, 1).await;
+        let _ = handle_inner(&deps, &mention, 1).await;
         mention.has_image = true;
         assert!(!is_bare_mention(&mention));
         mention.has_image = false;
@@ -1276,7 +1321,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replay_does_not_execute_or_discard_pending_history() {
+    async fn replay_stops_stale_auto_responses_but_keeps_history() {
         let db = temp_db().await;
         let mut conn = crate::db::connect(&db).await.unwrap();
         conn.execute(
@@ -1289,8 +1334,16 @@ mod tests {
         drop(conn);
         assert_eq!(crate::window::recover(&db).await.unwrap(), 0);
         let batches = crate::window::pending(&db).await.unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].messages[0].text, "昨天尚未读取的话");
+        assert!(batches.is_empty());
+        let mut c = crate::db::connect(&db).await.unwrap();
+        let (text, state): (String, String) = c
+            .query_row("SELECT text,decision_state FROM messages", params![], |r| {
+                Ok((r.try_get(0)?, r.try_get(1)?))
+            })
+            .await
+            .unwrap();
+        assert_eq!(text, "昨天尚未读取的话");
+        assert_eq!(state, "failed");
     }
 
     /// Q52 信号量上限常量为 4（runtime-design 裁决值）

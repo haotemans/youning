@@ -108,6 +108,8 @@
                 <n-form-item label="@ / 私聊判断"><span>{{ policy ? '即时处理' : '—' }}</span></n-form-item>
                 <n-form-item label="普通批次并发"><span>{{ policy?.periodic_concurrency ?? '—' }}</span></n-form-item>
                 <n-form-item label="每批消息上限"><span>{{ policy ? `${policy.max_batch_messages} 条 / ${policy.max_batch_chars} 字符` : '—' }}</span></n-form-item>
+                <n-form-item label="自动判断失败上限"><span>{{ policy?.max_failures ? `${policy.max_failures} 次` : '—' }}</span></n-form-item>
+                <n-form-item label="自动回应时限"><span>{{ policy?.max_pending_age_secs ? `${policy.max_pending_age_secs / 60} 分钟` : '—' }}</span></n-form-item>
                 <n-form-item label="即时队列容量">
                   <n-input-number v-model:value="f.pipeline.per_chat_queue_cap" :min="4" :max="512" style="width: 160px" />
                 </n-form-item>

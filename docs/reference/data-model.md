@@ -390,3 +390,7 @@ CREATE INDEX idx_events_ts ON events(ts);
 ## V13：周期判断与即时入口（2026-11-08）
 
 `messages` 追加 `sender_bot INTEGER DEFAULT 0`、`decision_state TEXT DEFAULT pending`、`decision_attempts INTEGER DEFAULT 0`、`decision_retry_at INTEGER DEFAULT 0`；不删除原始记录。`processed_at` 继续表示消费完成，失败不会回写。`pending/deciding/executing/done/uncertain` 区分尚未判断、正在推理、开始执行、完成与待核实；处理按会话类型/编号隔离。新待处理索引只包含未完成的非self、非机器人消息。行为契约见[会话调度](../features/core/conversation.md)。
+
+## V14：停止失败的自动判断（2026-11-08）
+
+messages追加decision_error TEXT。pending/deciding之后可以进入failed，表示确定性错误、累计失败达3次或待处理超过10分钟；不删除原文，也不冒充done或uncertain。自动队列忽略failed，读取界面可看原因；重新加载模型配置不清零失败次数。

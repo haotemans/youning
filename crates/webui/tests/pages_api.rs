@@ -208,16 +208,18 @@ async fn decision_status_reads_real_states_without_replaying_uncertain_actions()
       ('42','private','p_2001',NULL,'私聊消息',2,'deciding',0,0,NULL),
       ('42','group','p_2001',NULL,'执行结果未知',3,'uncertain',0,0,4),
       ('42','group','p_2001',NULL,'完成',4,'done',0,0,4),
-      ('42','group','self',NULL,'云团自己',5,'pending',0,0,NULL);
+      ('42','group','self',NULL,'云团自己',5,'pending',0,0,NULL),
+      ('42','group','p_2001',NULL,'停止重试的旧消息',7,'failed',0,3,8);
+      UPDATE messages SET decision_error='HTTP 400：模型路由不可用' WHERE text='停止重试的旧消息';
       INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts,sender_bot) VALUES('42','group','p_2001','其他机器人',6,1);").await.unwrap();
     let (_, data) = rig.get("/api/decisions/status?chat_id=42").await;
     assert_eq!(data["policy"]["group_interval_secs"], 30);
     assert_eq!(data["policy"]["periodic_concurrency"], 2);
     assert_eq!(
         data["counts"],
-        json!({"pending":1,"deciding":1,"executing":0,"uncertain":1,"retry_waiting":1})
+        json!({"pending":1,"deciding":1,"executing":0,"uncertain":1,"failed":1,"retry_waiting":1})
     );
-    assert_eq!(data["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(data["messages"].as_array().unwrap().len(), 4);
     assert_eq!(data["messages"][0]["sender_name"], "群名片");
     assert_eq!(data["messages"][1]["chat_type"], "private");
     let (_, uncertain) = rig
@@ -226,6 +228,12 @@ async fn decision_status_reads_real_states_without_replaying_uncertain_actions()
     assert_eq!(uncertain["messages"].as_array().unwrap().len(), 1);
     assert_eq!(uncertain["messages"][0]["state"], "uncertain");
     assert_eq!(uncertain["counts"], data["counts"]);
+    let (_, failed) = rig
+        .get("/api/decisions/status?chat_id=42&state=failed")
+        .await;
+    assert_eq!(failed["messages"].as_array().unwrap().len(), 1);
+    assert_eq!(failed["messages"][0]["error"], "HTTP 400：模型路由不可用");
+    assert_eq!(data["policy"]["max_failures"], 3);
     let (_, empty) = rig.get("/api/decisions/status?chat_id=42&limit=0").await;
     assert!(empty["messages"].as_array().unwrap().is_empty());
     assert_eq!(rig.get("/api/decisions/status?state=bad").await.0, 400);

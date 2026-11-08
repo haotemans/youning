@@ -417,6 +417,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "V0.13 分离即时消息与周期批量判断",
         include_str!("db/decision_v13.sql"),
     ),
+    ("V0.14 有界决策失败与停止原因", ""),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -479,6 +480,9 @@ pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
                 "INTEGER NOT NULL DEFAULT 0",
             )
             .await?;
+        }
+        if version == 14 {
+            add_column_if_missing(&mut tx, "messages", "decision_error", "TEXT").await?;
         }
         if version == 4 {
             add_column_if_missing(&mut tx, "messages", "processed_at", "INTEGER").await?;

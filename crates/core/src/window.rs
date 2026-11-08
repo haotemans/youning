@@ -10,6 +10,8 @@ pub const DEFAULT_POLL_SECS: u64 = 30;
 pub const DEFAULT_PERIODIC_CONCURRENCY: usize = 2;
 pub const MAX_MESSAGES: usize = 40;
 pub const MAX_INPUT_CHARS: usize = 10_000;
+pub const MAX_FAILURES: i64 = 3;
+pub const MAX_PENDING_AGE_SECS: i64 = 600;
 
 #[derive(Debug)]
 pub struct PendingBatch {
@@ -33,6 +35,7 @@ pub async fn recover(path: &Path) -> Result<usize> {
     tx.execute("UPDATE messages SET decision_state='uncertain', processed_at=?1 WHERE processed_at IS NULL AND decision_state='executing'", params![now()]).await?;
     let count = tx.execute("UPDATE messages SET decision_state='pending' WHERE processed_at IS NULL AND decision_state='deciding'", params![]).await?;
     tx.commit().await?;
+    expire(path).await?;
     Ok(count as usize)
 }
 
@@ -41,8 +44,8 @@ pub async fn claim(path: &Path, id: i64) -> Result<bool> {
         return Ok(true);
     }
     Ok(crate::db::connect(path).await?.execute(
-        "UPDATE messages SET decision_state='deciding' WHERE msg_id=?1 AND processed_at IS NULL AND decision_state='pending' AND decision_retry_at<=?2",
-        params![id, now()],
+        "UPDATE messages SET decision_state='deciding' WHERE msg_id=?1 AND processed_at IS NULL AND decision_state='pending' AND decision_retry_at<=?2 AND decision_attempts<?3",
+        params![id, now(),MAX_FAILURES],
     ).await? == 1)
 }
 
@@ -71,12 +74,32 @@ pub async fn complete(path: &Path, ids: &[i64]) -> Result<()> {
 }
 
 pub async fn retry(path: &Path, ids: &[i64]) -> Result<()> {
+    fail(path, ids, "Decision 判断暂时失败", false).await
+}
+
+pub async fn fail(path: &Path, ids: &[i64], reason: &str, terminal: bool) -> Result<()> {
     let mut conn = crate::db::connect(path).await?;
     let mut tx = conn.begin_immediate().await?;
     for id in ids {
-        tx.execute("UPDATE messages SET decision_state='pending', decision_attempts=decision_attempts+1, decision_retry_at=?1+MIN(900,30*(1 << MIN(decision_attempts,5))) WHERE msg_id=?2 AND decision_state='deciding'", params![now(), id]).await?;
+        tx.execute("UPDATE messages SET decision_state=CASE WHEN ?3 OR decision_attempts+1>=?4 OR ts<?5 THEN 'failed' ELSE 'pending' END, processed_at=CASE WHEN ?3 OR decision_attempts+1>=?4 OR ts<?5 THEN ?1 ELSE NULL END, decision_attempts=decision_attempts+1, decision_retry_at=CASE WHEN ?3 OR decision_attempts+1>=?4 OR ts<?5 THEN 0 ELSE ?1+30*(1 << MIN(decision_attempts,1)) END, decision_error=?6 WHERE msg_id=?2 AND decision_state='deciding'",params![now(),id,terminal,MAX_FAILURES,now()-MAX_PENDING_AGE_SECS,reason.chars().take(240).collect::<String>()]).await?;
     }
     tx.commit().await?;
+    Ok(())
+}
+
+/// Backpressure is not a failed model call and must not spend a retry.
+pub async fn release(path: &Path, ids: &[i64]) -> Result<()> {
+    let mut c = crate::db::connect(path).await?;
+    let mut tx = c.begin_immediate().await?;
+    for id in ids {
+        tx.execute("UPDATE messages SET decision_state='pending',decision_retry_at=?2+30 WHERE msg_id=?1 AND decision_state='deciding'",params![id,now()]).await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn expire(path: &Path) -> Result<()> {
+    crate::db::connect(path).await?.execute("UPDATE messages SET decision_state='failed',processed_at=?1,decision_retry_at=0,decision_error=CASE WHEN decision_attempts>=?2 THEN COALESCE(decision_error,'已达到自动判断失败上限') ELSE '已超过10分钟自动回应时限，原文仍保留' END WHERE processed_at IS NULL AND decision_state='pending' AND sender_pid!='self' AND sender_bot=0 AND (decision_attempts>=?2 OR ts<?3)",params![now(),MAX_FAILURES,now()-MAX_PENDING_AGE_SECS]).await?;
     Ok(())
 }
 
@@ -93,6 +116,7 @@ pub async fn interrupted(path: &Path, kind: &str, chat: &str, cutoff: i64) -> Re
 /// Single long messages carry an explicit 2,000-character excerpt marker;
 /// source text is retained in SQLite, and unseen tails are never evidence.
 pub async fn pending(path: &Path) -> Result<Vec<PendingBatch>> {
+    expire(path).await?;
     let mut conn = crate::db::connect(path).await?;
     let mut stmt = conn.prepare("SELECT chat_type,chat_id FROM messages WHERE processed_at IS NULL AND decision_state='pending' AND decision_retry_at<=?1 AND sender_pid!='self' AND sender_bot=0 GROUP BY chat_type,chat_id ORDER BY MIN(decision_retry_at),MIN(msg_id) LIMIT 64").await?;
     let scopes = stmt

@@ -2,7 +2,10 @@ use super::*;
 use crate::db::params;
 use axum::{extract::State, routing::post, Json, Router};
 use serde_json::{json, Value};
-use std::sync::{atomic::AtomicBool, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU16},
+    Mutex,
+};
 use std::time::Duration;
 
 #[derive(Clone, Default)]
@@ -12,9 +15,14 @@ struct Model {
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
     invalid: Arc<AtomicBool>,
+    status: Arc<AtomicU16>,
+    quiet: Arc<AtomicBool>,
 }
 
-async fn completion(State(model): State<Model>, Json(body): Json<Value>) -> Json<Value> {
+async fn completion(
+    State(model): State<Model>,
+    Json(body): Json<Value>,
+) -> (axum::http::StatusCode, Json<Value>) {
     let messages = body["messages"].as_array().unwrap();
     let user = messages.last().unwrap()["content"].as_str().unwrap();
     // Schema-retry prompts append a short diagnostic to the original JSON.
@@ -25,16 +33,28 @@ async fn completion(State(model): State<Model>, Json(body): Json<Value>) -> Json
         .unwrap();
     let periodic = input["trigger"] == "periodic";
     model.inputs.lock().unwrap().push(input.clone());
+    let status = model.status.load(Ordering::SeqCst);
+    if status != 0 {
+        return (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            Json(json!({"error":"model unavailable"})),
+        );
+    }
     if periodic && model.block.swap(false, Ordering::SeqCst) {
         model.started.notify_one();
         model.release.notified().await;
     }
     let content = if model.invalid.load(Ordering::SeqCst) {
         "invalid".into()
+    } else if model.quiet.load(Ordering::SeqCst) {
+        json!({"action":"ignore","reason":"群友闲聊"}).to_string()
     } else {
         json!({"action":"ignore","mood":"calm","mention":false,"reply_len":"short","meme_type":null,"task_goal":null,"memory_write":null,"reason":"ordinary conversation","target_msg_id":input["pending_messages"].as_array().and_then(|a|a.last()).map(|m|m["msg_id"].clone())}).to_string()
     };
-    Json(json!({"choices":[{"message":{"content":content}}]}))
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({"choices":[{"message":{"content":content}}]})),
+    )
 }
 
 async fn fixture(model: Model) -> PipelineDeps {
@@ -225,4 +245,97 @@ async fn all_pending_messages_are_visible_beyond_recent_twenty_and_failures_keep
         "one bounded schema retry"
     );
     assert!(last.msg_id < failing.msg_id);
+}
+
+#[tokio::test]
+async fn quiet_batches_need_one_call_and_no_fabricated_reply_target() {
+    let model = Model::default();
+    model.quiet.store(true, Ordering::SeqCst);
+    let deps = fixture(model.clone()).await;
+    deps.mood.set(crate::state::MoodValue::Happy);
+    let mut rx = deps.bus.subscribe();
+    message(&deps, false, "p_1", "普通聊天").await;
+    let batch = crate::window::pending(&deps.db_path)
+        .await
+        .unwrap()
+        .remove(0);
+    handle_periodic(&deps, batch).await;
+    assert_eq!(model.inputs.lock().unwrap().len(), 1);
+    assert!(crate::window::pending(&deps.db_path)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(deps.mood.get(), crate::state::MoodValue::Happy);
+    loop {
+        if let Event::DecisionMade(d) = rx.recv().await.unwrap() {
+            assert!(!d.fallback);
+            assert_eq!(d.retries, 0);
+            assert_eq!(d.anchor_msg_id, 0);
+            break;
+        }
+    }
+}
+
+#[tokio::test]
+async fn invalid_model_opens_circuit_until_gateway_is_reloaded() {
+    let model = Model::default();
+    model.status.store(400, Ordering::SeqCst);
+    let deps = fixture(model.clone()).await;
+    let first = message(&deps, false, "p_1", "first").await;
+    handle_periodic(
+        &deps,
+        crate::window::pending(&deps.db_path)
+            .await
+            .unwrap()
+            .remove(0),
+    )
+    .await;
+    let mut c = crate::db::connect(&deps.db_path).await.unwrap();
+    let (state, error): (String, String) = c
+        .query_row(
+            "SELECT decision_state,decision_error FROM messages WHERE msg_id=?1",
+            params![first.msg_id],
+            |r| Ok((r.try_get(0)?, r.try_get(1)?)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state, "failed");
+    assert!(error.contains("HTTP 400"));
+    drop(c);
+    message(&deps, false, "p_1", "second").await;
+    handle_periodic(
+        &deps,
+        crate::window::pending(&deps.db_path)
+            .await
+            .unwrap()
+            .remove(0),
+    )
+    .await;
+    assert_eq!(
+        model.inputs.lock().unwrap().len(),
+        1,
+        "new pending messages must not repeat a known invalid model request"
+    );
+    let reason = deps
+        .llm
+        .read()
+        .unwrap()
+        .as_ref()
+        .unwrap()
+        .decision_blocked_reason();
+    assert!(reason.is_some());
+    // Saving model configuration replaces the gateway and clears its circuit.
+    let path = deps.db_path.parent().unwrap().join("providers.toml");
+    *deps.llm.write().unwrap() = Some(Arc::new(LlmGateway::load(&path).unwrap()));
+    model.status.store(0, Ordering::SeqCst);
+    message(&deps, false, "p_2", "new after fixing config").await;
+    handle_periodic(
+        &deps,
+        crate::window::pending(&deps.db_path)
+            .await
+            .unwrap()
+            .remove(0),
+    )
+    .await;
+    assert_eq!(model.inputs.lock().unwrap().len(), 2);
 }

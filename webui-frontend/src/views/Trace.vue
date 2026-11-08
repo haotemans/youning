@@ -8,6 +8,7 @@
       <n-button size="small" secondary :loading="loading" @click="reset">刷新</n-button>
     </div>
 
+    <n-alert v-if="status?.blocked_reason" type="warning" :bordered="false">{{ status.blocked_reason }}</n-alert>
     <n-alert v-if="error" type="error" :bordered="false">{{ error }}</n-alert>
     <div class="decision-metrics">
       <button v-for="metric in metrics" :key="metric.key" class="decision-metric" @click="showQueue(metric.key)">
@@ -34,9 +35,10 @@
 
     <section v-if="view === 'queue'" class="queue-list">
       <n-card v-for="m in status?.messages || []" :key="m.msg_id" size="small" class="queue-card">
-        <div class="queue-head"><strong>{{ m.sender_name }}</strong><span class="tl-chat mono">{{ m.sender_pid.replace(/^p_/, '') }}</span><span class="spacer" /><n-tag size="small" :bordered="false" :type="m.state === 'uncertain' ? 'warning' : 'default'">{{ stateLabel(m) }}</n-tag></div>
+        <div class="queue-head"><strong>{{ m.sender_name }}</strong><span class="tl-chat mono">{{ m.sender_pid.replace(/^p_/, '') }}</span><span class="spacer" /><n-tag size="small" :bordered="false" :type="['uncertain', 'failed'].includes(m.state) ? 'warning' : 'default'">{{ stateLabel(m) }}</n-tag></div>
         <p class="queue-text">{{ m.text || '图片或表情' }}</p>
-        <div class="queue-foot"><span>{{ m.chat_type === 'private' ? '私聊' : '群聊' }} {{ m.chat_id }}</span><span>#{{ m.msg_id }}</span><span>{{ fmtTs(m.ts) }}</span><span v-if="m.attempts">已重试 {{ m.attempts }} 次</span><span v-if="m.state === 'pending' && m.retry_at > now">{{ fmtTs(m.retry_at) }} 后重试</span></div>
+        <div class="queue-foot"><span>{{ m.chat_type === 'private' ? '私聊' : '群聊' }} {{ m.chat_id }}</span><span>#{{ m.msg_id }}</span><span>{{ fmtTs(m.ts) }}</span><span v-if="m.attempts">累计失败 {{ m.attempts }} 次</span><span v-if="m.state === 'pending' && m.retry_at > now">{{ fmtTs(m.retry_at) }} 后重试</span></div>
+        <div v-if="m.error" class="queue-warning">{{ m.error }}</div>
         <div v-if="m.state === 'uncertain'" class="queue-warning">执行结果待核实</div>
       </n-card>
       <empty-state v-if="status && !status.messages.length" title="暂无匹配消息" />
@@ -132,7 +134,7 @@ const queueState = ref(null)
 /** @type {import('vue').Ref<any>} */
 const status = ref(null)
 const now = ref(Math.floor(Date.now() / 1000))
-const metrics = [{ key: 'pending', label: '待判断' }, { key: 'deciding', label: '已领取' }, { key: 'executing', label: '执行中' }, { key: 'uncertain', label: '待核实' }]
+const metrics = [{ key: 'pending', label: '待判断' }, { key: 'deciding', label: '已领取' }, { key: 'executing', label: '执行中' }, { key: 'uncertain', label: '待核实' }, { key: 'failed', label: '已停止重试' }]
 const stateOptions = metrics.map(m => ({ value: m.key, label: m.label }))
 function summary(e) { return e.kind === 'DecisionMade' ? [e.payload?.fallback ? '判断未完成' : actionLabel(e.payload?.action), e.payload?.reason].filter(Boolean).join(' · ') : eventSummary(e) }
 function actionLabel(action) { return ({ reply: '回应', ignore: '保持安静', send_meme: '发表情', start_task: '派发任务', invoke_skill: '调用技能' })[action] || action }
@@ -218,7 +220,7 @@ onUnmounted(() => { statusRequest++; off?.(); if (poll) clearInterval(poll) })
 </script>
 
 <style scoped>
-.decision-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.decision-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
 .decision-metric { border: 1px solid var(--yt-card-border); border-radius: 12px; background: var(--yt-surface); padding: 16px; text-align: left; color: var(--yt-ink-2); font: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .decision-metric strong { color: var(--yt-ink-1); font-size: 23px; }
 .decision-metric:hover { border-color: var(--yt-primary); }
