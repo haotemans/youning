@@ -50,6 +50,7 @@
       "source": [
         "crates/core/src/decision.rs",
         "crates/core/src/engagement.rs",
+        "crates/core/src/engagement/activity.rs",
         "crates/core/src/state.rs"
       ],
       "tests": [

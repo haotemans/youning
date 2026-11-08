@@ -24,6 +24,8 @@ ADR 保存重要取舍与原因。`accepted` 表示接受该决定，不表示�
 
 | [0014](0014-bounded-decision-failures.md) | 无动作判断不补调、有界失败与配置错误暂停 | 修订ADR-0013无限重排与强制ignore目标，原文保留 |
 
+| [0015](0015-heat-aware-social-participation.md) | 结合群聊热度自然接话，社交参与与工具执行分开 | 部分修订ADR-0009的新知识门槛，保留来源和执行约束 |
+
 编号保持稳定，修订和取代关系遵循[治理协议](../governance.md)。
 
 ## 修订记录

@@ -17,6 +17,7 @@ struct Model {
     invalid: Arc<AtomicBool>,
     status: Arc<AtomicU16>,
     quiet: Arc<AtomicBool>,
+    social: Arc<AtomicBool>,
 }
 
 async fn completion(
@@ -46,6 +47,15 @@ async fn completion(
     }
     let content = if model.invalid.load(Ordering::SeqCst) {
         "invalid".into()
+    } else if model.social.load(Ordering::SeqCst) {
+        let id = input["pending_messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["msg_id"]
+            .clone();
+        json!({"action":"reply","target_msg_id":id,"reply_mode":"social","mood":"happy","mention":false,"reply_len":"short","reason":"接上公开话题",
+          "assessment":{"audience":"group","intent":"banter","continuity":"continuing","confidence":"high","benefit":"medium","novelty":"new","evidence":"not_needed","evidence_msg_ids":[id]}}).to_string()
     } else if model.quiet.load(Ordering::SeqCst) {
         json!({"action":"ignore","reason":"群友闲聊"}).to_string()
     } else {
@@ -338,4 +348,47 @@ async fn invalid_model_opens_circuit_until_gateway_is_reloaded() {
     )
     .await;
     assert_eq!(model.inputs.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn public_social_batch_can_reply_without_at_interest_or_new_knowledge() {
+    let model = Model::default();
+    model.social.store(true, Ordering::SeqCst);
+    let deps = fixture(model.clone()).await;
+    let mut rx = deps.bus.subscribe();
+    for (person, text) in [
+        ("p_1", "终于修好这张图了"),
+        ("p_2", "这下顺眼了"),
+        ("p_1", "改到头秃"),
+        ("p_2", "头发换来的哈哈"),
+    ] {
+        message(&deps, false, person, text).await;
+    }
+    handle_periodic(
+        &deps,
+        crate::window::pending(&deps.db_path)
+            .await
+            .unwrap()
+            .remove(0),
+    )
+    .await;
+    let inputs = model.inputs.lock().unwrap();
+    assert_eq!(inputs.len(), 1, "热度不增加额外模型判断");
+    assert_eq!(inputs[0]["scene"]["activity"]["level"], "warming");
+    assert!(inputs[0]["dialogue"]["group_recent_replies"].is_array());
+    drop(inputs);
+    let event = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Event::DecisionMade(d) = rx.recv().await.unwrap() {
+                break d;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!event.fallback);
+    assert_eq!(event.action, "reply");
+    assert_eq!(event.reply_mode, crate::engagement::ReplyMode::Social);
+    assert_eq!(event.policy.cooldown_secs, Some(90));
+    assert_eq!(event.policy.activity.unwrap().active_speakers_2min, 2);
 }

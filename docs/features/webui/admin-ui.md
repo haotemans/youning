@@ -49,3 +49,5 @@ V12在现有session保护层注册 `/api/capabilities`、`/api/tasks/{id}/runtim
 浏览器回归：[`webui-frontend/tests/trace-flow.spec.js`](../../../webui-frontend/tests/trace-flow.spec.js)，覆盖桌面/窄屏布局、批次/即时归属、失败不冒充忽略、队列筛选和只读状态。`pages_api.rs`验证认证、来源姓名、过滤、统计与只读未知执行状态。
 
 处理状态新增failed筛选和“已停止重试”统计，返回并展示decision_error；累计次数标为失败数，不再误标为每条消息都必须重试。永久Decision错误显示网关暂停原因，状态读取不触发重试。浏览器与API回归覆盖旧11次记录的停止原因、认证及只读行为。
+
+新Decision Trace显示本轮群聊热度、近2分钟消息/参与人数、实际采用的参与间隔及“自然接话”模式，沿用现有标签与布局，不增加额外解释文案或写配置请求。旧事件没有热度字段时隐藏此区，不补造数据。trace-flow浏览器回归覆盖新字段与桌面/390像素窄屏展示；事件数据仍是判断记录，不能当作实际发送回执。

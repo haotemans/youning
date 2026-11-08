@@ -2,6 +2,8 @@
 use crate::decision::{DecisionAction, DecisionOutput, ReplyLen};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+mod activity;
+pub use activity::{Activity, Heat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,6 +77,7 @@ pub enum ReplyMode {
     Answer,
     Clarify,
     StateUncertainty,
+    Social,
 }
 impl ReplyMode {
     pub fn instruction(self) -> &'static str {
@@ -82,6 +85,7 @@ impl ReplyMode {
             Self::Answer => "回复方式：直接回答当前问题，回答完就停；参与判断不是新的事实来源。",
             Self::Clarify => "回复方式：只澄清解决当前问题必需的一项缺失信息，不编造前提，不为了延长聊天追问。",
             Self::StateUncertainty => "回复方式：明确说明现有资料无法确认或有冲突，不猜肯定/否定的经历和执行结果；能确认的部分可简短说明。",
+            Self::Social => "回复方式：自然接上当前公开话题，沿用你现有的人设，用一两句具体、有回应感的话点评、共情、接梗或顺着聊。不要写客服开场、知识总结、待办列表或句句追问要不要帮忙；不复读群友或自己，不凭空编个人经历、图片内容或共同往事。接话不调用工具、不安排任务、不声称已经执行。",
         }
     }
 }
@@ -93,6 +97,8 @@ pub struct PolicyTrace {
     pub evidence_valid: Option<bool>,
     pub cooldown_secs: Option<i64>,
     pub notes: Vec<String>,
+    pub activity: Option<Activity>,
+    pub participation: Option<String>,
 }
 
 pub struct PolicyInput<'a> {
@@ -105,6 +111,7 @@ pub struct PolicyInput<'a> {
     pub reply_age: Option<i64>,
     pub bot_bubbles_5min: i64,
     pub human_messages_30s: i64,
+    pub activity: Option<&'a Activity>,
 }
 
 fn suppress(out: &mut DecisionOutput, trace: &mut PolicyTrace, reason: &str) {
@@ -115,6 +122,28 @@ fn suppress(out: &mut DecisionOutput, trace: &mut PolicyTrace, reason: &str) {
 
 /// Validate source evidence and apply participation policy after semantic routing.
 pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut PolicyTrace) {
+    let social = out.reply_mode == ReplyMode::Social;
+    if social {
+        out.reply_len = ReplyLen::Short;
+        out.mention = false;
+        out.task_control = None;
+        out.task_plan = None;
+        out.task_goal = None;
+        out.skill_name = None;
+        out.skill_slots = None;
+        out.request_quote = None;
+        if !matches!(
+            out.action,
+            DecisionAction::Reply | DecisionAction::SendMeme | DecisionAction::Ignore
+        ) {
+            suppress(out, trace, "自然接话不授权执行技能或派发任务");
+            return;
+        }
+        if out.assessment.is_none() {
+            suppress(out, trace, "接话缺少可验证的语境判断");
+            return;
+        }
+    }
     let Some(a) = out.assessment.clone() else {
         return;
     };
@@ -168,7 +197,8 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         }
         return;
     }
-    if !input.direct && a.intent == Intent::FollowUp && !linked_followup {
+    let group_social = social && input.is_group && a.audience == Audience::Group;
+    if !input.direct && a.intent == Intent::FollowUp && !linked_followup && !group_social {
         suppress(out, trace, "隐式承接缺少同一人的近期回复关联");
         return;
     }
@@ -177,11 +207,42 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
     if linked_followup {
         trace.notes.push("依据真实回复归属承接同一人的对话".into());
     }
-    if input.is_group && a.intent == Intent::Acknowledgment && !linked_followup {
+    if input.is_group && a.intent == Intent::Acknowledgment && !linked_followup && !group_social {
         suppress(out, trace, "收尾附和不需要礼貌性再回一轮");
         return;
     }
     if input.is_group && !directed {
+        if social {
+            if a.audience != Audience::Group
+                || a.confidence != Level::High
+                || a.benefit == Level::Low
+                || a.novelty == Novelty::Repeated
+                || matches!(a.evidence, Evidence::Missing | Evidence::Conflicting)
+            {
+                suppress(out, trace, "接话缺少明确的公开话题、参与价值或事实依据");
+                return;
+            }
+            let Some(activity) = input.activity else {
+                suppress(out, trace, "缺少本轮群聊热度，不猜测参与时机");
+                return;
+            };
+            if let Some(reason) = activity.social_block(a.intent == Intent::Sharing) {
+                suppress(out, trace, reason);
+                return;
+            }
+            let cooldown = activity.cooldown_secs();
+            trace.cooldown_secs = Some(cooldown);
+            if input.reply_age.is_some_and(|age| age < cooldown) {
+                suppress(out, trace, "自然接话冷却中，给群友留出回应空间");
+                return;
+            }
+            out.reply_len = ReplyLen::Short;
+            out.mention = false;
+            trace
+                .notes
+                .push("允许顺着公开群聊简短接话，不要求被叫到或提供新知识".into());
+            return;
+        }
         if !matches!(a.audience, Audience::Group | Audience::Bot)
             || a.confidence != Level::High
             || a.benefit != Level::High
@@ -245,6 +306,7 @@ mod tests {
             reply_age: Some(70),
             bot_bubbles_5min: 0,
             human_messages_30s: 2,
+            activity: None,
         }
     }
     #[test]
@@ -345,5 +407,78 @@ mod tests {
             DecisionAction::Ignore,
             "不强制模型忽略的内容得到回复"
         );
+    }
+    #[test]
+    fn social_chat_uses_heat_without_requiring_new_knowledge_or_own_reply_link() {
+        let ids = BTreeSet::from([1]);
+        let lively = Activity::from_counts(12, 3, 24, 10, 5, 4, 1);
+        let warm = Activity::from_counts(6, 2, 16, 10, 3, 4, 1);
+        let quiet = Activity::from_counts(1, 1, 1, 0, 1, 1, 0);
+        let mut ctx = input(&ids);
+        ctx.linked_reply_id = None;
+        for (activity, age, intent, expected) in [
+            (&lively, 50, Intent::Banter, DecisionAction::Reply),
+            (&lively, 50, Intent::FollowUp, DecisionAction::Reply),
+            (&warm, 50, Intent::Banter, DecisionAction::Ignore),
+            (&warm, 90, Intent::Banter, DecisionAction::Reply),
+            (&quiet, 200, Intent::Sharing, DecisionAction::Reply),
+            (&quiet, 200, Intent::Acknowledgment, DecisionAction::Ignore),
+        ] {
+            ctx.activity = Some(activity);
+            ctx.reply_age = Some(age);
+            let mut out = output();
+            out.reply_mode = ReplyMode::Social;
+            let a = out.assessment.as_mut().unwrap();
+            a.intent = intent;
+            a.continuity = Continuity::Continuing;
+            a.benefit = Level::Medium;
+            a.novelty = Novelty::Unclear;
+            apply(&mut out, &ctx, &mut PolicyTrace::default());
+            assert_eq!(
+                out.action, expected,
+                "{:?} {age} {intent:?}",
+                activity.level
+            );
+            assert_eq!(out.reply_len, ReplyLen::Short);
+            assert!(!out.mention);
+        }
+    }
+
+    #[test]
+    fn social_chat_cannot_override_others_closing_source_or_execution_boundaries() {
+        let ids = BTreeSet::from([1]);
+        let lively = Activity::from_counts(12, 3, 24, 10, 5, 4, 1);
+        let mut ctx = input(&ids);
+        ctx.activity = Some(&lively);
+        for case in [
+            "other",
+            "closing",
+            "forged",
+            "repeated",
+            "task",
+            "skill",
+            "silent",
+            "missing_assessment",
+        ] {
+            let mut out = output();
+            out.reply_mode = ReplyMode::Social;
+            let a = out.assessment.as_mut().unwrap();
+            match case {
+                "other" => a.audience = Audience::Other,
+                "closing" => a.continuity = Continuity::Closing,
+                "forged" => a.evidence_msg_ids.push(999),
+                "repeated" => a.novelty = Novelty::Repeated,
+                "task" => out.action = DecisionAction::StartTask,
+                "skill" => out.action = DecisionAction::InvokeSkill,
+                "silent" => out.action = DecisionAction::Ignore,
+                "missing_assessment" => out.assessment = None,
+                _ => unreachable!(),
+            }
+            out.task_goal = Some("不应执行".into());
+            out.skill_name = Some("nai-image.generate".into());
+            apply(&mut out, &ctx, &mut PolicyTrace::default());
+            assert_eq!(out.action, DecisionAction::Ignore, "{case}");
+            assert!(out.task_goal.is_none() && out.skill_name.is_none());
+        }
     }
 }

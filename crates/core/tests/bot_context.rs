@@ -1137,3 +1137,102 @@ async fn reply_capabilities_distinguish_available_skills_from_execution_results(
         assert!(!ctx.system.contains("本轮是纯文字回复，没有联网"));
     }
 }
+
+#[tokio::test]
+async fn group_heat_and_public_continuity_use_typed_immutable_snapshot_end() {
+    let rig = Rig::new().await;
+    let early = rig.message("p_a", "123", "公开分享", None, None).await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    conn.execute(
+        "UPDATE messages SET ts=-1000 WHERE msg_id=?1",
+        params![early.msg_id],
+    )
+    .await
+    .unwrap();
+    let bot_a = rig.message("self", "123", "接这次分享", None, None).await;
+    let bot_b = rig.message("self", "123", "同一轮第二泡", None, None).await;
+    conn.execute(
+        "UPDATE messages SET ts=50,reply_anchor_id=?1 WHERE msg_id IN (?2,?3)",
+        params![early.msg_id, bot_a.msg_id, bot_b.msg_id],
+    )
+    .await
+    .unwrap();
+    for i in 0..12 {
+        rig.message(
+            ["p_a", "p_b", "p_c"][i % 3],
+            "123",
+            "继续聊这个话题",
+            None,
+            None,
+        )
+        .await;
+    }
+    let private = rig
+        .message("p_private", "123", "不能算进群热度", None, None)
+        .await;
+    conn.execute(
+        "UPDATE messages SET chat_type='private' WHERE msg_id=?1",
+        params![private.msg_id],
+    )
+    .await
+    .unwrap();
+    let robot = rig
+        .message("p_robot", "123", "其他机器人的消息", None, None)
+        .await;
+    conn.execute(
+        "UPDATE messages SET sender_bot=1 WHERE msg_id=?1",
+        params![robot.msg_id],
+    )
+    .await
+    .unwrap();
+    let latest = rig.message("p_c", "123", "公开接梗", None, None).await;
+    let snapshot = capture_reply_snapshot(&rig.path, &early, latest.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.scene["activity_as_of_ts"], 100);
+    let activity = &snapshot.scene["activity"];
+    assert_eq!(activity["level"], "lively");
+    assert_eq!(activity["human_messages_2min"], 13);
+    assert_eq!(activity["active_speakers_2min"], 3);
+    assert_eq!(activity["human_messages_since_bot"], 13);
+    assert_eq!(activity["bot_turns_5min"], 1, "同一anchor的多泡只算一轮");
+    assert_eq!(snapshot.scene["seconds_since_my_reply"], 50);
+    let replies = snapshot.dialogue["group_recent_replies"]
+        .as_array()
+        .unwrap();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["reply_target_person_id"], "p_a");
+    assert_eq!(replies[0]["source_anchor"]["msg_id"], early.msg_id);
+    // A different speaker sees public context without borrowing A's personal reply ownership.
+    let later = rig
+        .message("p_c", "123", "后到不应改变快照", None, None)
+        .await;
+    let old = capture_reply_snapshot(&rig.path, &early, latest.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
+    assert_eq!(old.scene, snapshot.scene);
+    let current = capture_reply_snapshot(&rig.path, &later, later.msg_id, &ContextCfg::default())
+        .await
+        .unwrap();
+    assert!(current.dialogue["last_reply_to_sender"].is_null());
+    assert_eq!(
+        current.dialogue["group_recent_replies"][0]["reply_target_person_id"],
+        "p_a"
+    );
+    let private_snapshot = capture_reply_snapshot(
+        &rig.path,
+        &MessageReceivedPayload {
+            chat_type: "private".into(),
+            ..private.clone()
+        },
+        private.msg_id,
+        &ContextCfg::default(),
+    )
+    .await
+    .unwrap();
+    assert!(private_snapshot.scene["activity"].is_null());
+    assert_eq!(
+        private_snapshot.dialogue["group_recent_replies"],
+        serde_json::json!([])
+    );
+}
