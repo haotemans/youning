@@ -300,6 +300,7 @@ async fn pick_with_scope(
     .ok()?;
     tx.commit().await.ok()?;
     Some(PickedMeme {
+        id: *id,
         path: path.clone(),
         category: category.into(),
         is_self: *is_self,

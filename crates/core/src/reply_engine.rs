@@ -1058,10 +1058,18 @@ async fn process_meme(
 }
 async fn deliver_meme(eng: &Arc<ReplyEngine>, job: &ReplyJob, image: &meme::PickedMeme) {
     let history = image.history();
-    process_image_history(eng, job, &image.path, &history, Some(&history)).await;
+    process_image_history(
+        eng,
+        job,
+        &image.path,
+        &history,
+        Some(&history),
+        Some(image.id),
+    )
+    .await;
 }
 async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
-    process_image_history(eng, job, path, note, None).await;
+    process_image_history(eng, job, path, note, None, None).await;
 }
 async fn process_image_history(
     eng: &Arc<ReplyEngine>,
@@ -1069,6 +1077,7 @@ async fn process_image_history(
     path: &Path,
     note: &str,
     history: Option<&str>,
+    meme_id: Option<i64>,
 ) {
     use tokio::io::AsyncReadExt;
     let encoded = async {
@@ -1099,6 +1108,7 @@ async fn process_image_history(
                 None,
                 Some(file),
                 history,
+                meme_id,
             )
             .await;
         }
@@ -1139,8 +1149,10 @@ async fn process_media_caption(
     retention: ArtifactRetention,
     caption: Option<&str>,
 ) -> MediaDelivery {
-    process_media_caption_with_file(eng, job, path, kind, note, retention, caption, None, None)
-        .await
+    process_media_caption_with_file(
+        eng, job, path, kind, note, retention, caption, None, None, None,
+    )
+    .await
 }
 
 async fn process_media_caption_with_file(
@@ -1153,6 +1165,7 @@ async fn process_media_caption_with_file(
     caption: Option<&str>,
     file: Option<String>,
     history: Option<&str>,
+    meme_id: Option<i64>,
 ) -> MediaDelivery {
     let file = file.unwrap_or_else(|| meme::file_url(path));
     let mut segments = vec![json!({"type":kind,"data":{"file":file}})];
@@ -1176,7 +1189,7 @@ async fn process_media_caption_with_file(
             if let Some(id) = message_id {
                 eng.self_ids.record(id);
             }
-            insert_self_message_ex(
+            insert_self_message_with_image(
                 &eng.db_path,
                 job,
                 if let Some(history) = history {
@@ -1190,6 +1203,7 @@ async fn process_media_caption_with_file(
                 },
                 kind == "image",
                 message_id,
+                meme_id.filter(|_| message_id.is_some()),
             )
             .await;
             let note = if retention == ArtifactRetention::DeleteAfterSend {
@@ -1450,26 +1464,35 @@ async fn insert_self_message_ex(
     has_image: bool,
     external_msg_id: Option<i64>,
 ) {
-    let Ok(mut conn) = crate::db::connect(db_path).await else {
-        return;
-    };
-    let now = now_secs();
-    let chat_type = match job.chat_type {
-        ChatType::Group => "group",
-        ChatType::Private => "private",
-    };
-    let _ = conn.execute(
-        "INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self', '云团', ?1, ?1)
-         ON CONFLICT(person_id) DO NOTHING",
-        params![now],
-    ).await;
-    if let Err(e) = conn.execute(
-        "INSERT INTO messages(chat_id, chat_type, sender_pid, nickname, text, mentions, at_me, has_image, ts, external_msg_id,reply_anchor_id)
-         VALUES (?1, ?2, 'self', '云团', ?3, '[]', 0, ?4, ?5, ?6,
-          (SELECT msg_id FROM messages WHERE msg_id=?7 AND chat_id=?1 AND chat_type=?2 AND sender_pid!='self'))",
-        params![job.chat_id, chat_type, text, has_image as i64, now, external_msg_id,job.anchor_msg_id],
-    ).await {
-        warn!(error = %e, "self 回复落库失败");
+    insert_self_message_with_image(db_path, job, text, has_image, external_msg_id, None).await;
+}
+
+async fn insert_self_message_with_image(
+    db_path: &Path,
+    job: &ReplyJob,
+    text: &str,
+    has_image: bool,
+    external_msg_id: Option<i64>,
+    meme_id: Option<i64>,
+) {
+    let result: Result<()> = async {
+        let mut conn = crate::db::connect(db_path).await?;
+        let mut tx = conn.begin_immediate().await?;
+        let now = now_secs();
+        let kind = match job.chat_type { ChatType::Group => "group", ChatType::Private => "private" };
+        tx.execute("INSERT INTO persons(person_id, display_name, first_seen, last_seen) VALUES ('self', '云团', ?1, ?1) ON CONFLICT(person_id) DO NOTHING",params![now]).await?;
+        let id: i64 = sqlx::query_scalar("INSERT INTO messages(chat_id,chat_type,sender_pid,nickname,text,mentions,at_me,has_image,ts,external_msg_id,reply_anchor_id)
+            VALUES(?1,?2,'self','云团',?3,'[]',0,?4,?5,?6,
+            (SELECT msg_id FROM messages WHERE msg_id=?7 AND chat_id=?1 AND chat_type=?2 AND sender_pid!='self')) RETURNING msg_id")
+            .bind(&job.chat_id).bind(kind).bind(text).bind(has_image as i64).bind(now).bind(external_msg_id).bind(job.anchor_msg_id).fetch_one(&mut *tx).await?;
+        if let Some(meme_id) = meme_id {
+            tx.execute("INSERT INTO message_images(msg_id,image_index,url,meme_id) VALUES(?1,0,'',?2)",params![id,meme_id]).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }.await;
+    if let Err(e) = result {
+        warn!(error=%e, "self 回复及图片来源落库失败");
     }
 }
 
@@ -2150,6 +2173,17 @@ mod tests {
         let actual:(i64,String,i64)=conn.query_row("SELECT msg_id,text,reply_anchor_id FROM messages WHERE sender_pid='self' ORDER BY msg_id DESC LIMIT 1",params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
         assert_eq!(actual.1, "（云团专属表情：比心）");
         assert_eq!(actual.2, anchor);
+        let source: i64 = sqlx::query_scalar(
+            "SELECT meme_id FROM message_images WHERE msg_id=?1 AND image_index=0",
+        )
+        .bind(actual.0)
+        .fetch_one(&mut *conn)
+        .await
+        .unwrap();
+        assert_eq!(
+            source, picked.id,
+            "真正发出后原子保存图库来源，后续可回看像素"
+        );
         conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('dm_1','private','p_1','你自己的呢',?1)",params![now_secs()]).await.unwrap();
         let msg = MessageReceivedPayload {
             msg_id: conn.last_insert_rowid().await.unwrap(),

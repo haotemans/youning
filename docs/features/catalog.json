@@ -91,7 +91,8 @@
         "crates/core/src/memory/nightly.rs",
         "crates/core/src/memory/processing.rs",
         "crates/core/src/memory/semantic.rs",
-        "crates/core/src/memory/material_cache.rs"
+        "crates/core/src/memory/material_cache.rs",
+        "crates/core/src/vision/cache.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
@@ -101,7 +102,8 @@
         "webui-frontend/tests/memories-flow.spec.js",
         "crates/core/tests/profile_refresh.rs",
         "crates/core/tests/memory_storage.rs",
-        "crates/core/tests/context_runtime.rs"
+        "crates/core/tests/context_runtime.rs",
+        "crates/core/tests/visual_followup.rs"
       ],
       "module": "core"
     },

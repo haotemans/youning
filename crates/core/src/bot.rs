@@ -360,7 +360,9 @@ async fn handle_inner(
                 match tokio::time::timeout(
                     // Up to three bounded 40s image observations, plus DB work.
                     std::time::Duration::from_secs(125),
-                    crate::vision::observe(&deps.db_path, &gw, m, &snapshot),
+                    crate::vision::observe_with_memes(
+                        &deps.db_path, &gw, m, &snapshot, &deps.memes_dir,
+                    ),
                 )
                 .await
                 {
@@ -419,6 +421,11 @@ async fn execute_outcome(
     ctx_cfg: crate::context_builder::ContextCfg,
 ) {
     for route_turn in 0..3 {
+        if !outcome.output.image_corrections.is_empty() {
+            if let Err(e) = crate::vision::refresh(&deps.db_path, &mut snapshot).await {
+                warn!(error=%e,"刷新图片纠正语境失败");
+            }
+        }
         if let Some(query) = outcome.output.history_query.as_deref() {
             if let Err(e) =
                 crate::context_builder::retrieve_history(&deps.db_path, &mut snapshot, query).await

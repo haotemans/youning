@@ -56,6 +56,11 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
         .write_to(&mut fixture, image::ImageFormat::Png)
         .unwrap();
     let png = fixture.into_inner();
+    let mut alternate = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 1, image::Rgb([0, 255, 0])))
+        .write_to(&mut alternate, image::ImageFormat::Png)
+        .unwrap();
+    let alternate = alternate.into_inner();
     let app = axum::Router::new().route("/chat/completions",axum::routing::post(move |axum::Json(body):axum::Json<Value>| {
         let seen = seen.clone();
         async move {
@@ -70,8 +75,8 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
             let bytes = base64::engine::general_purpose::STANDARD.decode(url.strip_prefix("data:image/png;base64,").expect("provider must receive pixels, not a remote QQ URL")).unwrap();
             let pixels = image::load_from_memory(&bytes).unwrap().to_rgb8();
             assert_eq!(pixels.dimensions(), (2, 1));
-            assert!(pixels.pixels().all(|p| p.0 == [255,0,0]));
-            let content = if ctx["source_msg_id"] == 6 {"invalid output".to_owned()} else {
+            assert!(pixels.pixels().all(|p| p.0 == if ctx["source_msg_id"] == 6 {[0,255,0]} else {[255,0,0]}));
+            let content = if ctx["source_msg_id"] == 6 {"invalid output".repeat(40)} else {
                 // The live compatible provider returns fenced JSON despite json_object.
                 format!("```json\n{}\n```", json!({"summary":"一张代码项目截图","visible_text":"Rust project","uncertainty":"不能确认项目归属"}))
             };
@@ -83,7 +88,7 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
             assert!(!headers.contains_key("authorization"), "provider credentials must never reach the image host");
             png
         }
-    })).route("/invalid.png", axum::routing::get(|| async { "not an image" }))
+    })).route("/other.png", axum::routing::get(move || { let png=alternate.clone(); async move {png} })).route("/invalid.png", axum::routing::get(|| async { "not an image" }))
     .route("/too-large.png", axum::routing::get(|| async { vec![0_u8; 8 * 1024 * 1024 + 1] }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -164,7 +169,7 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
         .unwrap();
     assert_eq!(trust, 0.6, "看图不能自行改变关系分");
     conn.execute_batch(&format!("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts,has_image) VALUES(6,'g','group','p_a','看看这张',6,1);
-        INSERT INTO message_images(msg_id,image_index,url) VALUES(6,0,'http://{address}/project.png');")).await.unwrap();
+        INSERT INTO message_images(msg_id,image_index,url) VALUES(6,0,'http://{address}/other.png');")).await.unwrap();
     msg.msg_id = 6;
     msg.ts = 6;
     msg.text = "看看这张".into();
