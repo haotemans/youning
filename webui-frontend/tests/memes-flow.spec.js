@@ -8,9 +8,10 @@ const preview = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="240"
 
 async function openGallery(page, options = {}) {
   const state = {
-    items: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, file: i < 26 ? `_inbox/待审${i + 1}.png` : `开心/开心${i + 1}.png`, category: i < 26 ? '_inbox' : '开心', status: i < 26 ? 'pending' : 'active', added_by: 'steal', use_count: i, created_at: i })),
+    items: Array.from({ length: 30 }, (_, i) => ({ id: i + 1, file: i < 26 ? `_inbox/待审${i + 1}.png` : `开心/开心${i + 1}.png`, category: i < 26 ? '_inbox' : '开心', status: i < 26 ? 'pending' : 'active', pack: 'other', added_by: 'steal', use_count: i, created_at: i })),
     reads: [], writes: [], images: [], failLoad: options.failLoad, failWrite: options.failWrite, failImage: options.failImage, partial: options.partial,
   }
+  if (options.ownPack) { const own = state.items.find(m => m.id === 29); own.pack = 'self'; own.file = '开心/cloud-v1-01-01.png' }
   if (options.reviews) {
     state.items.find(m => m.id === 26).review = { state: 'reviewed', kind: 'meme', safe: true, category: '疑惑', reason: '适合表达困惑', confidence: 0.7 }
     state.items.find(m => m.id === 25).review = { state: 'reviewed', kind: 'other', safe: true, category: '', reason: '软件截图' }
@@ -34,7 +35,8 @@ async function openGallery(page, options = {}) {
       const status = url.searchParams.get('status')
       const category = url.searchParams.get('category')
       const search = url.searchParams.get('search') || ''
-      const matching = state.items.filter(m => m.status === status && (!category || m.category === category) && (!search || m.file.includes(search) || m.category.includes(search) || String(m.id) === search))
+      const pack = url.searchParams.get('pack')
+      const matching = state.items.filter(m => m.status === status && (!pack || m.pack === pack) && (!category || m.category === category) && (!search || m.file.includes(search) || m.category.includes(search) || String(m.id) === search))
       const sort = url.searchParams.get('sort')
       matching.sort((a, b) => sort === 'oldest' ? a.id - b.id : sort === 'popular' ? b.use_count - a.use_count : b.id - a.id)
       const pageSize = Number(url.searchParams.get('page_size'))
@@ -106,7 +108,7 @@ test('pagination, search, category and usage sorting with visible previews', asy
   await page.getByPlaceholder('搜索文件名、分类或编号').fill('')
   await page.getByText('已入库 (4)', { exact: true }).click()
   await expect(page.locator('.meme-card')).toHaveCount(4)
-  await page.locator('.meme-filter .n-select').first().click()
+  await page.getByLabel('表情分类').click()
   await page.getByText('开心', { exact: true }).last().click()
   await expect.poll(() => state.reads.at(-1).get('category')).toBe('开心')
   await page.locator('.meme-filter .n-select').last().click()
@@ -188,4 +190,18 @@ test('load and image failures can be retried, mobile layout fits and object URLs
   await page.getByPlaceholder('搜索文件名、分类或编号').fill('不存在')
   await expect(page.getByText('没有匹配的表情包')).toBeVisible()
   await expect.poll(() => page.evaluate(() => window.galleryUrls.created.every(url => window.galleryUrls.revoked.includes(url)))).toBe(true)
+})
+
+test('own stickers have a visible identity and server-side pack filter', async ({ page }) => {
+  const state = await openGallery(page, { ownPack: true })
+  await page.getByText('已入库 (4)', { exact: true }).click()
+  await expect(page.locator('.meme-card').filter({ hasText: 'cloud-v1-01-01.png' })).toContainText('云团专属')
+  await page.getByLabel('表情图包').click()
+  await page.getByText('云团专属', { exact: true }).last().click()
+  await expect(page.locator('.meme-card')).toHaveCount(1)
+  await expect(page.locator('.meme-card')).toContainText('cloud-v1-01-01.png')
+  expect(state.reads.at(-1).get('pack')).toBe('self')
+  expect(state.writes).toEqual([])
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })

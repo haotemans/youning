@@ -28,6 +28,8 @@ ADR 保存重要取舍与原因。`accepted` 表示接受该决定，不表示�
 
 | [0016](0016-protocol-target-before-quote-author.md) | 协议确认的请求对象与引用作者分开 | 窄范围纠正other误判，不扩大执行授权 |
 
+| [0017](0017-owned-meme-participation.md) | 专属图包、文字配图及已发送语境 | 补充ADR-0015/0016，不扩大生图与任务授权 |
+
 编号保持稳定，修订和取代关系遵循[治理协议](../governance.md)。
 
 ## 修订记录

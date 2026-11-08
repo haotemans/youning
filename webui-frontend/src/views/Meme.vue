@@ -17,7 +17,8 @@
 
       <div class="meme-filter">
         <n-input v-model:value="search" clearable :maxlength="100" :disabled="busy" placeholder="搜索文件名、分类或编号" />
-        <n-select v-model:value="category" :options="categoryOptions" clearable filterable :disabled="busy" placeholder="全部分类" />
+        <n-select v-model:value="pack" :options="packOptions" clearable :disabled="busy" placeholder="全部图包" aria-label="表情图包" />
+        <n-select v-model:value="category" :options="categoryOptions" clearable filterable :disabled="busy" placeholder="全部分类" aria-label="表情分类" />
         <n-select v-model:value="sort" :options="sortOptions" :disabled="busy" aria-label="表情包排序" />
       </div>
       <n-alert v-if="loadError" type="error" class="gallery-message" role="alert">
@@ -45,7 +46,7 @@
             <div class="meme-card-head">
               <n-checkbox :checked="selected.includes(m.id)" :disabled="busy || loading" :aria-label="`选择表情包 ${m.id}`" @update:checked="checked => toggleSelected(m.id, checked)" />
               <span class="mono">#{{ m.id }}</span>
-              <n-tag size="tiny" :bordered="false">{{ m.added_by === 'steal' ? '群聊采集' : '手动添加' }}</n-tag>
+              <n-tag size="tiny" :bordered="false">{{ m.pack === 'self' ? '云团专属' : m.added_by === 'steal' ? '群聊采集' : '手动添加' }}</n-tag>
             </div>
             <div class="meme-preview"><MemeImage :id="m.id" :alt="`表情包 ${m.id}：${m.file}`" /></div>
             <div class="meme-filename" :title="m.file">{{ m.file.split('/').pop() }}</div>
@@ -67,7 +68,7 @@
             </div>
           </article>
         </div>
-        <empty-state v-else-if="!loading && !loadError" :title="search || category ? '没有匹配的表情包' : status === 'pending' ? '暂无待审表情包' : '暂无入库表情包'" />
+        <empty-state v-else-if="!loading && !loadError" :title="search || category || pack ? '没有匹配的表情包' : status === 'pending' ? '暂无待审表情包' : '暂无入库表情包'" />
         <div v-else class="gallery-loading">{{ loading ? '正在加载图库…' : '图库加载失败，请重试' }}</div>
       </n-spin>
       <div class="gallery-footer">
@@ -85,7 +86,7 @@ import EmptyState from '../components/EmptyState.vue'
 import MemeImage from '../components/MemeImage.vue'
 
 type Review = { state: string; kind?: string; safe?: boolean; category?: string; reason?: string; confidence?: number }
-type Meme = { id: number; file: string; category: string; use_count: number; added_by: string; review?: Review | null }
+type Meme = { pack?: 'self' | 'other'; id: number; file: string; category: string; use_count: number; added_by: string; review?: Review | null }
 
 function reviewLabel(review: Review) {
   if (review.state === 'processing') return '正在识别'
@@ -101,6 +102,8 @@ const categories = ref<string[]>([])
 const status = ref('pending')
 const search = ref('')
 const category = ref<string | null>(null)
+const pack = ref<string | null>(null)
+const packOptions = [{ label: '云团专属', value: 'self' }, { label: '其他图库', value: 'other' }]
 const sort = ref('newest')
 const page = ref(1)
 const pageSize = 24
@@ -129,7 +132,7 @@ async function load() {
   loading.value = true
   loadError.value = ''
   try {
-    const { data } = await api.get('/memes', { params: { status: status.value, search: search.value.trim(), category: category.value || undefined, sort: sort.value, page: page.value, page_size: pageSize }, signal: request.signal })
+    const { data } = await api.get('/memes', { params: { status: status.value, search: search.value.trim(), category: category.value || undefined, pack: pack.value || undefined, sort: sort.value, page: page.value, page_size: pageSize }, signal: request.signal })
     if (request.signal.aborted) return
     items.value = data.memes
     total.value = data.total
@@ -177,7 +180,7 @@ watch(search, () => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(resetFilter, 250)
 })
-watch([category, sort], resetFilter)
+watch([category, sort, pack], resetFilter)
 async function runSingle(m: Meme, action: Action) {
   if (busy.value) return
   busy.value = true
@@ -213,7 +216,7 @@ onBeforeUnmount(() => { controller?.abort(); clearTimeout(searchTimer) })
 
 <style scoped>
 .gallery-help { color: var(--yt-ink-3); font-size: 13px; margin: 14px 0; }
-.meme-filter { display: grid; grid-template-columns: minmax(180px, 1fr) 180px 150px; gap: 10px; }
+.meme-filter { display: grid; grid-template-columns: minmax(180px, 1fr) 160px 180px 150px; gap: 10px; }
 .gallery-message { margin-top: 14px; }
 .batch-bar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; min-height: 44px; padding: 14px 0; }
 .selection-count { font-size: 12px; color: var(--yt-ink-3); }

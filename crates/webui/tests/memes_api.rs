@@ -191,3 +191,20 @@ async fn gallery_preserves_record_on_file_error_and_blocks_outside_paths() {
         assert!(rig.dir.join("outside.png").exists());
     }
 }
+
+#[tokio::test]
+async fn own_pack_filter_and_identity_are_authenticated_and_match_runtime_ownership() {
+    let rig=Rig::start().await;
+    let mut conn=db::connect(&rig.dir.join("yuantuan.db")).await.unwrap();
+    conn.execute("UPDATE meme_library SET file='开心/cloud-v1-01-01.png' WHERE id=29",params![]).await.unwrap();
+    let own=rig.get("/api/memes?status=active&pack=self&page=1&page_size=24").await;
+    assert_eq!(own["total"],1);
+    assert_eq!(own["memes"][0]["id"],29);
+    assert_eq!(own["memes"][0]["pack"],"self");
+    let other=rig.get("/api/memes?status=active&pack=other&page=1").await;
+    assert_eq!(other["total"],3);
+    assert!(other["memes"].as_array().unwrap().iter().all(|m|m["pack"]=="other"));
+    let invalid=rig.http.get(format!("{}/api/memes?pack=unknown",rig.base)).bearer_auth(&rig.token).send().await.unwrap();
+    assert_eq!(invalid.status(),StatusCode::BAD_REQUEST);
+    assert_eq!(rig.http.get(format!("{}/api/memes?pack=self",rig.base)).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
+}

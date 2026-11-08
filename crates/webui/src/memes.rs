@@ -15,6 +15,7 @@ use std::path::Component;
 pub struct ListQuery {
     status: Option<String>,
     category: Option<String>,
+    pack: Option<String>,
     search: Option<String>,
     sort: Option<String>,
     page: Option<i64>,
@@ -25,6 +26,7 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     if q.status.as_deref().is_some_and(|s| s != "pending" && s != "active") {
         return err(StatusCode::BAD_REQUEST, "状态必须为 pending 或 active");
     }
+    if q.pack.as_deref().is_some_and(|p|p!="self" && p!="other") { return err(StatusCode::BAD_REQUEST,"图包必须为 self 或 other"); }
     let order = match q.sort.as_deref().unwrap_or("newest") {
         "newest" => "id DESC",
         "oldest" => "id ASC",
@@ -44,18 +46,20 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
     let paginated = q.page.is_some() || q.page_size.is_some();
     let result: sqlx::Result<Value> = async {
         let mut conn = state.open_db().await.map_err(|e| sqlx::Error::Protocol(e.to_string()))?;
-        let filter = "WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR category = ?2)
+        let owned=yuantuan_core::meme::SELF_FILE_SQL;
+        let filter = format!("WHERE (?1 IS NULL OR status = ?1) AND (?2 IS NULL OR category = ?2)
             AND (?3 = '' OR instr(lower(file), lower(?3)) > 0
-                OR instr(lower(category), lower(?3)) > 0 OR CAST(id AS TEXT) = ?3)";
+                OR instr(lower(category), lower(?3)) > 0 OR CAST(id AS TEXT) = ?3)
+            AND (?4 IS NULL OR (?4='self' AND {owned}) OR (?4='other' AND NOT({owned})))");
         let total: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM meme_library {filter}"))
-            .bind(&q.status).bind(&q.category).bind(search).fetch_one(&mut *conn).await?;
+            .bind(&q.status).bind(&q.category).bind(search).bind(&q.pack).fetch_one(&mut *conn).await?;
         let page = page.min((total - 1).max(0) / page_size + 1);
         let rows = sqlx::query(&format!(
             "SELECT id, file, category, status, use_count, added_by, created_at, last_used_ts,
                 (SELECT value FROM state_kv WHERE key='meme_review:' || meme_library.id || ':' || meme_library.md5) AS review
-             FROM meme_library {filter} ORDER BY {order} LIMIT ?4 OFFSET ?5"
+             FROM meme_library {filter} ORDER BY {order} LIMIT ?5 OFFSET ?6"
         ))
-        .bind(&q.status).bind(&q.category).bind(search)
+        .bind(&q.status).bind(&q.category).bind(search).bind(&q.pack)
         .bind(if paginated { page_size } else { -1 })
         .bind(if paginated { (page - 1) * page_size } else { 0 })
         .fetch_all(&mut *conn).await?;
@@ -80,6 +84,7 @@ pub async fn list(State(state): State<AppState>, Query(q): Query<ListQuery>) -> 
 fn row_to_json(r: &sqlx::sqlite::SqliteRow) -> sqlx::Result<Value> {
     Ok(json!({
         "id": r.try_get::<i64, _>("id")?, "file": r.try_get::<String, _>("file")?,
+        "pack": if yuantuan_core::meme::is_self_file(&r.try_get::<String,_>("file")?) {"self"} else {"other"},
         "category": r.try_get::<String, _>("category")?, "status": r.try_get::<String, _>("status")?,
         "use_count": r.try_get::<i64, _>("use_count")?, "added_by": r.try_get::<String, _>("added_by")?,
         "created_at": r.try_get::<i64, _>("created_at")?,

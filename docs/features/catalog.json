@@ -189,6 +189,7 @@
       "doc": "docs/features/core/memes.md",
       "source": [
         "crates/core/src/meme.rs",
+        "crates/core/src/meme/context.rs",
         "crates/webui/src/memes.rs",
         "webui-frontend/src/views/Meme.vue",
         "crates/core/src/meme_pack.rs",

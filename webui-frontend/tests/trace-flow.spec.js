@@ -5,7 +5,7 @@ const counts = { pending: 3, deciding: 1, executing: 0, uncertain: 1, failed: 1,
 const pending = { msg_id: 21, chat_id: '42', chat_type: 'group', sender_pid: 'p_2001', sender_name: '小冰猪', text: '刚才的问题还有一条补充', ts: 1800000000, state: 'pending', retry_at: 4102444800, attempts: 2 }
 const uncertain = { ...pending, msg_id: 22, sender_name: '猫猫', text: '上一次操作结果未知', state: 'uncertain', retry_at: 0 }
 const stopped = { ...pending, state: 'failed', text: '已停止的旧消息', retry_at: 0, attempts: 11, error: '已达到自动判断失败上限' }
-const events = [{ id: 3, kind: 'DecisionMade', ts: 1800000000, payload: { trigger: 'periodic', anchor_msg_id: 18, chat_id: '42', chat_type: 'group', sender_pid: 'p_2001', sender_name: '小冰猪', batch_message_ids: [16, 17, 18], action: 'reply', reason: '接上公开话题', reply_mode: 'social', policy: { suggested_action: 'reply', activity: { level: 'lively', human_messages_2min: 12, active_speakers_2min: 3 }, cooldown_secs: 45, notes: [] }, fallback: false } }, { id: 2, kind: 'DecisionMade', ts: 1800000000, payload: { trigger: 'immediate', anchor_msg_id: 15, chat_id: '42', chat_type: 'private', sender_name: '猫猫', action: 'ignore', reason: '模型暂时不可用', fallback: true } }]
+const events = [{ id: 3, kind: 'DecisionMade', ts: 1800000000, payload: { trigger: 'periodic', anchor_msg_id: 18, chat_id: '42', chat_type: 'group', sender_pid: 'p_2001', sender_name: '小冰猪', batch_message_ids: [16, 17, 18], action: 'reply', reason: '接上公开话题', reply_mode: 'social', policy: { suggested_action: 'reply', activity: { level: 'lively', human_messages_2min: 12, active_speakers_2min: 3 }, cooldown_secs: 45, meme_plan: { category: '比心', scope: 'self', requested: false }, notes: [] }, fallback: false } }, { id: 2, kind: 'DecisionMade', ts: 1800000000, payload: { trigger: 'immediate', anchor_msg_id: 15, chat_id: '42', chat_type: 'private', sender_name: '猫猫', action: 'ignore', reason: '模型暂时不可用', fallback: true } }]
 
 async function setup(page, fail = false) {
   await page.addInitScript(() => localStorage.setItem('yt_token', 'test-only'))
@@ -36,6 +36,7 @@ test('source and queue show real author, batch and uncertainty without replay', 
   await expect(page.locator('.decision-source')).toContainText('群聊批次 · 3 条')
   await expect(page.locator('.trace-detail')).toContainText('自然接话')
   await expect(page.locator('.trace-detail')).toContainText('群聊活跃')
+  await expect(page.locator('.trace-detail')).toContainText('计划表情: 云团专属 · 比心')
   await expect(page.locator('.trace-detail')).toContainText('近2分钟 12 条 · 3 人')
   await expect(page.locator('.trace-detail')).toContainText('参与间隔 45 秒')
   await page.screenshot({ path: 'test-results/trace-desktop.png', fullPage: true })

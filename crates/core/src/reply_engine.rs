@@ -372,6 +372,11 @@ pub enum JobKind {
         text: String,
     },
     Bubbles(Vec<Bubble>),
+    RequestedMemeBubbles(Vec<Bubble>),
+    Meme {
+        image: meme::PickedMeme,
+        requested: bool,
+    },
     /// 已抽好的 meme 图片绝对路径（直接发图，无打字延时/无作废核对）
     Image(PathBuf),
     Video(PathBuf),
@@ -577,6 +582,26 @@ impl EngineHandle {
             .map_err(|_| anyhow::anyhow!("回复队列已停止"))
     }
 
+    pub fn enqueue_meme(
+        &self,
+        chat_id: String,
+        chat_type: ChatType,
+        target: u64,
+        anchor_msg_id: i64,
+        image: meme::PickedMeme,
+        requested: bool,
+    ) {
+        self.enqueue(ReplyJob {
+            chat_id,
+            chat_type,
+            target,
+            anchor_msg_id,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Meme { image, requested },
+        });
+    }
+
     /// 直接发图（meme）：入 per-chat 串行队列，与普通回复同队列保序（稳定六条②）
     pub fn enqueue_image(&self, chat_id: String, chat_type: ChatType, target: u64, image: PathBuf) {
         self.enqueue(ReplyJob {
@@ -686,6 +711,10 @@ async fn process_job(eng: &Arc<ReplyEngine>, job: ReplyJob) {
         }
         JobKind::Bubbles(bubbles) => process_bubbles(eng, &job, &bubbles).await,
         JobKind::Image(path) => process_image(eng, &job, &path, "meme").await,
+        JobKind::Meme { image, requested } => process_meme(eng, &job, &image, requested).await,
+        JobKind::RequestedMemeBubbles(bubbles) => {
+            process_bubbles_with_meme(eng, &job, &bubbles, true).await
+        }
         JobKind::Video(path) => {
             process_media(eng, &job, &path, "video", "视频", ArtifactRetention::Keep).await
         }
@@ -1011,7 +1040,36 @@ async fn process_plugin_result(
 }
 
 /// 直接发图：无首泡延时、无作废核对，失败退避重试一次；落 self 图片消息保持流水连贯
+async fn process_meme(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    image: &meme::PickedMeme,
+    requested: bool,
+) {
+    let kind = match job.chat_type {
+        ChatType::Group => "group",
+        ChatType::Private => "private",
+    };
+    if !requested && !meme::spontaneous_allowed(&eng.db_path, &job.chat_id, kind).await {
+        debug!(chat_id=%job.chat_id,"主动配图间隔中，保留文字回应");
+        return;
+    }
+    deliver_meme(eng, job, image).await;
+}
+async fn deliver_meme(eng: &Arc<ReplyEngine>, job: &ReplyJob, image: &meme::PickedMeme) {
+    let history = image.history();
+    process_image_history(eng, job, &image.path, &history, Some(&history)).await;
+}
 async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note: &str) {
+    process_image_history(eng, job, path, note, None).await;
+}
+async fn process_image_history(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    path: &Path,
+    note: &str,
+    history: Option<&str>,
+) {
     use tokio::io::AsyncReadExt;
     let encoded = async {
         let file = tokio::fs::File::open(path).await?;
@@ -1040,6 +1098,7 @@ async fn process_image(eng: &Arc<ReplyEngine>, job: &ReplyJob, path: &Path, note
                 ArtifactRetention::Keep,
                 None,
                 Some(file),
+                history,
             )
             .await;
         }
@@ -1080,7 +1139,8 @@ async fn process_media_caption(
     retention: ArtifactRetention,
     caption: Option<&str>,
 ) -> MediaDelivery {
-    process_media_caption_with_file(eng, job, path, kind, note, retention, caption, None).await
+    process_media_caption_with_file(eng, job, path, kind, note, retention, caption, None, None)
+        .await
 }
 
 async fn process_media_caption_with_file(
@@ -1092,6 +1152,7 @@ async fn process_media_caption_with_file(
     retention: ArtifactRetention,
     caption: Option<&str>,
     file: Option<String>,
+    history: Option<&str>,
 ) -> MediaDelivery {
     let file = file.unwrap_or_else(|| meme::file_url(path));
     let mut segments = vec![json!({"type":kind,"data":{"file":file}})];
@@ -1118,7 +1179,9 @@ async fn process_media_caption_with_file(
             insert_self_message_ex(
                 &eng.db_path,
                 job,
-                if let Some(text) = caption.filter(|text| !text.trim().is_empty()) {
+                if let Some(history) = history {
+                    history
+                } else if let Some(text) = caption.filter(|text| !text.trim().is_empty()) {
                     text
                 } else if kind == "video" {
                     "（视频）"
@@ -1234,6 +1297,14 @@ fn resolve_meme_category(cat: Option<&str>, mood: MoodValue) -> String {
 }
 
 async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubble]) {
+    process_bubbles_with_meme(eng, job, bubbles, false).await;
+}
+async fn process_bubbles_with_meme(
+    eng: &Arc<ReplyEngine>,
+    job: &ReplyJob,
+    bubbles: &[Bubble],
+    requested: bool,
+) {
     let cfg = *eng.cfg.read().unwrap(); // 热应用：每泡取当前参数
     let started = Instant::now();
     let total = bubbles.len();
@@ -1257,7 +1328,7 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
         if b.text.is_empty() && b.meme.is_some() {
             if !meme_attempted {
                 meme_attempted = true;
-                send_bubble_meme(eng, job, b, i, total).await;
+                send_bubble_meme(eng, job, b, i, total, requested).await;
             }
             continue;
         }
@@ -1309,7 +1380,7 @@ async fn process_bubbles(eng: &Arc<ReplyEngine>, job: &ReplyJob, bubbles: &[Bubb
                 }));
                 if b.meme.is_some() && !meme_attempted {
                     meme_attempted = true;
-                    send_bubble_meme(eng, job, b, i, total).await;
+                    send_bubble_meme(eng, job, b, i, total, requested).await;
                 }
             }
             Err(e) => {
@@ -1333,11 +1404,20 @@ async fn send_bubble_meme(
     bubble: &Bubble,
     index: usize,
     total: usize,
+    requested: bool,
 ) {
+    let kind = match job.chat_type {
+        ChatType::Group => "group",
+        ChatType::Private => "private",
+    };
+    if !requested && !meme::spontaneous_allowed(&eng.db_path, &job.chat_id, kind).await {
+        return;
+    }
     let root = eng.db_path.parent().unwrap_or(Path::new(".")).join("memes");
     let cat = resolve_meme_category(bubble.meme.as_deref(), eng.mood.get());
-    if let Some(path) = meme::pick(&eng.db_path, &root, &cat).await {
-        process_image(eng, job, &path, "meme(::)").await;
+    let (scope, category) = meme::parse_selector(&cat);
+    if let Some(image) = meme::pick_selected(&eng.db_path, &root, category, scope).await {
+        deliver_meme(eng, job, &image).await;
     } else {
         eng.bus.publish(Event::BubbleSent(BubbleSentPayload {
             chat_id: job.chat_id.clone(),
@@ -1436,7 +1516,10 @@ pub async fn prepare_and_enqueue(
     };
     let mode_hint = out.reply_mode.instruction();
     let social = out.reply_mode == crate::engagement::ReplyMode::Social;
-    let routing_hint = if social {
+    let inventory = out.meme_requested;
+    let routing_hint = if inventory {
+        "本轮用户索取库存表情，只用可用图包和真实::meme指令，可简短配文；不提出execution_request，不调用生图或派工，不用动作描述冒充发图。要云团自己的表情就选self图包，缺货则直说。"
+    } else if social {
         "本轮只输出自然接话正文，尽量100字内、最多240字，一泡。不输出执行需求、工具JSON或内部决策；不合适开口可以留空，不输出‘忽略’等解释。"
     } else {
         "通常直接输出聊天正文。确需技能或多步操作且 execution_results 尚无所需结果时，可以只输出严格 JSON：{\"type\":\"execution_request\",\"goal\":\"具体需求\"}。宿主会交回 Decision 核对授权，不直接执行。已经执行过但失败的需求不得重复请求，说明结果或追问。不得输出 send_message 调用。"
@@ -1478,7 +1561,10 @@ pub async fn prepare_and_enqueue(
     );
     if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
         if value["type"] == "execution_request" {
-            anyhow::ensure!(!social, "自然接话不产生执行需求");
+            anyhow::ensure!(
+                !social && !inventory,
+                "自然接话或库存表情请求不产生执行需求"
+            );
             let goal = value["goal"].as_str().unwrap_or("").trim();
             anyhow::ensure!(
                 !goal.is_empty() && goal.chars().count() <= 1000,
@@ -1495,11 +1581,50 @@ pub async fn prepare_and_enqueue(
         crate::decision::ReplyLen::Medium => 2,
         crate::decision::ReplyLen::Long => reply_cfg.bubble_cap,
     };
-    let bubbles = bubbleize_with(
+    let mut bubbles = bubbleize_with(
         &raw,
         reply_cfg.bubble_char_cap,
         reply_cfg.bubble_cap.min(style_cap),
     );
+    let available = |selector: &str| {
+        let (scope, category) = meme::parse_selector(selector);
+        snapshot.meme_categories.iter().any(|c| c == category)
+            && match scope {
+                meme::MemeScope::SelfPack => {
+                    snapshot.self_meme_categories.iter().any(|c| c == category)
+                }
+                meme::MemeScope::Other => {
+                    snapshot.other_meme_categories.iter().any(|c| c == category)
+                }
+                meme::MemeScope::PreferSelf => true,
+            }
+    };
+    let planned = out
+        .meme_type
+        .as_deref()
+        .map(|c| out.meme_scope.selector(c))
+        .filter(|s| available(s));
+    let selected = planned.or_else(|| {
+        bubbles
+            .iter()
+            .filter_map(|b| b.meme.clone())
+            .find(|s| available(s))
+    });
+    for bubble in &mut bubbles {
+        bubble.meme = None;
+    }
+    if let Some(selector) = selected {
+        if let Some(last) = bubbles.last_mut() {
+            last.meme = Some(selector);
+        } else {
+            bubbles.push(Bubble {
+                text: String::new(),
+                at: false,
+                meme: Some(selector),
+            });
+        }
+    }
+    bubbles.retain(|b| !b.text.is_empty() || b.meme.is_some());
     if bubbles.is_empty() {
         return Err(anyhow!("bot_chat 输出为空"));
     }
@@ -1525,7 +1650,11 @@ pub async fn prepare_and_enqueue(
         anchor_msg_id: msg.msg_id,
         mention: out.mention,
         mention_qq,
-        kind: JobKind::Bubbles(bubbles),
+        kind: if out.meme_requested {
+            JobKind::RequestedMemeBubbles(bubbles)
+        } else {
+            JobKind::Bubbles(bubbles)
+        },
     });
     Ok(())
 }
@@ -1554,6 +1683,7 @@ pub(crate) fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[tokio::test]
     async fn mixed_reply_keeps_text_and_one_meme_even_when_bubbles_are_merged() {
@@ -1949,5 +2079,258 @@ mod tests {
         idle.abort();
         drop(conn);
         let _ = std::fs::remove_dir_all(dir);
+    }
+    #[tokio::test]
+    async fn real_meme_delivery_keeps_identity_and_anchor_without_sending_internal_metadata() {
+        let dir = std::env::temp_dir().join(format!("yt-owned-delivery-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(dir.join("memes/比心")).unwrap();
+        let path = dir.join("db.sqlite");
+        let mut conn = crate::db::connect(&path).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        let now = now_secs();
+        conn.execute(
+            "INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_1',1,1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('dm_1','private','p_1','来张表情包',?1)",params![now]).await.unwrap();
+        let anchor = conn.last_insert_rowid().await.unwrap();
+        let file = "比心/cloud-v1-01-01.png";
+        std::fs::write(dir.join("memes").join(file), b"owned-image").unwrap();
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES(?1,'比心','own-image','admin','active',0,1)",params![file]).await.unwrap();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let send: SendFn = Arc::new(move |req| {
+            captured.lock().unwrap().push(req);
+            Box::pin(async { Ok(json!({"message_id":42})) })
+        });
+        let engine = Arc::new(ReplyEngine::new(
+            path.clone(),
+            EventBus::default(),
+            send,
+            SelfMsgIds::default(),
+            Arc::new(std::sync::RwLock::new(ReplyCfg {
+                total_budget_ms: 0,
+                ..ReplyCfg::default()
+            })),
+            MoodState::default(),
+        ));
+        let picked =
+            meme::pick_selected(&path, &dir.join("memes"), "比心", meme::MemeScope::SelfPack)
+                .await
+                .unwrap();
+        let job = ReplyJob {
+            chat_id: "dm_1".into(),
+            chat_type: ChatType::Private,
+            target: 1,
+            anchor_msg_id: anchor,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Meme {
+                image: picked.clone(),
+                requested: true,
+            },
+        };
+        process_job(&engine, job.clone()).await;
+        {
+            let sent = requests.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(
+                sent[0].segments.as_array().unwrap().len(),
+                1,
+                "身份和类别不作为QQ正文发出去"
+            );
+            assert_eq!(sent[0].segments[0]["type"], "image");
+            assert!(sent[0].segments[0]["data"]["file"]
+                .as_str()
+                .unwrap()
+                .starts_with("base64://"));
+        }
+        let actual:(i64,String,i64)=conn.query_row("SELECT msg_id,text,reply_anchor_id FROM messages WHERE sender_pid='self' ORDER BY msg_id DESC LIMIT 1",params![],|r|Ok((r.try_get(0)?,r.try_get(1)?,r.try_get(2)?))).await.unwrap();
+        assert_eq!(actual.1, "（云团专属表情：比心）");
+        assert_eq!(actual.2, anchor);
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('dm_1','private','p_1','你自己的呢',?1)",params![now_secs()]).await.unwrap();
+        let msg = MessageReceivedPayload {
+            msg_id: conn.last_insert_rowid().await.unwrap(),
+            chat_id: "dm_1".into(),
+            chat_type: "private".into(),
+            sender_pid: "p_1".into(),
+            text: "你自己的呢".into(),
+            at_me: false,
+            has_image: false,
+            reply_to: None,
+            sender_bot: false,
+            image_urls: vec![],
+            ts: now_secs(),
+        };
+        let snapshot = context_builder::capture_reply_snapshot(
+            &path,
+            &msg,
+            msg.msg_id,
+            &context_builder::ContextCfg::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            snapshot.dialogue["last_reply_to_sender"]["msg_id"],
+            actual.0
+        );
+        assert_eq!(snapshot.dialogue["last_reply_to_sender"]["text"], actual.1);
+        assert_eq!(snapshot.meme_usage["sent_last_5min"], 1);
+        assert_eq!(snapshot.meme_usage["spontaneous_allowed"], false);
+        process_meme(&engine, &job, &picked, false).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "普通聊天配图受短间隔限制"
+        );
+        process_meme(&engine, &job, &picked, true).await;
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            2,
+            "明确索取现有表情不受普通配图间隔阻挡"
+        );
+        let fail_send: SendFn =
+            Arc::new(|_| Box::pin(async { Err(anyhow::anyhow!("fake send failed")) }));
+        let failed = Arc::new(ReplyEngine::new(
+            path.clone(),
+            EventBus::default(),
+            fail_send,
+            SelfMsgIds::default(),
+            Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
+            MoodState::default(),
+        ));
+        process_meme(&failed, &job, &picked, true).await;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE sender_pid='self' AND has_image=1",
+                params![],
+                |r| r.try_get(0),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count, 2, "失败发送不写成已发表情或承接事实");
+        let database = conn.database();
+        drop(failed);
+        drop(engine);
+        drop(conn);
+        database.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn decision_attachment_survives_plain_chat_and_inventory_cannot_request_execution() {
+        let dir = std::env::temp_dir().join(format!("yt-meme-plan-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let mut conn = crate::db::connect(&path).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        conn.execute(
+            "INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_1',1,1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES('比心/cloud-v1-01-01.png','比心','own-plan','admin','active',0,1)",params![]).await.unwrap();
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                let ctx: Value =
+                    serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+                assert_eq!(
+                    ctx["meme_library"]["self_pack"]["categories"],
+                    json!(["比心"])
+                );
+                let raw = if ctx["anchor"]["text"] == "exec" {
+                    json!({"type":"execution_request","goal":"生成自画像"}).to_string()
+                } else {
+                    "收到你的好心情啦。".into()
+                };
+                axum::Json(json!({"choices":[{"message":{"content":raw},"finish_reason":"stop"}]}))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let providers = dir.join("providers.toml");
+        std::fs::write(&providers,format!("[provider.mock]\nbase_url=\"http://{addr}\"\n[roles]\nbot_chat={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+        let gateway = llm::LlmGateway::load(&providers).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let engine = EngineHandle {
+            db_path: path.clone(),
+            tx,
+            abort: idle.abort_handle(),
+        };
+        for kind in ["chat", "exec"] {
+            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('dm_1','private','p_1',?1,100)",params![kind]).await.unwrap();
+            let msg = MessageReceivedPayload {
+                msg_id: conn.last_insert_rowid().await.unwrap(),
+                chat_id: "dm_1".into(),
+                chat_type: "private".into(),
+                sender_pid: "p_1".into(),
+                text: kind.into(),
+                at_me: false,
+                has_image: false,
+                reply_to: None,
+                sender_bot: false,
+                image_urls: vec![],
+                ts: 100,
+            };
+            let snapshot = context_builder::capture_reply_snapshot(
+                &path,
+                &msg,
+                msg.msg_id,
+                &context_builder::ContextCfg::default(),
+            )
+            .await
+            .unwrap();
+            let out:DecisionOutput=serde_json::from_value(json!({"action":"reply","mood":"happy","mention":false,"reply_len":"short","reason":"配一张表情","meme_type":"比心","meme_scope":"self","meme_requested":kind=="exec"})).unwrap();
+            let result = prepare_and_enqueue(
+                &engine,
+                &snapshot,
+                &gateway,
+                &MoodState::default(),
+                &msg,
+                &out,
+                &context_builder::ContextCfg::default(),
+                &ReplyCfg::default(),
+                &[],
+            )
+            .await;
+            if kind == "chat" {
+                result.unwrap();
+                let EngineCommand::Enqueue(job) = rx.try_recv().unwrap() else {
+                    panic!("missing job")
+                };
+                let JobKind::Bubbles(bubbles) = job.kind else {
+                    panic!("missing bubbles")
+                };
+                assert_eq!(bubbles.len(), 1);
+                assert_eq!(
+                    bubbles[0].meme.as_deref(),
+                    Some("self::比心"),
+                    "Decision配图计划不能因Chat只有文字而丢失"
+                );
+                assert_eq!(bubbles[0].text, "收到你的好心情啦。");
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .downcast_ref::<ExecutionRequest>()
+                        .is_none(),
+                    "库存请求不能回环付费执行"
+                );
+                assert!(rx.try_recv().is_err());
+            }
+        }
+        server.abort();
+        idle.abort();
+        let database = conn.database();
+        drop(conn);
+        database.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
