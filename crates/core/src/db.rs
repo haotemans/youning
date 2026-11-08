@@ -418,6 +418,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("db/decision_v13.sql"),
     ),
     ("V0.14 有界决策失败与停止原因", ""),
+    (
+        "V0.15 图片文字缓存与有据纠正",
+        include_str!("db/vision_v15.sql"),
+    ),
 ];
 
 pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
@@ -483,6 +487,16 @@ pub async fn migrate(conn: &mut sqlx::SqliteConnection) -> Result<()> {
         }
         if version == 14 {
             add_column_if_missing(&mut tx, "messages", "decision_error", "TEXT").await?;
+        }
+        if version == 15 {
+            add_column_if_missing(&mut tx, "message_images", "content_hash", "TEXT").await?;
+            add_column_if_missing(
+                &mut tx,
+                "message_images",
+                "meme_id",
+                "INTEGER REFERENCES meme_library(id) ON DELETE SET NULL",
+            )
+            .await?;
         }
         if version == 4 {
             add_column_if_missing(&mut tx, "messages", "processed_at", "INTEGER").await?;
@@ -555,6 +569,41 @@ pub async fn list_tables(conn: &mut sqlx::SqliteConnection) -> Result<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn v15_preserves_v14_images_and_replays_without_losing_corrections() {
+        let mut conn = Connection::open_in_memory().await.unwrap();
+        v3_database(&mut conn).await;
+        migrate(&mut conn).await.unwrap();
+        conn.execute_batch("DROP TABLE image_corrections; DROP INDEX idx_image_content_hash;
+            ALTER TABLE message_images DROP COLUMN meme_id; ALTER TABLE message_images DROP COLUMN content_hash;
+            INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_a',1,1);
+            INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(100,'g','group','p_a','旧图',1),(101,'g','group','p_a','这是旧图纠正',2);
+            INSERT INTO message_images(msg_id,image_index,url,observation,status) VALUES(100,0,'https://example.test/old.png','原始观察','ready');
+            PRAGMA user_version=14;").await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        conn.execute_batch("INSERT INTO image_corrections VALUES(100,0,101,'用户纠正','旧图纠正'); PRAGMA user_version=14;").await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        migrate(&mut conn).await.unwrap();
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM image_corrections", params![], |r| r
+                .try_get::<i64, _>(
+                0
+            ))
+            .await
+            .unwrap(),
+            1
+        );
+        let original: (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT observation,content_hash,meme_id FROM message_images",
+                params![],
+                |r| Ok((r.try_get(0)?, r.try_get(1)?, r.try_get(2)?)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(original, ("原始观察".into(), None, None));
+    }
 
     #[tokio::test]
     async fn v8_preserves_legacy_personas_and_defaults_examples_to_empty() {

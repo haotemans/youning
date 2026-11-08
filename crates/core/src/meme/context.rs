@@ -42,6 +42,7 @@ pub fn parse_selector(selector: &str) -> (MemeScope, &str) {
 
 #[derive(Debug, Clone)]
 pub struct PickedMeme {
+    pub id: i64,
     pub path: PathBuf,
     pub category: String,
     pub is_self: bool,

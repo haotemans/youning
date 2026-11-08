@@ -53,3 +53,5 @@ Decision的meme_type支持send_meme与reply附图，meme_scope为self/other/pref
 实际图片发送成功后才在self消息保存“云团专属/图库表情＋类别”和原reply_anchor_id；身份说明仅在历史与Trace中，不混进QQ图片正文。失败/不确定不写成已发送，不从旧的“图片”行猜类别或回填。按会话类型隔离的已发统计用于节奏判断，模型能承接“来张表情包→你自己的呢”。无需数据库迁移，V14及安装标记保持。
 
 管理页显示云团专属标签，并支持`GET /api/memes?pack=self|other`筛选；认证、分页、分类与删除沿用原规则。Trace区分计划的类别/图包与BubbleSent实际发送回执。新增回归位于meme.rs、meme/context.rs、reply_engine.rs、bot_context.rs，以及既有API/浏览器入口，验证图包不串用、计划落地、失败不假记、请求不误走生图及移动端显示；mock与构建不能替代实际模型或QQ验收。
+
+库存选图结果附带图库ID，成功发送后供视觉回看；不更改选图、图包归属、审核状态与发送控频。旧图片不通过类别猜测具体文件。详见[回复发送](replies.md)和[图片语境](memory.md)。

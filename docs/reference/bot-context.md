@@ -89,3 +89,5 @@ V7 增加成功发送气泡的本地 `reply_anchor_id`，用来定位当时的�
 后续同日补充的参与判断、真实回复归属、reply_mode、V7 隔离验收与真实模型评测见[语义参与框架](decision-framework.md)和[后端工作记录](../changes/backend-hardening-workbench.md)；上方 113 项测试是 V6 轮次的历史记录。
 
 存储、增量与历史版本的详细约束见[记忆功能](../features/core/memory.md)和[ADR-0011](../adr/0011-incremental-memory-storage.md)。已知来源的话题记忆按会话类型与编号筛选；旧来源不明的记录保留不确定性，不猜测来源。
+
+图片条目与有据纠正的当前契约见[记忆功能](../features/core/memory.md)：Decision输入images，Chat输入visual_context，二者共享固定来源和上界；已观察或纠正条目以文字复用。

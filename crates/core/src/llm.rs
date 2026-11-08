@@ -510,66 +510,7 @@ impl LlmGateway {
         anyhow::ensure!((1..=3).contains(&images.len()), "识图每次限 1–3 张");
         let mut parts = vec![json!({"type":"text","text":user})];
         for url in images {
-            let parsed = reqwest::Url::parse(url)?;
-            anyhow::ensure!(
-                matches!(parsed.scheme(), "http" | "https")
-                    && parsed.host_str().is_some()
-                    && parsed.username().is_empty()
-                    && parsed.password().is_none()
-                    && url.len() <= 4096,
-                "图片地址无效"
-            );
-            // Some compatible providers silently treat remote URLs as text. Fetch
-            // the actual pixels here so an inaccessible/expired link fails locally.
-            let _permit = self.concurrency.acquire().await?;
-            let mut response = self
-                .http
-                .get(url)
-                .timeout(Duration::from_secs(8))
-                .send()
-                .await?;
-            anyhow::ensure!(
-                response.status().is_success(),
-                "图片下载 HTTP {}",
-                response.status()
-            );
-            const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-            anyhow::ensure!(
-                response
-                    .content_length()
-                    .is_none_or(|n| n <= MAX_IMAGE_BYTES as u64),
-                "图片超过8MB"
-            );
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response.chunk().await? {
-                anyhow::ensure!(bytes.len() + chunk.len() <= MAX_IMAGE_BYTES, "图片超过8MB");
-                bytes.extend_from_slice(&chunk);
-            }
-            let png = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
-                let mut reader =
-                    image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
-                let mut limits = image::Limits::default();
-                limits.max_image_width = Some(4096);
-                limits.max_image_height = Some(4096);
-                limits.max_alloc = Some(32 * 1024 * 1024);
-                reader.limits(limits);
-                let img = reader.decode()?;
-                let img = if img.width() > 1024 || img.height() > 1024 {
-                    img.thumbnail(1024, 1024)
-                } else {
-                    img
-                };
-                let mut out = std::io::Cursor::new(Vec::new());
-                img.write_to(&mut out, image::ImageFormat::Png)?;
-                if out.get_ref().len() > 2 * 1024 * 1024 {
-                    out = std::io::Cursor::new(Vec::new());
-                    img.thumbnail(640, 640)
-                        .write_to(&mut out, image::ImageFormat::Png)?;
-                }
-                anyhow::ensure!(out.get_ref().len() <= 2 * 1024 * 1024, "图片编码超过2MB");
-                Ok(out.into_inner())
-            })
-            .await??;
+            let png = self.image_pixels(url).await?;
             use base64::Engine;
             let data = format!(
                 "data:image/png;base64,{}",
@@ -581,6 +522,75 @@ impl LlmGateway {
             .await
     }
 
+    /// Download and normalize once, before looking up a scoped image cache.
+    pub async fn image_pixels(&self, url: &str) -> Result<Vec<u8>> {
+        let parsed = reqwest::Url::parse(url)?;
+        anyhow::ensure!(
+            matches!(parsed.scheme(), "http" | "https")
+                && parsed.host_str().is_some()
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && url.len() <= 4096,
+            "图片地址无效"
+        );
+        // Some compatible providers silently treat remote URLs as text. Fetch
+        // the actual pixels here so an inaccessible/expired link fails locally.
+        let _permit = self.concurrency.acquire().await?;
+        let mut response = self
+            .http
+            .get(url)
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success(),
+            "图片下载 HTTP {}",
+            response.status()
+        );
+        const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+        anyhow::ensure!(
+            response
+                .content_length()
+                .is_none_or(|n| n <= MAX_IMAGE_BYTES as u64),
+            "图片超过8MB"
+        );
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            anyhow::ensure!(bytes.len() + chunk.len() <= MAX_IMAGE_BYTES, "图片超过8MB");
+            bytes.extend_from_slice(&chunk);
+        }
+        tokio::task::spawn_blocking(move || Self::encode_image_pixels(bytes)).await?
+    }
+
+    pub fn encode_image_pixels(bytes: Vec<u8>) -> Result<Vec<u8>> {
+        anyhow::ensure!(
+            !bytes.is_empty() && bytes.len() <= 8 * 1024 * 1024,
+            "图片为空或超过8MB"
+        );
+        let mut reader =
+            image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(4096);
+        limits.max_image_height = Some(4096);
+        limits.max_alloc = Some(32 * 1024 * 1024);
+        reader.limits(limits);
+        let img = reader.decode()?;
+        let img = if img.width() > 1024 || img.height() > 1024 {
+            img.thumbnail(1024, 1024)
+        } else {
+            img
+        };
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png)?;
+        if out.get_ref().len() > 2 * 1024 * 1024 {
+            out = std::io::Cursor::new(Vec::new());
+            img.thumbnail(640, 640)
+                .write_to(&mut out, image::ImageFormat::Png)?;
+        }
+        anyhow::ensure!(out.get_ref().len() <= 2 * 1024 * 1024, "图片编码超过2MB");
+        Ok(out.into_inner())
+    }
+
     /// Locally collected memes use bounded thumbnails, not expired QQ URLs or file paths.
     /// Shares the same model, cost gate, concurrency and accounting as directed vision.
     pub async fn chat_with_image_data(
@@ -588,6 +598,20 @@ impl LlmGateway {
         system: &str,
         user: &str,
         png: &[u8],
+    ) -> Result<String> {
+        self.image_data_request(system, user, png, "low").await
+    }
+
+    pub async fn observe_image_data(&self, system: &str, user: &str, png: &[u8]) -> Result<String> {
+        self.image_data_request(system, user, png, "auto").await
+    }
+
+    async fn image_data_request(
+        &self,
+        system: &str,
+        user: &str,
+        png: &[u8],
+        detail: &str,
     ) -> Result<String> {
         use base64::Engine;
         anyhow::ensure!(
@@ -601,7 +625,7 @@ impl LlmGateway {
         );
         let parts = json!([
             {"type":"text","text":user},
-            {"type":"image_url","image_url":{"url":url,"detail":"low"}}
+            {"type":"image_url","image_url":{"url":url,"detail":detail}}
         ]);
         self.chat_content(Role::BotChat, system, parts, true).await
     }

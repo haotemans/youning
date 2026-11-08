@@ -394,3 +394,7 @@ CREATE INDEX idx_events_ts ON events(ts);
 ## V14：停止失败的自动判断（2026-11-08）
 
 messages追加decision_error TEXT。pending/deciding之后可以进入failed，表示确定性错误、累计失败达3次或待处理超过10分钟；不删除原文，也不冒充done或uncertain。自动队列忽略failed，读取界面可看原因；重新加载模型配置不清零失败次数。
+
+## V15：图片缓存与纠正（2026-11-08）
+
+`message_images`追加`content_hash TEXT`与`meme_id INTEGER`（可空、关联图库），原url/observation保持；新增`image_corrections(source_msg_id,image_index,correction_msg_id,description,evidence_quote)`，前三列组成主键，关联图片与纠正原消息。纠正追加保存、读取时按实际会话/原话/上界核对，原观察不覆盖。迁移SQL为[`vision_v15.sql`](../../crates/core/src/db/vision_v15.sql)，完整行为集中在[记忆功能](../features/core/memory.md)。
