@@ -343,20 +343,29 @@ pub async fn capture_reply_snapshot(
     let examples: Vec<crate::personality::ReplyExample> =
         serde_json::from_str(&examples).context("读取人格回复示例失败")?;
     let persona = crate::personality::render(&content, &examples)?;
-    let since_reply: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND msg_id<=?2 AND sender_pid!='self' AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND sender_pid='self' AND msg_id<=?2),0)",
-        params![anchor.chat_id,cutoff,anchor.chat_type], |r|r.try_get(0),
-    ).await?;
-    let replies: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?4 AND msg_id<=?2 AND sender_pid='self' AND ts>=?3",
-        params![anchor.chat_id,cutoff,anchor.ts-300,anchor.chat_type], |r|r.try_get(0),
-    ).await?;
-    let last_reply: Option<i64> = tx.query_row(
-        "SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<=?3",
-        params![anchor.chat_id,anchor.chat_type,cutoff], |r| r.try_get(0)).await?;
-    let human_messages_30s: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid!='self' AND msg_id<=?3 AND ts>=?4",
-        params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts-30], |r|r.try_get(0)).await?;
+    // A periodic batch starts at an older message. Activity uses the fixed
+    // snapshot end, never that first message's timestamp or later arrivals.
+    let scene_ts:i64=tx.query_row("SELECT COALESCE((SELECT ts FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id<=?3 ORDER BY msg_id DESC LIMIT 1),?4)",params![anchor.chat_id,anchor.chat_type,cutoff,anchor.ts],|r|r.try_get(0)).await?;
+    let last_reply:Option<i64>=tx.query_row("SELECT MAX(ts) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<=?3 AND ts<=?4",params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts],|r|r.try_get(0)).await?;
+    let since_reply:i64=tx.query_row("SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND msg_id<=?2 AND sender_pid!='self' AND sender_bot=0 AND ts<=?4 AND msg_id>COALESCE((SELECT MAX(msg_id) FROM messages WHERE chat_id=?1 AND chat_type=?3 AND sender_pid='self' AND msg_id<=?2),0)",params![anchor.chat_id,cutoff,anchor.chat_type,scene_ts],|r|r.try_get(0)).await?;
+    let replies:i64=tx.query_row("SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?4 AND msg_id<=?2 AND sender_pid='self' AND ts BETWEEN ?3 AND ?5",params![anchor.chat_id,cutoff,scene_ts-300,anchor.chat_type,scene_ts],|r|r.try_get(0)).await?;
+    let human_messages_30s:i64=tx.query_row("SELECT COUNT(*) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid!='self' AND sender_bot=0 AND msg_id<=?3 AND ts BETWEEN ?4 AND ?5",params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts-30,scene_ts],|r|r.try_get(0)).await?;
+    let activity = if anchor.chat_type == "group" {
+        let counts=tx.query_row("SELECT COALESCE(SUM(ts>=?4-120),0),COUNT(DISTINCT CASE WHEN ts>=?4-120 THEN sender_pid END),COALESCE(SUM(ts>=?4-300),0),COALESCE(SUM(ts<?4-120),0) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id<=?3 AND sender_pid!='self' AND sender_bot=0 AND ts BETWEEN ?4-420 AND ?4",params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts],|r|Ok((r.try_get::<i64,_>(0)?,r.try_get::<i64,_>(1)?,r.try_get::<i64,_>(2)?,r.try_get::<i64,_>(3)?))).await?;
+        let dominant:i64=tx.query_row("SELECT COALESCE(MAX(n),0) FROM (SELECT COUNT(*) n FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id<=?3 AND sender_pid!='self' AND sender_bot=0 AND ts BETWEEN ?4-120 AND ?4 GROUP BY sender_pid)",params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts],|r|r.try_get(0)).await?;
+        let bot_turns:i64=tx.query_row("SELECT COUNT(DISTINCT COALESCE(reply_anchor_id,-msg_id)) FROM messages WHERE chat_id=?1 AND chat_type=?2 AND msg_id<=?3 AND sender_pid='self' AND ts BETWEEN ?4-300 AND ?4",params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts],|r|r.try_get(0)).await?;
+        Some(crate::engagement::Activity::from_counts(
+            counts.0,
+            counts.1,
+            counts.2,
+            counts.3,
+            dominant,
+            since_reply,
+            bot_turns,
+        ))
+    } else {
+        None
+    };
     let current_time: String = tx
         .query_row(
             "SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')",
@@ -364,11 +373,11 @@ pub async fn capture_reply_snapshot(
             |r| r.try_get(0),
         )
         .await?;
-    let scene = json!({"current_time":current_time,
+    let scene = json!({"current_time":current_time,"activity_as_of_ts":scene_ts,"activity":activity,
         "recent_speakers":recent.iter().rev().take(10).map(|m|m.person_id.clone()).collect::<BTreeSet<_>>(),
         "msgs_since_my_reply":since_reply,"my_replies_last_5min":replies,"chat_topic":null,
         "human_messages_last_30s":human_messages_30s,
-        "seconds_since_my_reply":last_reply.map(|ts|anchor.ts.saturating_sub(ts).max(0))});
+        "seconds_since_my_reply":last_reply.map(|ts|scene_ts.saturating_sub(ts).max(0))});
     let mut previous_reply = tx.query_row(&format!(
         "SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<?3 AND ts>=?4
          AND EXISTS(SELECT 1 FROM messages original WHERE original.msg_id=messages.reply_anchor_id AND original.chat_id=?1 AND original.chat_type=?2 AND original.sender_pid=?5)
@@ -378,7 +387,31 @@ pub async fn capture_reply_snapshot(
         reply.text = text;
         reply.text_truncated |= truncated;
     }
-    let dialogue = json!({"reply_target_person_id":anchor.sender_pid,"last_reply_to_sender":previous_reply,
+    let mut group_recent_replies = vec![];
+    if anchor.chat_type == "group" {
+        let rows=tx.prepare(&format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE chat_id=?1 AND chat_type=?2 AND sender_pid='self' AND msg_id<=?3 AND ts BETWEEN ?4-300 AND ?4 ORDER BY msg_id DESC LIMIT 2")).await?.query_map(params![anchor.chat_id,anchor.chat_type,cutoff,scene_ts],row_message).await?.collect::<sqlx::Result<Vec<_>>>()?;
+        for mut reply in rows {
+            let (text, truncated) = clip(&reply.text, 180);
+            reply.text = text;
+            reply.text_truncated |= truncated;
+            let source = if let Some(id) = reply.reply_anchor_id {
+                tx.query_row(&format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE msg_id=?1 AND chat_id=?2 AND chat_type=?3 AND msg_id<?4"),params![id,anchor.chat_id,anchor.chat_type,reply.msg_id],row_message).await.optional()?
+            } else {
+                None
+            };
+            let mut value = json!(reply);
+            if let Some(mut source) = source {
+                let (text, truncated) = clip(&source.text, 120);
+                source.text = text;
+                source.text_truncated |= truncated;
+                value["reply_target_person_id"] = json!(source.person_id);
+                value["source_anchor"] = json!(source);
+            }
+            group_recent_replies.push(value);
+        }
+        group_recent_replies.reverse();
+    }
+    let dialogue = json!({"group_recent_replies":group_recent_replies,"reply_target_person_id":anchor.sender_pid,"last_reply_to_sender":previous_reply,
         "note":"同一会话中近5分钟内确实回复过该人的消息；只是承接证据，不能证明旧回答的事实正确"});
     let active_tasks = tx.prepare("SELECT t.task_id,substr(t.goal,1,160),t.used_calls,COALESCE(r.phase,'running') FROM tasks t LEFT JOIN task_runtime r USING(task_id) WHERE t.chat_id=?1 AND t.created_by_pid=?2 AND t.state='running' AND (r.chat_type=?3 OR r.chat_type IS NULL) AND r.parent_id IS NULL ORDER BY t.created_at DESC LIMIT 3").await?
         .query_map(params![anchor.chat_id,anchor.sender_pid,anchor.chat_type], |r| Ok(json!({"task_id":r.try_get::<String, _>(0)?,"goal":r.try_get::<String, _>(1)?,"used_calls":r.try_get::<i64, _>(2)?,"state":r.try_get::<String,_>(3)?}))).await?
@@ -457,6 +490,7 @@ pub fn render_bot_context_with_skills(
     let mut active_tasks = snapshot.active_tasks.clone();
     let mut meme_categories = snapshot.meme_categories.clone();
     let mut historical = snapshot.historical_messages.clone();
+    let mut dialogue = snapshot.dialogue.clone();
     let mut pruned = false;
     loop {
         let body = json!({
@@ -474,7 +508,7 @@ pub fn render_bot_context_with_skills(
                 "available_skills":skill_catalog.iter().map(|(name,description)|
                     json!({"name":name,"description":description})).collect::<Vec<_>>(),
                 "cross_chat_history_available":false,"execution_results":snapshot.execution_results},
-            "dialogue":snapshot.dialogue, "active_tasks":active_tasks,
+            "dialogue":dialogue, "active_tasks":active_tasks,
             "meme_categories":meme_categories,
             "visual_context":snapshot.visual_context,"relationships":snapshot.relationships,
         });
@@ -511,6 +545,11 @@ pub fn render_bot_context_with_skills(
             historical.pop();
         } else if recent.len() > 5 {
             recent.remove(0);
+        } else if dialogue["group_recent_replies"]
+            .as_array_mut()
+            .is_some_and(|a| a.pop().is_some())
+        {
+            // Optional group continuity never evicts the immutable reply anchor.
         } else if !memories.is_empty() {
             memories.pop();
         } else if !profile.is_empty() {

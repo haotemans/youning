@@ -6,6 +6,8 @@
 
 2026-10-10 Decision 增量按 [ADR-0009](../adr/0009-semantic-participation-policy.md) 实施；对象、承接、依据与参与频率的当前输入输出见[语义参与框架](../reference/decision-framework.md)，下文原始 Schema 保留为设计基线。
 
+2026-11-08：群聊热度驱动的自然接话按[ADR-0015](../adr/0015-heat-aware-social-participation.md)补充，在既有周期Decision里选择social或答疑/执行路线；不把热度当作操作授权。输入、节奏与边界以决策框架为准。
+
 > 云团不是传统 Bot，而是一个具有人格、长期记忆、社会关系、工具能力、自主决策能力的长期运行 Agent。
 
 ---

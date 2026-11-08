@@ -1435,7 +1435,14 @@ pub async fn prepare_and_enqueue(
         }
     };
     let mode_hint = out.reply_mode.instruction();
-    let reserve = length_hint.chars().count() + mode_hint.chars().count() + 2;
+    let social = out.reply_mode == crate::engagement::ReplyMode::Social;
+    let routing_hint = if social {
+        "本轮只输出自然接话正文，尽量100字内、最多240字，一泡。不输出执行需求、工具JSON或内部决策；不合适开口可以留空，不输出‘忽略’等解释。"
+    } else {
+        "通常直接输出聊天正文。确需技能或多步操作且 execution_results 尚无所需结果时，可以只输出严格 JSON：{\"type\":\"execution_request\",\"goal\":\"具体需求\"}。宿主会交回 Decision 核对授权，不直接执行。已经执行过但失败的需求不得重复请求，说明结果或追问。不得输出 send_message 调用。"
+    };
+    let reserve =
+        length_hint.chars().count() + mode_hint.chars().count() + routing_hint.chars().count() + 3;
     let budget = context_builder::ContextCfg {
         budget_chars: ctx_cfg.budget_chars.saturating_sub(reserve),
         ..*ctx_cfg
@@ -1446,18 +1453,18 @@ pub async fn prepare_and_enqueue(
         &budget,
         skill_catalog,
     )?;
-    ctx.system.push('\n');
-    ctx.system.push_str(length_hint);
-    ctx.system.push('\n');
-    ctx.system.push_str(mode_hint);
-    ctx.system.push_str("\n通常直接输出聊天正文。确需技能或多步操作且 execution_results 尚无所需结果时，可以只输出严格 JSON：{\"type\":\"execution_request\",\"goal\":\"具体需求\"}。宿主会交回 Decision 核对授权，不直接执行。已经执行过但失败的需求不得重复请求，说明结果或追问。不得输出 send_message 调用。");
+    for instruction in [length_hint, mode_hint, routing_hint] {
+        ctx.system.push('\n');
+        ctx.system.push_str(instruction);
+    }
+
     let started = Instant::now();
     let mut raw = llm
         .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
         .await
         .context("bot_chat 调用失败")?;
     // 只对空正文重试一次，保留原快照；不重试工具调用、拒绝或网络错误。
-    if raw.trim().is_empty() {
+    if raw.trim().is_empty() && !social {
         warn!(chat_id=%msg.chat_id, anchor_msg_id=msg.msg_id, "bot_chat 正文为空，使用同一上下文重试一次");
         raw = llm
             .chat(llm::Role::BotChat, &ctx.system, &ctx.user, false)
@@ -1471,6 +1478,7 @@ pub async fn prepare_and_enqueue(
     );
     if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
         if value["type"] == "execution_request" {
+            anyhow::ensure!(!social, "自然接话不产生执行需求");
             let goal = value["goal"].as_str().unwrap_or("").trim();
             anyhow::ensure!(
                 !goal.is_empty() && goal.chars().count() <= 1000,
@@ -1478,6 +1486,9 @@ pub async fn prepare_and_enqueue(
             );
             return Err(ExecutionRequest(goal.to_owned()).into());
         }
+    }
+    if social {
+        anyhow::ensure!(raw.chars().count() <= 240, "接话过长，本轮略过以免刷屏");
     }
     let style_cap = match out.reply_len {
         crate::decision::ReplyLen::Short => 1,
@@ -1801,5 +1812,142 @@ mod tests {
         let bs = bubbleize_with(sentence, 20, 3);
         assert_eq!(bs.len(), 1);
         assert_eq!(bs[0].text, sentence);
+    }
+    #[tokio::test]
+    async fn social_chat_is_one_bubble_and_never_loops_into_execution_or_empty_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = std::env::temp_dir().join(format!("yt-social-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.db");
+        let mut conn = crate::db::connect(&path).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        conn.execute(
+            "INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_1',1,1)",
+            params![],
+        )
+        .await
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(move |axum::Json(body): axum::Json<Value>| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let context: Value =
+                        serde_json::from_str(body["messages"][1]["content"].as_str().unwrap())
+                            .unwrap();
+                    let kind = context["anchor"]["text"].as_str().unwrap();
+                    if kind != "answer-execute" {
+                        assert!(body["messages"][0]["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("自然接话正文"));
+                        assert!(!body["messages"][0]["content"]
+                            .as_str()
+                            .unwrap()
+                            .contains("可以只输出严格 JSON"));
+                    }
+                    let raw = match kind {
+                        "empty" => String::new(),
+                        "execute" | "answer-execute" => {
+                            json!({"type":"execution_request","goal":"生成图片"}).to_string()
+                        }
+                        "long" => "啊".repeat(241),
+                        _ => "头发先记账。‖这图值得。".into(),
+                    };
+                    axum::Json(
+                        json!({"choices":[{"message":{"content":raw},"finish_reason":"stop"}]}),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let providers = dir.join("providers.toml");
+        std::fs::write(&providers,format!("[provider.mock]\nbase_url=\"http://{addr}\"\n[roles]\nbot_chat={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+        let gateway = llm::LlmGateway::load(&providers).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let idle = tokio::spawn(std::future::pending::<()>());
+        let engine = EngineHandle {
+            db_path: path.clone(),
+            tx,
+            abort: idle.abort_handle(),
+        };
+        for (index, kind) in ["normal", "empty", "execute", "long", "answer-execute"]
+            .iter()
+            .enumerate()
+        {
+            conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('123','group','p_1',?1,100)",params![kind]).await.unwrap();
+            let msg = MessageReceivedPayload {
+                msg_id: conn.last_insert_rowid().await.unwrap(),
+                chat_id: "123".into(),
+                chat_type: "group".into(),
+                sender_pid: "p_1".into(),
+                text: (*kind).into(),
+                at_me: false,
+                has_image: false,
+                reply_to: None,
+                sender_bot: false,
+                image_urls: vec![],
+                ts: 100,
+            };
+            let snapshot = context_builder::capture_reply_snapshot(
+                &path,
+                &msg,
+                msg.msg_id,
+                &context_builder::ContextCfg::default(),
+            )
+            .await
+            .unwrap();
+            let out:DecisionOutput=serde_json::from_value(json!({"action":"reply","reply_mode":if *kind=="answer-execute" {"answer"} else {"social"},"mood":"calm","mention":false,"reply_len":"short","reason":"测试自然接话"})).unwrap();
+            let result = prepare_and_enqueue(
+                &engine,
+                &snapshot,
+                &gateway,
+                &MoodState::default(),
+                &msg,
+                &out,
+                &context_builder::ContextCfg::default(),
+                &ReplyCfg::default(),
+                &[],
+            )
+            .await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                index + 1,
+                "自然接话不为留空补调模型"
+            );
+            if *kind == "normal" {
+                result.unwrap();
+                let EngineCommand::Enqueue(job) = rx.try_recv().unwrap() else {
+                    panic!("expected reply job")
+                };
+                assert!(!job.mention);
+                let JobKind::Bubbles(bubbles) = job.kind else {
+                    panic!("expected bubbles")
+                };
+                assert_eq!(bubbles.len(), 1);
+                assert!(bubbles[0].text.contains("这图值得"));
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    error.downcast_ref::<ExecutionRequest>().is_some(),
+                    *kind == "answer-execute"
+                );
+                assert!(
+                    rx.try_recv().is_err(),
+                    "留空、越界输出和执行需求均不作为正文发送"
+                );
+            }
+        }
+        server.abort();
+        idle.abort();
+        drop(conn);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

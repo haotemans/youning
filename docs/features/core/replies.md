@@ -33,3 +33,5 @@
 V12支持Chat结构化执行需求返回Decision；任务结果正文先持久化至task_outbox，发送时检查任务版本及暂停/取消状态。任务发送不盲目重试，适配层返回message_id后才记sent并保存Bot实际发言；不确定结果标unknown。普通回复和插件媒体投递仍沿用既有处理。
 
 任务回聊附件从当前版本成功工具回执读取，至多4个/30MiB，与正文合并发送；发送前检查任务版本和附件文件。幂等投递与取消验证见 [`task_delivery_tests.rs`](../../../crates/core/src/reply_engine/task_delivery_tests.rs)。
+
+自然接话使用 `reply_mode=social`：沿用当前人格，用一两句接当前话题，建议100字内、硬上限240字并合成一泡。超过上限不发送，留空不为社交接话额外补调模型；此模式的execution_request被拒绝，不交回Decision派工。答疑模式保留原有执行需求路由。长度、模式及路由指令一并计入现有上下文字符预算；单元回归直接位于reply_engine.rs，验证一泡、空输出单次调用、超长不入队、social拒绝执行回环与answer兼容。

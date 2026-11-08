@@ -25,6 +25,7 @@
 
 - [`crates/core/src/decision.rs`](../../../crates/core/src/decision.rs)
 - [`crates/core/src/engagement.rs`](../../../crates/core/src/engagement.rs)
+- [`crates/core/src/engagement/activity.rs`](../../../crates/core/src/engagement/activity.rs)
 - [`crates/core/src/state.rs`](../../../crates/core/src/state.rs)
 
 ## 验证入口
@@ -41,3 +42,11 @@ V12增加可选 history_query、task_plan、task_control。Chat执行建议回�
 新DecisionMade记录补充trigger、chat_type、sender_name、anchor_msg_id及batch_message_ids，区分普通批次、即时请求、聊天转路由和任务回聊。批次ID来自实际提交给本轮模型的候选范围，目标仍须通过既有本批成员及来源校验。
 
 无目标的批次忽略不会伪装成回应第一位作者：Trace锚点为0、作者为空；缺少mood时不重置当前情绪。执行、记忆写入和任务控制仍使用严格Schema及原有授权契约。失败保留具体类型与可展示原因，永久配置错误不走队列重试，暂态错误受消息总失败次数约束。
+
+## 根据热度自然接话
+
+`reply_mode=social` 在既有 Decision 调用中选择公开话题的回应对象，允许评论、共情、接梗和跨成员的共同话题承接，不要求被@、个人兴趣或新知识。仍需高把握、可见真实消息依据和具体参与价值；明确面向其他成员、收尾、重复或缺依据时保持安静。模型选择ignore时不会被热度强制改成回复。
+
+热度来自固定快照内同群人类近2/5分钟消息数、参与人数、前一窗口趋势、单人刷屏占比、Bot已发轮数与新增人类消息；排除其他机器人及同号私聊，多泡按reply_anchor_id合并为一轮。安静/渐热/活跃/密集默认参与间隔180/90/45/90秒，5分钟最多4轮、Bot占比过高或一人密集刷屏时等待。间隔距实际发送计，@、私聊和真实同人承接沿用即时回应路径。
+
+social只允许简短正文或现有表情，不授权技能、派工和任务控制；Chat执行需求不会在此模式回环。旧答疑路径及执行原话校验保留。完整参数、边界和验证入口见[决策框架](../../reference/decision-framework.md)与[ADR-0015](../../adr/0015-heat-aware-social-participation.md)。以上为代码契约，真实模型的选话题及接话自然度需部署后观察，mock不能证明线上效果。
