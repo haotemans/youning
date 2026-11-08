@@ -48,3 +48,5 @@ DecisionMade观察事件追加入口类型、会话类型、实际作者名、�
 V14给messages追加可空 `decision_error`，保留原始数据、已有失败次数、配置和记忆。`failed`表示停止自动判断，与执行结果未知的`uncertain`区分。队列终止可回写processed_at，但不能解释为模型已回复；状态与原因是事实来源。最新迁移与数据库回归断言为14。
 
 V15给message_images追加可空content_hash与meme_id，以及摘要索引；image_corrections按图片原消息、图片序号、纠正原消息唯一保存描述和逐字依据，外键随对应原消息删除。保留全部原始观察、旧消息、群记忆和配置；原始表不清空、不回填未知图片。迁移重放使用现有加列检查及IF NOT EXISTS。SQL为[`vision_v15.sql`](../../../crates/core/src/db/vision_v15.sql)，数据库回归版本为15。详细行为见[记忆功能](memory.md)。
+
+V14→V15迁移夹具使用独立消息编号，保留已有V3种子原文；重放加列后仍保留原始观察及纠正行。

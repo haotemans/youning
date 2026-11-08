@@ -123,3 +123,5 @@ Decision可输出至多3项`image_corrections:{source_msg_id,image_index,descrip
 来源、文字缓存和纠正随SQLite备份保存。图库成功发送且QQ有消息回执时，在同一事务保存self消息与meme_id；之后可通过受图库根目录约束的本地文件回看实际图像，失败发送和旧未知图片不补造。临时生图附件仍沿用原清理策略，未扩展为永久图片仓库。
 
 实现新增[`vision/cache.rs`](../../../crates/core/src/vision/cache.rs)，回归新增[`visual_followup.rs`](../../../crates/core/tests/visual_followup.rs)。本轮真实接口单次探测能描述耳罩与猫耳位置，但返回纯文字；该探测未发送QQ消息，不能替代完整链路验收。
+
+Linux CI在工作区全量回归前先执行visual_context与visual_followup专项，失败时停止后续发布编译。

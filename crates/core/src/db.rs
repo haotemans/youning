@@ -578,11 +578,11 @@ mod tests {
         conn.execute_batch("DROP TABLE image_corrections; DROP INDEX idx_image_content_hash;
             ALTER TABLE message_images DROP COLUMN meme_id; ALTER TABLE message_images DROP COLUMN content_hash;
             INSERT INTO persons(person_id,first_seen,last_seen) VALUES('p_a',1,1);
-            INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(1,'g','group','p_a','旧图',1),(2,'g','group','p_a','这是旧图纠正',2);
-            INSERT INTO message_images(msg_id,image_index,url,observation,status) VALUES(1,0,'https://example.test/old.png','原始观察','ready');
+            INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts) VALUES(100,'g','group','p_a','旧图',1),(101,'g','group','p_a','这是旧图纠正',2);
+            INSERT INTO message_images(msg_id,image_index,url,observation,status) VALUES(100,0,'https://example.test/old.png','原始观察','ready');
             PRAGMA user_version=14;").await.unwrap();
         migrate(&mut conn).await.unwrap();
-        conn.execute_batch("INSERT INTO image_corrections VALUES(1,0,2,'用户纠正','旧图纠正'); PRAGMA user_version=14;").await.unwrap();
+        conn.execute_batch("INSERT INTO image_corrections VALUES(100,0,101,'用户纠正','旧图纠正'); PRAGMA user_version=14;").await.unwrap();
         migrate(&mut conn).await.unwrap();
         migrate(&mut conn).await.unwrap();
         assert_eq!(
