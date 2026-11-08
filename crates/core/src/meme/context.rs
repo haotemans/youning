@@ -5,10 +5,10 @@ use serde_json::{json, Value};
 use sqlx::{Row, SqliteConnection};
 use std::path::PathBuf;
 
-pub const SELF_FILE_SQL: &str = "lower(replace(file,'\\','/')) LIKE '%/cloud-v1-%.png'";
+pub const SELF_FILE_SQL: &str = "(lower(replace(file,'\\','/')) LIKE '%/cloud-v1-%' AND (lower(file) LIKE '%.png' OR lower(file) LIKE '%.gif' OR lower(file) LIKE '%.jpg' OR lower(file) LIKE '%.jpeg' OR lower(file) LIKE '%.webp'))";
 pub fn is_self_file(file: &str) -> bool {
     let file = file.replace('\\', "/").to_ascii_lowercase();
-    file.contains("/cloud-v1-") && file.ends_with(".png")
+    file.contains("/cloud-v1-") && super::is_image_ext(&file)
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +101,34 @@ pub async fn spontaneous_allowed(db: &std::path::Path, chat: &str, kind: &str) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn owned_static_and_animated_formats_match_the_sql_filter() {
+        let mut conn = crate::db::Connection::open_in_memory().await.unwrap();
+        for (file, expected) in [
+            ("开心/cloud-v1-original.png", true),
+            ("摇摆/cloud-v1-extra.gif", true),
+            ("摇摆\\cloud-v1-extra.GIF", true),
+            ("开心/cloud-v1-extra.jpg", true),
+            ("开心/cloud-v1-extra.JPEG", true),
+            ("开心/cloud-v1-extra.webp", true),
+            ("开心/collected.gif", false),
+            ("开心/cloud-v1-clip.mp4", false),
+            ("开心/cloud-v1-note.txt", false),
+            ("cloud-v1-root.gif", false),
+        ] {
+            let from_sql: bool = conn
+                .query_row(
+                    &format!("SELECT {SELF_FILE_SQL} FROM (SELECT ?1 AS file)"),
+                    params![file],
+                    |r| r.try_get(0),
+                )
+                .await
+                .unwrap();
+            assert_eq!(from_sql, expected, "{file}");
+            assert_eq!(is_self_file(file), expected, "{file}");
+        }
+    }
+
     #[tokio::test]
     async fn opportunities_use_successful_scoped_sends_and_preserve_the_snapshot_cutoff() {
         let dir = std::env::temp_dir().join(format!("yt-meme-usage-{}", rand::random::<u64>()));
