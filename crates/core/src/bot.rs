@@ -1202,8 +1202,9 @@ mod tests {
         message.text = "分享文案 https://xhslink.cn/o/123 查看原文".into();
         message.reply_to = None;
         let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
-        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42','group','p_1',?1,2)",crate::db::params![message.text]).await.unwrap();
+        conn.execute("INSERT INTO messages(chat_id,chat_type,sender_pid,text,ts) VALUES('42','group','p_1',?1,?2)",crate::db::params![message.text,crate::window::now()]).await.unwrap();
         message.msg_id = conn.last_insert_rowid().await.unwrap();
+        message.ts = crate::window::now();
         drop(conn);
         let pipeline = spawn_pipeline(deps.clone());
         deps.bus.publish(Event::MessageReceived(message));
