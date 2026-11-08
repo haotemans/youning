@@ -18,6 +18,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+mod context;
+pub use context::{
+    catalog, is_self_file, parse_selector, spontaneous_allowed, usage, MemeScope, PickedMeme,
+    SELF_FILE_SQL,
+};
+
 pub const DHASH_DUP_THRESHOLD: u32 = 5;
 const IMAGE_EXTS: [&str; 4] = ["jpg", "jpeg", "png", "gif"];
 
@@ -174,23 +180,46 @@ async fn insert_new_meme(
 /// 类别内 active 抽一张：排除缺失文件及上一张，最久未用的前 3 张随机一张。
 /// 选择和使用记录在同一事务中更新；单图类别允许复用。
 pub async fn pick(db_path: &Path, memes_dir: &Path, category: &str) -> Option<PathBuf> {
-    pick_with(db_path, memes_dir, category, |n| {
+    pick_selected(db_path, memes_dir, category, MemeScope::PreferSelf)
+        .await
+        .map(|m| m.path)
+}
+pub async fn pick_selected(
+    db_path: &Path,
+    memes_dir: &Path,
+    category: &str,
+    scope: MemeScope,
+) -> Option<PickedMeme> {
+    pick_with_scope(db_path, memes_dir, category, scope, |n| {
         rand::Rng::random_range(&mut rand::rng(), 0..n)
     })
     .await
 }
-
-/// pick 的核心（候选选择器可注入，测试可确定性指定下标）
+#[cfg(test)]
 async fn pick_with(
     db_path: &Path,
     memes_dir: &Path,
     category: &str,
     choose: impl Fn(usize) -> usize,
 ) -> Option<PathBuf> {
+    pick_with_scope(db_path, memes_dir, category, MemeScope::PreferSelf, choose)
+        .await
+        .map(|m| m.path)
+}
+async fn pick_with_scope(
+    db_path: &Path,
+    memes_dir: &Path,
+    category: &str,
+    scope: MemeScope,
+    choose: impl Fn(usize) -> usize,
+) -> Option<PickedMeme> {
     let mut conn = crate::db::connect(db_path).await.ok()?;
     let root = memes_dir.canonicalize().ok()?;
     let mut tx = conn.begin_immediate().await.ok()?;
-    let last_key = format!("meme.last_pick:{category}");
+    let last_key = match scope {
+        MemeScope::PreferSelf => format!("meme.last_pick:{category}"),
+        _ => format!("meme.last_pick:{scope:?}:{category}"),
+    };
     let last: Option<i64> = tx
         .query_row(
             "SELECT value FROM state_kv WHERE key=?1",
@@ -200,22 +229,31 @@ async fn pick_with(
         .await
         .ok()
         .flatten();
+    let scope_number = match scope {
+        MemeScope::PreferSelf => 0_i64,
+        MemeScope::SelfPack => 1,
+        MemeScope::Other => 2,
+    };
     let candidates: Vec<(i64, String)> = {
         let mut st = tx
-            .prepare(
-                "SELECT id, file FROM meme_library WHERE category = ?1 AND status = 'active'
-             ORDER BY last_used_ts IS NOT NULL ASC, last_used_ts ASC, use_count ASC, id ASC",
-            )
+            .prepare(&format!(
+                "SELECT id, file FROM meme_library WHERE category=?1 AND status='active'
+                AND (?2=0 OR (?2=1 AND {SELF_FILE_SQL}) OR (?2=2 AND NOT({SELF_FILE_SQL})))
+                ORDER BY CASE WHEN ?2=0 AND {SELF_FILE_SQL} THEN 0 ELSE 1 END,
+                last_used_ts IS NOT NULL ASC,last_used_ts ASC,use_count ASC,id ASC"
+            ))
             .await
             .ok()?;
         let rows = st
-            .query_map(params![category], |r| Ok((r.try_get(0)?, r.try_get(1)?)))
+            .query_map(params![category, scope_number], |r| {
+                Ok((r.try_get(0)?, r.try_get(1)?))
+            })
             .await
             .ok()?;
         rows.collect::<std::result::Result<Vec<(i64, String)>, _>>()
     }
     .ok()?;
-    let mut candidates: Vec<(i64, PathBuf)> = candidates
+    let mut candidates: Vec<(i64, PathBuf, bool)> = candidates
         .into_iter()
         .filter_map(|(id, rel)| {
             let relative = Path::new(&rel);
@@ -226,19 +264,22 @@ async fn pick_with(
                 return None;
             }
             let path = root.join(relative).canonicalize().ok()?;
-            (path.starts_with(&root) && path.is_file()).then_some((id, path))
+            (path.starts_with(&root) && path.is_file()).then_some((id, path, is_self_file(&rel)))
         })
         .take(4)
         .collect();
     if candidates.is_empty() {
         return None;
     }
+    if scope == MemeScope::PreferSelf && candidates.iter().any(|c| c.2) {
+        candidates.retain(|c| c.2);
+    }
     if candidates.len() > 1 {
-        candidates.retain(|(id, _)| Some(*id) != last);
+        candidates.retain(|(id, _, _)| Some(*id) != last);
     }
     candidates.truncate(3);
     let idx = choose(candidates.len()).min(candidates.len() - 1);
-    let (id, path) = &candidates[idx];
+    let (id, path, is_self) = &candidates[idx];
     let now = now_secs();
     if let Err(e) = tx
         .execute(
@@ -258,7 +299,11 @@ async fn pick_with(
     .await
     .ok()?;
     tx.commit().await.ok()?;
-    Some(path.clone())
+    Some(PickedMeme {
+        path: path.clone(),
+        category: category.into(),
+        is_self: *is_self,
+    })
 }
 
 /// OneBot image 段 file 字段：file:// 绝对路径（正斜杠）
@@ -669,5 +714,49 @@ mod tests {
         let memes = dir.join("memes");
         std::fs::create_dir_all(&memes).unwrap();
         assert!(pick(&db, &memes, "不存在").await.is_none());
+    }
+    #[tokio::test]
+    async fn own_pack_has_priority_and_an_explicit_pack_never_crosses_over() {
+        let dir =
+            std::env::temp_dir().join(format!("yt-meme-pack-choice-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(dir.join("memes/哈")).unwrap();
+        let db = dir.join("db.sqlite");
+        let mut conn = crate::db::connect(&db).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        for (id, file, used) in [(1, "哈/other.png", 0), (2, "哈/cloud-v1-01-01.png", 999)] {
+            std::fs::write(dir.join("memes").join(file), b"image").unwrap();
+            conn.execute("INSERT INTO meme_library(id,file,category,md5,added_by,status,use_count,created_at) VALUES(?1,?2,'哈',?3,'admin','active',?4,1)",params![id,file,format!("meme-{id}"),used]).await.unwrap();
+        }
+        let own = pick_selected(&db, &dir.join("memes"), "哈", MemeScope::PreferSelf)
+            .await
+            .unwrap();
+        assert!(own.is_self, "不因外部图使用次数少而盖过云团图");
+        assert!(own.path.ends_with("cloud-v1-01-01.png"));
+        assert_eq!(own.history(), "（云团专属表情：哈）");
+        let other = pick_selected(&db, &dir.join("memes"), "哈", MemeScope::Other)
+            .await
+            .unwrap();
+        assert!(!other.is_self);
+        conn.execute(
+            "UPDATE meme_library SET status='pending' WHERE id=2",
+            params![],
+        )
+        .await
+        .unwrap();
+        assert!(
+            pick_selected(&db, &dir.join("memes"), "哈", MemeScope::SelfPack)
+                .await
+                .is_none()
+        );
+        assert!(
+            !pick_selected(&db, &dir.join("memes"), "哈", MemeScope::PreferSelf)
+                .await
+                .unwrap()
+                .is_self
+        );
+        let database = conn.database();
+        drop(conn);
+        database.close().await;
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

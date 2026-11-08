@@ -109,3 +109,5 @@ V11将原始消息、带出处事实、会话日记、画像当前投影和版�
 接话快照增加 `scene.activity` 与 `activity_as_of_ts`，按固定上界末条消息时间计算同群人类热度，周期批次不以最早消息时间误算，也不混入后到消息、其他Bot或同号私聊。`dialogue.group_recent_replies`至多保留近5分钟两条Bot实际发言（各180字）及真实原anchor（各120字），标明回复对象；理解群聊共同话题时不改变同一人的last_reply_to_sender归属，Bot旧回答仍不是事实证据。Chat预算不足先裁掉可选群内衔接，不挤掉锚点和引用。回归位于既有 `bot_context.rs`；参与阈值见[决策功能](decision.md)，不修改30天检索与长期记忆存放。
 
 快照增加bot_identity（self及SQLite身份表中的QQ别名，稳定资料段）和addressing（协议@/私聊确认的明确对象、引用作者及消息号）。Decision与Chat共享这些字段，原始mentions与引用作者不改写；明确@Bot不被引用作者覆盖，多人同时被@不强制选Bot。群聊周期输入仅复用Bot身份，实际锚点仍按批次选择。bot_context.rs覆盖“引用群友原文＋@云团改写”、同群他人对话、多人@和私聊，并验证读取不改原始记录。
+
+快照增加当前可见表情类别的self/other归属和实际发送统计，Decision与Chat共享meme_library。预算裁剪时派生图包清单随meme_categories同步收缩，避免目录回补已裁剪类别。成功发出的库存图保留类别、图包与真实回复锚点供短时承接；未送达或旧未知图片不虚构身份。数据仍在原messages表中，历史统计按chat_id/chat_type、固定消息上界和时间过滤，不更改人物事实或群聊长期记忆。

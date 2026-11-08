@@ -102,6 +102,7 @@
             <template v-if="sel.payload.policy">
               <n-space size="small" style="margin-bottom: 10px">
                 <n-tag size="small" :bordered="false">建议动作: {{ sel.payload.policy.suggested_action }}</n-tag>
+                <n-tag v-if="sel.payload.policy.meme_plan" size="small" :bordered="false">计划表情: {{ memeScopeLabel(sel.payload.policy.meme_plan.scope) }} · {{ sel.payload.policy.meme_plan.category }}</n-tag>
                 <n-tag v-if="sel.payload.reply_mode" size="small" :bordered="false">模式: {{ replyModeLabel(sel.payload.reply_mode) }}</n-tag>
                 <n-tag v-if="sel.payload.policy.evidence_valid === false" size="small" :bordered="false" type="warning">依据未通过</n-tag>
               </n-space>
@@ -143,6 +144,7 @@ const metrics = [{ key: 'pending', label: '待判断' }, { key: 'deciding', labe
 const stateOptions = metrics.map(m => ({ value: m.key, label: m.label }))
 function summary(e) { return e.kind === 'DecisionMade' ? [e.payload?.fallback ? '判断未完成' : actionLabel(e.payload?.action), e.payload?.reason].filter(Boolean).join(' · ') : eventSummary(e) }
 function replyModeLabel(mode) { return ({ answer: '答疑', social: '自然接话', clarify: '澄清', state_uncertainty: '说明不确定' })[mode] || mode }
+function memeScopeLabel(scope) { return ({ self: '云团专属', other: '其他图库', prefer_self: '优先云团' })[scope] || scope }
 function heatLabel(level) { return ({ quiet: '群聊安静', warming: '群聊渐热', lively: '群聊活跃', crowded: '群聊密集' })[level] || level }
 function actionLabel(action) { return ({ reply: '回应', ignore: '保持安静', send_meme: '发表情', start_task: '派发任务', invoke_skill: '调用技能' })[action] || action }
 function triggerLabel(trigger) { return ({ periodic: '群聊批次', immediate: '即时请求', task_result: '任务回聊', chat_loop: '聊天转路由' })[trigger] || trigger || '' }

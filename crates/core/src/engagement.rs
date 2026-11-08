@@ -99,6 +99,7 @@ pub struct PolicyTrace {
     pub notes: Vec<String>,
     pub activity: Option<Activity>,
     pub participation: Option<String>,
+    pub meme_plan: Option<serde_json::Value>,
 }
 
 pub struct PolicyInput<'a> {
@@ -134,7 +135,9 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         out.task_goal = None;
         out.skill_name = None;
         out.skill_slots = None;
-        out.request_quote = None;
+        if !out.meme_requested {
+            out.request_quote = None;
+        }
         if !matches!(
             out.action,
             DecisionAction::Reply | DecisionAction::SendMeme | DecisionAction::Ignore

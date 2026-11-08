@@ -28,6 +28,7 @@
 - [`crates/core/src/meme_pack.rs`](../../../crates/core/src/meme_pack.rs)
 - [`crates/core/src/meme_review.rs`](../../../crates/core/src/meme_review.rs)
 - [`crates/core/src/meme.rs`](../../../crates/core/src/meme.rs)
+- [`crates/core/src/meme/context.rs`](../../../crates/core/src/meme/context.rs)
 - [`crates/webui/src/memes.rs`](../../../crates/webui/src/memes.rs)
 - [`webui-frontend/src/views/Meme.vue`](../../../webui-frontend/src/views/Meme.vue)
 
@@ -40,3 +41,15 @@
 - [`webui-frontend/tests/memes-flow.spec.js`](../../../webui-frontend/tests/memes-flow.spec.js)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+## 专属图包、承接和聊天配图
+
+模型同时收到现有类别、云团专属/其他图库的类别归属、云团形象及当前会话实际已发表情。归属复用内置cloud-v1文件标记，不改历史分类或管理员状态；未分类的_inbox不作为模型可用类别。默认prefer_self在同类有效候选中优先云团，自选self/other严格限制到指定图包，指定图包缺货不偷偷换图。停用、缺文件及越界路径仍不可发送，不调用NAI补货。
+
+Decision的meme_type支持send_meme与reply附图，meme_scope为self/other/prefer_self；meme_requested与当前请求原话、对象及高把握意图共同确认明确索取。现有表情承接不派工或调用生图，实际新画面请求保留原技能路径。Chat指令支持`::meme self::类别`、`::meme other::类别`，无前缀优先云团。合法Decision配图计划不会因Chat只输出正文而丢失，每次至多一图。
+
+普通配图距最近已发表情至少30秒、每chat/type近5分钟最多4张；连续2轮纯文字时在输入中提示可考虑配图，语境仍由模型决定，不固定每几句强塞图片。明确索取现货使用独立原话与意图校验，可绕过普通配图间隔。实际发送队列再核对频率，不增加一次模型调用。以上是初始代码阈值，尚无频率调参控件；仅提高可用配图机会，不宣称真实用户群里的固定发送率。
+
+实际图片发送成功后才在self消息保存“云团专属/图库表情＋类别”和原reply_anchor_id；身份说明仅在历史与Trace中，不混进QQ图片正文。失败/不确定不写成已发送，不从旧的“图片”行猜类别或回填。按会话类型隔离的已发统计用于节奏判断，模型能承接“来张表情包→你自己的呢”。无需数据库迁移，V14及安装标记保持。
+
+管理页显示云团专属标签，并支持`GET /api/memes?pack=self|other`筛选；认证、分页、分类与删除沿用原规则。Trace区分计划的类别/图包与BubbleSent实际发送回执。新增回归位于meme.rs、meme/context.rs、reply_engine.rs、bot_context.rs，以及既有API/浏览器入口，验证图包不串用、计划落地、失败不假记、请求不误走生图及移动端显示；mock与构建不能替代实际模型或QQ验收。

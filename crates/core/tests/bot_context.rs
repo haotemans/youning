@@ -1377,3 +1377,154 @@ async fn protocol_bot_mention_and_quote_material_do_not_become_another_addressee
     }
     server.abort();
 }
+
+#[tokio::test]
+async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_generation() {
+    use serde_json::json;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use yuantuan_core::{decision, event, llm, skills, state};
+    use yuantuan_plugin_api::SkillDef;
+    let rig = Rig::new().await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    for (file, category, key) in [
+        ("比心/cloud-v1-01-01.png", "比心", "owned"),
+        ("哈/other.png", "哈", "other"),
+    ] {
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,use_count,created_at) VALUES(?1,?2,?3,'admin','active',0,1)",params![file,category,key]).await.unwrap();
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    let app=axum::Router::new().route("/chat/completions",axum::routing::post(move |axum::Json(body):axum::Json<Value>| {
+        let counter=counter.clone();
+        async move {
+            counter.fetch_add(1,Ordering::SeqCst);
+            let ctx:Value=serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+            let text=ctx["anchor"]["text"].as_str().unwrap();
+            let normal=text=="聊得真开心";
+            let generation=text=="画一张新的海边猫娘图";
+            let mismatch=text=="我要库存自己的表情";
+            let empty=text=="你自己的呢，但库存已停用";
+            if !empty { assert_eq!(ctx["meme_library"]["self_pack"]["categories"],json!(["比心"])); }
+            if text=="你自己的呢" {
+                assert!(ctx["dialogue"]["last_reply_to_sender"]["text"].as_str().unwrap().contains("图库表情"));
+            }
+            if normal { assert_eq!(ctx["meme_library"]["usage"]["consider_meme"],true); }
+            let mut evidence=vec![ctx["anchor"]["msg_id"].clone()];
+            if text=="你自己的呢" {evidence.push(ctx["dialogue"]["last_reply_to_sender"]["msg_id"].clone());}
+            let out=json!({"action":if generation || mismatch {"invoke_skill"}else if normal {"reply"}else{"send_meme"},
+                "mood":"happy","mention":false,"reply_len":"short","reason":"结合上下文和库存选表情",
+                "meme_type":if generation {Value::Null}else if empty {json!("哈")}else{json!("比心")},"meme_scope":"self","meme_requested":!normal && !generation,
+                "request_quote":text,"skill_name":"nai-image.generate","skill_slots":{"prompt":"a cat girl beside the sea"},
+                "assessment":{"audience":"bot","intent":if text=="你自己的呢" {"follow_up"}else if normal {"banter"}else{"request"},"continuity":"continuing","confidence":"high","benefit":"medium","novelty":"new","evidence":"not_needed","evidence_msg_ids":evidence}});
+            axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let providers = rig.dir.join("providers.toml");
+    std::fs::write(&providers,format!("[provider.mock]\nbase_url=\"http://{addr}\"\n[roles]\ndecision={{provider=\"mock\",model=\"mock\"}}\n")).unwrap();
+    let gateway = llm::LlmGateway::load(&providers).unwrap();
+    let registry = skills::SkillRegistry::new();
+    registry.register_arc(Arc::new(skills::SkillImpl::new(SkillDef {
+        name: "nai-image.generate",
+        description: "绘制全新图片",
+        prompt_template: String::new(),
+        tools: vec![],
+        role_hint: None,
+    })));
+    for (index, (text, expected)) in [
+        ("你自己的呢", "send_meme"),
+        ("聊得真开心", "reply"),
+        ("我要库存自己的表情", "reply"),
+        ("画一张新的海边猫娘图", "invoke_skill"),
+        ("你自己的呢，但库存已停用", "reply"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let chat = format!("meme-{index}");
+        if index == 0 {
+            let source = rig.message("p_a", &chat, "来张表情包", None, None).await;
+            let previous = rig
+                .message("self", &chat, "（图库表情：哈）", None, None)
+                .await;
+            conn.execute(
+                "UPDATE messages SET reply_anchor_id=?1,has_image=1 WHERE msg_id=?2",
+                params![source.msg_id, previous.msg_id],
+            )
+            .await
+            .unwrap();
+        }
+        if index == 1 {
+            rig.message("self", &chat, "第一轮轻松聊天", None, None)
+                .await;
+            rig.message("self", &chat, "第二轮轻松聊天", None, None)
+                .await;
+        }
+        if index == 4 {
+            conn.execute(
+                "UPDATE meme_library SET status='pending' WHERE md5='owned'",
+                params![],
+            )
+            .await
+            .unwrap();
+        }
+        let msg = rig.message("p_a", &chat, text, None, None).await;
+        let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
+            .await
+            .unwrap();
+        let bus = event::EventBus::new(16);
+        let mut rx = bus.subscribe();
+        let outcome = decision::decide(
+            &rig.path,
+            &gateway,
+            &bus,
+            &state::MoodState::default(),
+            &msg,
+            Some(&registry),
+            &snapshot,
+        )
+        .await;
+        assert_eq!(outcome.output.action.as_str(), *expected, "{text}");
+        assert!(!outcome.fallback);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            index + 1,
+            "选表情不增加模型轮次"
+        );
+        if index == 0 {
+            assert!(
+                outcome.output.meme_requested,
+                "明确承接索取不被普通配图频率拦住"
+            );
+        }
+        if index == 2 {
+            assert!(
+                outcome.output.skill_name.is_none() && outcome.output.task_goal.is_none(),
+                "库存请求不能调用NAI或派工"
+            );
+        }
+        if index == 4 {
+            assert!(
+                outcome.output.meme_type.is_none(),
+                "指定云团图包没有的类别不回退到外部图"
+            );
+        }
+        if index == 1 {
+            assert_eq!(outcome.output.meme_type.as_deref(), Some("比心"));
+            loop {
+                if let event::Event::DecisionMade(d) = rx.recv().await.unwrap() {
+                    assert_eq!(d.policy.meme_plan.unwrap()["scope"], "self");
+                    break;
+                }
+            }
+        }
+    }
+    server.abort();
+}

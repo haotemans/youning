@@ -573,11 +573,24 @@ async fn execute_outcome(
             match deps.reply.as_ref() {
                 Some(engine) => match reply_engine_route(m) {
                     Ok((chat_type, target)) => {
-                        let picked = meme::pick(&deps.db_path, &deps.memes_dir, &cat).await;
+                        let picked = meme::pick_selected(
+                            &deps.db_path,
+                            &deps.memes_dir,
+                            &cat,
+                            outcome.output.meme_scope,
+                        )
+                        .await;
                         match picked {
                             Some(path) => {
                                 info!(chat_id = %m.chat_id, category = %cat, "send_meme 抽图入队");
-                                engine.enqueue_image(m.chat_id.clone(), chat_type, target, path);
+                                engine.enqueue_meme(
+                                    m.chat_id.clone(),
+                                    chat_type,
+                                    target,
+                                    m.msg_id,
+                                    path,
+                                    outcome.output.meme_requested,
+                                );
                             }
                             None => {
                                 debug!(chat_id = %m.chat_id, category = %cat, "meme 库空，跳过发图");
