@@ -92,6 +92,6 @@ social只允许reply/send_meme/ignore，清除任务/技能/控制字段；有�
 
 ## 协议指向与引用素材
 
-`bot_identity`来自SQLite中已登记的self/QQ身份，不从引用正文认身份；`addressing`区分当前用户@的对象和quoted_messages的作者。私聊、或at_me=true且只有一个@/所有@均为Bot已知别名，才标explicit_target=bot。多个真实接收对象不作唯一指向结论；原始mentions保留不改写。引用群友的话请云团改写、解释或分析时，引用是素材，当前anchor才是请求者及请求原话来源。
+`bot_identity`来自SQLite中已登记的self/QQ身份，不从引用正文认身份；`addressing`区分当前用户@的对象和quoted_messages的作者。私聊、或at_me=true且只有一个@/所有@均为Bot已知别名，才标explicit_target=bot。普通他人对话及被拒绝的工具动作不转为回应；多个真实接收对象不作唯一指向结论；原始mentions保留不改写。引用群友的话请云团改写、解释或分析时，引用是素材，当前anchor才是请求者及请求原话来源。
 
-Runtime发现明确协议指向与模型audience=other矛盾时校正对象。只有高把握、有效可见消息依据、非closing、request/question/follow_up/correction的矛盾ignore可改为short普通reply；清空任务、技能、执行原话和控制字段，不增加Decision调用或扩大执行授权。普通ignore、stop/ack、低把握、伪造依据及多人@保持原处理。Chat随后仍按材料完整性回答或澄清，不凭空补引用。此为[ADR-0016](../adr/0016-protocol-target-before-quote-author.md)对“ignore不升级”的窄范围修订，不是每个@都必须回。
+Runtime仅纠正带有可见引用素材的处理请求：明确协议指向、高把握、有效可见消息依据、非closing的request，且模型直接建议audience=other及ignore，才改为short普通reply；清空任务、技能、执行原话和控制字段，不增加Decision调用或扩大执行授权。普通ignore、无引用、question、面向他人的reply或被拒绝工具请求、stop/ack、低把握、伪造依据及多人@保持原处理。Chat随后仍按材料完整性回答或澄清，不凭空补引用。此为[ADR-0016](../adr/0016-protocol-target-before-quote-author.md)对“ignore不升级”的窄范围修订，不是每个@都必须回。

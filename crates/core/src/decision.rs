@@ -661,6 +661,7 @@ async fn finish_decision(
                     direct: is_directed(msg, snapshot),
                     protocol_direct: (msg.at_me || msg.chat_type == "private")
                         && snapshot.addressing["explicit_target"] == "bot",
+                    quoted_material: !snapshot.quoted_messages.is_empty(),
                     information_lookup,
                     anchor_id: msg.msg_id,
                     visible_ids: &visible_ids,
