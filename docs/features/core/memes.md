@@ -55,3 +55,7 @@ Decision的meme_type支持send_meme与reply附图，meme_scope为self/other/pref
 管理页显示云团专属标签，并支持`GET /api/memes?pack=self|other`筛选；认证、分页、分类与删除沿用原规则。Trace区分计划的类别/图包与BubbleSent实际发送回执。新增回归位于meme.rs、meme/context.rs、reply_engine.rs、bot_context.rs，以及既有API/浏览器入口，验证图包不串用、计划落地、失败不假记、请求不误走生图及移动端显示；mock与构建不能替代实际模型或QQ验收。
 
 库存选图结果附带图库ID，成功发送后供视觉回看；不更改选图、图包归属、审核状态与发送控频。旧图片不通过类别猜测具体文件。详见[回复发送](replies.md)和[图片语境](memory.md)。
+
+专属归属的cloud-v1标记同时支持PNG、GIF、JPG/JPEG与WebP，Rust选图、Context目录和SQL/API筛选共用同一规则，兼容大小写及Windows路径分隔符；视频和其他扩展名不能仅凭标记进入专属图包。动图仍走原始文件base64发送，不以首帧判断结果替换发送文件，预览保留image/gif。新导入的用户图保存在运行图库，不写入Git或覆盖内置安装标记。每图8MiB上限、active状态、目录范围、原会话控频不变。
+
+meme/context.rs增加格式与SQL一致性回归；reply_engine.rs使用两帧GIF验证原始字节、帧数、专属历史及图片来源；memes_api.rs验证专属GIF筛选和预览类型。Linux CI在全量测试前执行owned_专项；mock传输与API检查不等于真实QQ客户端已播放验收。

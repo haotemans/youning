@@ -2104,6 +2104,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
     #[tokio::test]
+    async fn owned_gif_delivery_preserves_original_frames_and_identity() {
+        use image::AnimationDecoder;
+        let dir = std::env::temp_dir().join(format!("yt-owned-gif-{}", rand::random::<u64>()));
+        std::fs::create_dir_all(dir.join("memes/摇摆")).unwrap();
+        let path = dir.join("db.sqlite");
+        let mut conn = crate::db::connect(&path).await.unwrap();
+        crate::db::migrate(&mut conn).await.unwrap();
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            encoder
+                .set_repeat(image::codecs::gif::Repeat::Infinite)
+                .unwrap();
+            encoder
+                .encode_frames(
+                    [[255, 0, 0, 255], [0, 0, 255, 255]]
+                        .into_iter()
+                        .map(|color| {
+                            image::Frame::new(image::RgbaImage::from_pixel(
+                                2,
+                                2,
+                                image::Rgba(color),
+                            ))
+                        }),
+                )
+                .unwrap();
+        }
+        let file = "摇摆/cloud-v1-animated.gif";
+        std::fs::write(dir.join("memes").join(file), &gif).unwrap();
+        conn.execute("INSERT INTO meme_library(file,category,md5,added_by,status,created_at) VALUES(?1,'摇摆','gif-fixture','admin','active',1)",params![file]).await.unwrap();
+        let picked =
+            meme::pick_selected(&path, &dir.join("memes"), "摇摆", meme::MemeScope::SelfPack)
+                .await
+                .unwrap();
+        assert!(picked.is_self);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let send: SendFn = Arc::new(move |req| {
+            tx.send(req).unwrap();
+            Box::pin(async { Ok(json!({"message_id":77})) })
+        });
+        let engine = Arc::new(ReplyEngine::new(
+            path.clone(),
+            EventBus::default(),
+            send,
+            SelfMsgIds::default(),
+            Arc::new(std::sync::RwLock::new(ReplyCfg::default())),
+            MoodState::default(),
+        ));
+        let job = ReplyJob {
+            chat_id: "dm_gif".into(),
+            chat_type: ChatType::Private,
+            target: 1,
+            anchor_msg_id: 0,
+            mention: false,
+            mention_qq: None,
+            kind: JobKind::Meme {
+                image: picked.clone(),
+                requested: true,
+            },
+        };
+        process_meme(&engine, &job, &picked, true).await;
+        let request = rx.try_recv().unwrap();
+        let encoded = request.segments[0]["data"]["file"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("base64://")
+            .unwrap();
+        let delivered = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        assert_eq!(delivered, gif, "发送原始GIF字节，不截取首帧或转存PNG");
+        let frames = image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&delivered))
+            .unwrap()
+            .into_frames()
+            .collect_frames()
+            .unwrap();
+        assert_eq!(frames.len(), 2);
+        let text: String = sqlx::query_scalar("SELECT text FROM messages WHERE sender_pid='self'")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(text, "（云团专属表情：摇摆）");
+        let id: i64 = sqlx::query_scalar("SELECT meme_id FROM message_images")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(id, picked.id);
+    }
+
+    #[tokio::test]
     async fn real_meme_delivery_keeps_identity_and_anchor_without_sending_internal_metadata() {
         let dir = std::env::temp_dir().join(format!("yt-owned-delivery-{}", rand::random::<u64>()));
         std::fs::create_dir_all(dir.join("memes/比心")).unwrap();

@@ -208,3 +208,19 @@ async fn own_pack_filter_and_identity_are_authenticated_and_match_runtime_owners
     assert_eq!(invalid.status(),StatusCode::BAD_REQUEST);
     assert_eq!(rig.http.get(format!("{}/api/memes?pack=self",rig.base)).send().await.unwrap().status(),StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn owned_gif_filter_and_preview_keep_the_gif_content_type() {
+    let rig = Rig::start().await;
+    let mut conn = db::connect(&rig.dir.join("yuantuan.db")).await.unwrap();
+    std::fs::create_dir_all(rig.dir.join("memes/开心")).unwrap();
+    let file = "开心/cloud-v1-extra.gif";
+    std::fs::write(rig.dir.join("memes").join(file), b"GIF89a-preview").unwrap();
+    conn.execute("UPDATE meme_library SET file=?1 WHERE id=29",params![file]).await.unwrap();
+    let own=rig.get("/api/memes?status=active&pack=self&page=1").await;
+    assert_eq!(own["total"],1);
+    assert_eq!(own["memes"][0]["pack"],"self");
+    let preview=rig.http.get(format!("{}/api/meme-file/29",rig.base)).bearer_auth(&rig.token).send().await.unwrap();
+    assert_eq!(preview.headers()["content-type"],"image/gif");
+    assert_eq!(preview.bytes().await.unwrap().as_ref(),b"GIF89a-preview");
+}
