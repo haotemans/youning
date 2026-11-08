@@ -1486,7 +1486,7 @@ async fn insert_self_message_with_image(
             (SELECT msg_id FROM messages WHERE msg_id=?7 AND chat_id=?1 AND chat_type=?2 AND sender_pid!='self')) RETURNING msg_id")
             .bind(&job.chat_id).bind(kind).bind(text).bind(has_image as i64).bind(now).bind(external_msg_id).bind(job.anchor_msg_id).fetch_one(&mut *tx).await?;
         if let Some(meme_id) = meme_id {
-            tx.execute("INSERT INTO message_images(msg_id,image_index,url,meme_id) VALUES(?1,0,'',?2)",params![id,meme_id]).await?;
+            tx.execute("INSERT INTO message_images(msg_id,image_index,url,meme_id) SELECT ?1,0,'',id FROM meme_library WHERE id=?2",params![id,meme_id]).await?;
         }
         tx.commit().await?;
         Ok(())
