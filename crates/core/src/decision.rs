@@ -689,6 +689,30 @@ async fn finish_decision(
                 .notes
                 .push("任务请求或技能目录约束已调整模型建议".into());
         }
+        // Stock reactions in public discussion are social participation even
+        // when an older classifier omits reply_mode. This does not promote ignore.
+        if matches!(o.action, DecisionAction::Reply | DecisionAction::SendMeme)
+            && o.meme_type.is_some()
+            && o.reply_mode == crate::engagement::ReplyMode::Answer
+            && msg.chat_type == "group"
+            && !is_directed(msg, snapshot)
+            && o.assessment.as_ref().is_some_and(|a| {
+                a.audience == crate::engagement::Audience::Group
+                    && matches!(
+                        a.intent,
+                        crate::engagement::Intent::Sharing
+                            | crate::engagement::Intent::Banter
+                            | crate::engagement::Intent::FollowUp
+                            | crate::engagement::Intent::Acknowledgment
+                    )
+            })
+        {
+            o.reply_mode = crate::engagement::ReplyMode::Social;
+            policy.participation = Some("social".into());
+            policy
+                .notes
+                .push("公开话题的库存表情按社交参与处理，仍核对依据、热度与频率".into());
+        }
         if o.assessment.is_some() || o.reply_mode == crate::engagement::ReplyMode::Social {
             let information_lookup = o.action == DecisionAction::InvokeSkill
                 && o.skill_name

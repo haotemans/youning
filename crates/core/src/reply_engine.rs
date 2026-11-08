@@ -1683,6 +1683,7 @@ pub(crate) fn route_of(msg: &MessageReceivedPayload) -> Result<(ChatType, u64, O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[tokio::test]
     async fn mixed_reply_keeps_text_and_one_meme_even_when_bubbles_are_merged() {

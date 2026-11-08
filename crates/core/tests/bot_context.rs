@@ -1404,6 +1404,7 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
             let ctx:Value=serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
             let text=ctx["anchor"]["text"].as_str().unwrap();
             let normal=text=="聊得真开心";
+            let public=text=="项目过验收啦";
             let generation=text=="画一张新的海边猫娘图";
             let mismatch=text=="我要库存自己的表情";
             let empty=text=="你自己的呢，但库存已停用";
@@ -1416,9 +1417,9 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
             if text=="你自己的呢" {evidence.push(ctx["dialogue"]["last_reply_to_sender"]["msg_id"].clone());}
             let out=json!({"action":if generation || mismatch {"invoke_skill"}else if normal {"reply"}else{"send_meme"},
                 "mood":"happy","mention":false,"reply_len":"short","reason":"结合上下文和库存选表情",
-                "meme_type":if generation {Value::Null}else if empty {json!("哈")}else{json!("比心")},"meme_scope":"self","meme_requested":!normal && !generation,
+                "meme_type":if generation {Value::Null}else if empty {json!("哈")}else{json!("比心")},"meme_scope":"self","meme_requested":!normal && !generation && !public,
                 "request_quote":text,"skill_name":"nai-image.generate","skill_slots":{"prompt":"a cat girl beside the sea"},
-                "assessment":{"audience":"bot","intent":if text=="你自己的呢" {"follow_up"}else if normal {"banter"}else{"request"},"continuity":"continuing","confidence":"high","benefit":"medium","novelty":"new","evidence":"not_needed","evidence_msg_ids":evidence}});
+                "assessment":{"audience":if public {"group"}else{"bot"},"intent":if public {"sharing"}else if text=="你自己的呢" {"follow_up"}else if normal {"banter"}else{"request"},"continuity":"continuing","confidence":"high","benefit":"medium","novelty":"new","evidence":"not_needed","evidence_msg_ids":evidence}});
             axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
         }
     }));
@@ -1443,6 +1444,7 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
         ("聊得真开心", "reply"),
         ("我要库存自己的表情", "reply"),
         ("画一张新的海边猫娘图", "invoke_skill"),
+        ("项目过验收啦", "send_meme"),
         ("你自己的呢，但库存已停用", "reply"),
     ]
     .iter()
@@ -1467,7 +1469,7 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
             rig.message("self", &chat, "第二轮轻松聊天", None, None)
                 .await;
         }
-        if index == 4 {
+        if index == 5 {
             conn.execute(
                 "UPDATE meme_library SET status='pending' WHERE md5='owned'",
                 params![],
@@ -1475,7 +1477,15 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
             .await
             .unwrap();
         }
-        let msg = rig.message("p_a", &chat, text, None, None).await;
+        if *text == "项目过验收啦" {
+            for pid in ["p_b", "p_c", "p_b"] {
+                rig.message(pid, &chat, "一起庆祝", None, None).await;
+            }
+        }
+        let mut msg = rig.message("p_a", &chat, text, None, None).await;
+        if *text == "项目过验收啦" {
+            msg.at_me = false;
+        }
         let snapshot = capture_reply_snapshot(&rig.path, &msg, msg.msg_id, &ContextCfg::default())
             .await
             .unwrap();
@@ -1510,10 +1520,17 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
                 "库存请求不能调用NAI或派工"
             );
         }
-        if index == 4 {
+        if index == 5 {
             assert!(
                 outcome.output.meme_type.is_none(),
                 "指定云团图包没有的类别不回退到外部图"
+            );
+        }
+        if *text == "项目过验收啦" {
+            assert_eq!(
+                outcome.output.reply_mode,
+                yuantuan_core::engagement::ReplyMode::Social,
+                "省略模式的公开库存表情仍按社交规则检查"
             );
         }
         if index == 1 {
