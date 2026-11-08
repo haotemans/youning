@@ -1140,6 +1140,7 @@ mod tests {
             Box::pin(async { Ok(serde_json::json!({"message_id":1})) })
         });
         let bus = EventBus::default();
+        let mut delivered = bus.subscribe();
         let mood = MoodState::default();
         let cfg = Arc::new(RwLock::new(reply_engine::ReplyCfg {
             first_delay_min_ms: 0,
@@ -1268,6 +1269,21 @@ mod tests {
         mention.has_image = false;
         mention.reply_to = Some(123);
         assert!(!is_bare_mention(&mention));
+        // The fake transport records a send before SQLite history and the
+        // BubbleSent receipt finish. Wait on delivery, not an early Vec write;
+        // a short shutdown deadline must not double as a DB completion timeout.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut completed = 0;
+            while completed < 6 {
+                if let Event::BubbleSent(result) = delivered.recv().await.unwrap() {
+                    if result.ok {
+                        completed += 1;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("all six plugin/greeting deliveries must finish");
         assert!(engine.shutdown(std::time::Duration::from_secs(3)).await);
         let sent = sent.lock().unwrap();
         assert_eq!(sent.len(), 6);
