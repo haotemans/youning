@@ -267,6 +267,7 @@ pub async fn decide(
         retries,
         visible_ids,
         started,
+        &[],
     )
     .await
 }
@@ -436,6 +437,7 @@ pub async fn decide_periodic(
         retries,
         visible_ids,
         started,
+        &ids,
     )
     .await;
     Ok((selected, snapshot, outcome))
@@ -453,6 +455,7 @@ async fn finish_decision(
     retries: u32,
     visible_ids: std::collections::BTreeSet<i64>,
     started: Instant,
+    batch_message_ids: &[i64],
 ) -> DecisionOutcome {
     let mut policy = crate::engagement::PolicyTrace {
         version: 2,
@@ -571,7 +574,21 @@ async fn finish_decision(
     // action 是 Runtime 最终动作；模型的原建议保存在 policy 中。
     bus.publish(Event::DecisionMade(DecisionMadePayload {
         chat_id: msg.chat_id.clone(),
+        chat_type: msg.chat_type.clone(),
         sender_pid: msg.sender_pid.clone(),
+        sender_name: snapshot.anchor.nickname.clone(),
+        anchor_msg_id: msg.msg_id,
+        trigger: if !batch_message_ids.is_empty() {
+            "periodic"
+        } else if snapshot.delivery_task.is_some() {
+            "task_result"
+        } else if snapshot.execution_request.is_some() {
+            "chat_loop"
+        } else {
+            "immediate"
+        }
+        .into(),
+        batch_message_ids: batch_message_ids.to_vec(),
         text: truncate_chars(&msg.text, 100),
         action: output.action.as_str().into(),
         mood: output.mood.as_str().into(),

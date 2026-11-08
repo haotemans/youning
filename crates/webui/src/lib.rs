@@ -41,6 +41,7 @@ pub async fn serve(db_path: PathBuf, host: &str, port: u16, extras: Extras) -> R
         .route("/api/overview", get(overview::overview))
         .route("/api/dashboard", get(dashboard::dashboard))
         .route("/api/events", get(events_api::list))
+        .route("/api/decisions/status", get(events_api::decision_status))
         .route("/api/memes", get(memes::list))
         .route("/api/memes/batch", post(memes::batch))
         .route("/api/memes/{id}/approve", post(memes::approve))

@@ -32,7 +32,12 @@ pub struct MessageReceivedPayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct DecisionMadePayload {
     pub chat_id: String,
+    pub chat_type: String,
     pub sender_pid: String,
+    pub sender_name: String,
+    pub anchor_msg_id: i64,
+    pub trigger: String,
+    pub batch_message_ids: Vec<i64>,
     /// 触发消息正文截断（≤100 字）
     pub text: String,
     pub action: String,
@@ -93,7 +98,7 @@ pub struct TaskLifecyclePayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind")]
 pub enum Event {
-    MembershipRequestReceived { request_id:i64, chat_id:String },
+    MembershipRequestReceived { request_id: i64, chat_id: String },
     MessageReceived(MessageReceivedPayload),
     MessageSent,
     BubbleSent(BubbleSentPayload),
@@ -115,7 +120,7 @@ pub enum Event {
 impl Event {
     pub fn kind(&self) -> &'static str {
         match self {
-            Event::MembershipRequestReceived {..} => "MembershipRequestReceived",
+            Event::MembershipRequestReceived { .. } => "MembershipRequestReceived",
             Event::MessageReceived(_) => "MessageReceived",
             Event::MessageSent => "MessageSent",
             Event::BubbleSent(_) => "BubbleSent",
