@@ -93,7 +93,8 @@
         "crates/core/src/memory/semantic.rs",
         "crates/core/src/memory/material_cache.rs",
         "crates/core/src/vision/cache.rs",
-        "crates/core/src/vision/registered.rs"
+        "crates/core/src/vision/registered.rs",
+        "crates/core/src/context_builder/conversation.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",

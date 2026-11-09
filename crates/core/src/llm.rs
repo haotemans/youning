@@ -669,6 +669,7 @@ impl LlmGateway {
             .get(&role)
             .ok_or_else(|| anyhow!("角色 {role} 未配置或不可用"))?
             .clone();
+        let queued = Instant::now();
         self.gate.acquire().await;
         // Q53：全局并发上限——三角色共享 4 许可，超出排队等待
         let _permit = self
@@ -720,12 +721,18 @@ impl LlmGateway {
         if let Some(k) = &r.api_key {
             req = req.bearer_auth(k);
         }
-        let resp = req
-            .send()
-            .await
-            .with_context(|| format!("角色 {role} 请求失败"))?;
+        let queue_ms = queued.elapsed().as_millis() as u64;
+        let requested = Instant::now();
+        let resp = match req.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::info!(role=%role, queue_ms, request_ms=requested.elapsed().as_millis() as u64, transport_ok=false, "LLM请求计时");
+                return Err(error).with_context(|| format!("角色 {role} 请求失败"));
+            }
+        };
         let status = resp.status();
         let text = resp.text().await.context("读取 LLM 响应体失败")?;
+        tracing::info!(role=%role, queue_ms, request_ms=requested.elapsed().as_millis() as u64, status=status.as_u16(), system_bytes=system.len(), user_bytes=text_bytes, "LLM请求计时");
         if !status.is_success() {
             let error = HttpFailure {
                 status: status.as_u16(),

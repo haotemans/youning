@@ -177,8 +177,8 @@ async fn model_cannot_start_tasks_without_a_source_request() {
         let ctx: Value = serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
         assert!(ctx["recent_messages"].is_array());
         let out = json!({"action":"start_task","mood":"calm","mention":false,"reply_len":"short","reason":"模拟模型过度主动接单",
-            "task_goal":"运行测试","request_quote":ctx["anchor"]["text"],
-            "assessment":{"audience":"bot","intent":if ctx["anchor"]["text"]=="请帮我运行 Python 测试" {"request"} else {"sharing"},
+            "task_goal":"运行测试","request_quote":if ctx["dialogue"]["attention_request"].is_object() {ctx["dialogue"]["attention_request"]["source"]["text"].clone()} else {ctx["anchor"]["text"].clone()},
+            "assessment":{"audience":"bot","intent":if ctx["anchor"]["text"]=="请帮我运行 Python 测试" || ctx["dialogue"]["attention_request"].is_object() {"request"} else {"sharing"},
                 "continuity":"new_topic","confidence":"high","benefit":"high","novelty":"new","evidence":"not_needed","evidence_msg_ids":[ctx["anchor"]["msg_id"]]}});
         axum::Json(json!({"choices":[{"message":{"content":out.to_string()},"finish_reason":"stop"}]}))
     }));
@@ -195,6 +195,7 @@ async fn model_cannot_start_tasks_without_a_source_request() {
         ("版本更新说明：新增地图，下周开放", true, "reply"),
         ("有人说：请帮我运行测试", false, "ignore"),
         ("请帮我运行 Python 测试", true, "start_task"),
+        (" ", true, "reply"),
     ] {
         let mut msg = rig.message("p_a", "123", text, None, None).await;
         msg.at_me = directed;
@@ -212,6 +213,14 @@ async fn model_cannot_start_tasks_without_a_source_request() {
         )
         .await;
         assert_eq!(out.output.action.as_str(), expected, "{text}");
+        if text.trim().is_empty() {
+            assert!(snapshot.dialogue["attention_request"].is_object());
+            assert!(
+                out.output.task_goal.is_none(),
+                "补发@不能重新授权旧执行原话"
+            );
+            assert!(out.output.task_control.is_none());
+        }
         assert!(!out.fallback);
         assert_eq!(out.retries, 0);
     }
@@ -1544,4 +1553,124 @@ async fn own_meme_followups_and_reply_attachments_use_stock_without_authorizing_
         }
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn bare_attention_retains_unanswered_same_author_input_without_replacing_the_anchor() {
+    let rig = Rig::new().await;
+    let question = rig
+        .message("p_a", "123", "sd系列的大模型支持画师串吗", None, None)
+        .await;
+    let mut conn = db::connect(&rig.path).await.unwrap();
+    conn.execute(
+        "UPDATE messages SET at_me=0,decision_state='done',processed_at=100 WHERE msg_id=?1",
+        params![question.msg_id],
+    )
+    .await
+    .unwrap();
+    rig.message("p_b", "123", "另一个人的话题", None, None)
+        .await;
+    let attention = rig.message("p_a", "123", " ", None, None).await;
+    let future = rig
+        .message("p_a", "123", "后来的问题不能泄漏进旧快照", None, None)
+        .await;
+    let cfg = ContextCfg {
+        k_init: 1,
+        ..ContextCfg::default()
+    };
+    let snap = capture_reply_snapshot(&rig.path, &attention, attention.msg_id, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(snap.anchor.msg_id, attention.msg_id);
+    assert_eq!(snap.anchor.text, " ", "不能把旧原话伪造成当前执行授权");
+    assert_eq!(
+        snap.dialogue["attention_request"]["source"]["msg_id"],
+        question.msg_id
+    );
+    assert_eq!(
+        snap.dialogue["attention_request"]["source"]["text"],
+        question.text
+    );
+    assert_eq!(
+        snap.dialogue["attention_request"]["execution_authorization"],
+        false
+    );
+    let rendered = render_bot_context(&snap, MoodValue::Calm, &cfg).unwrap();
+    let body: Value = serde_json::from_str(&rendered.user).unwrap();
+    assert_eq!(
+        body["dialogue"]["attention_request"]["source"]["msg_id"],
+        question.msg_id
+    );
+    assert!(!rendered.user.contains(&future.text));
+    for update in [
+        "UPDATE messages SET ts=-201 WHERE msg_id=?1",
+        "UPDATE messages SET ts=100,mentions='[\"p_other\"]' WHERE msg_id=?1",
+    ] {
+        conn.execute(update, params![question.msg_id])
+            .await
+            .unwrap();
+        let snap = capture_reply_snapshot(&rig.path, &attention, attention.msg_id, &cfg)
+            .await
+            .unwrap();
+        assert!(
+            snap.dialogue["attention_request"].is_null(),
+            "不承接过期或面向他人的原话"
+        );
+    }
+    conn.execute("UPDATE messages SET mentions='[]',decision_state='executing',processed_at=NULL WHERE msg_id=?1",params![question.msg_id]).await.unwrap();
+    let snap = capture_reply_snapshot(&rig.path, &attention, attention.msg_id, &cfg)
+        .await
+        .unwrap();
+    assert_eq!(
+        snap.dialogue["pending_requests"][0]["message"]["msg_id"],
+        question.msg_id
+    );
+    assert_eq!(snap.dialogue["pending_requests"][0]["state"], "executing");
+    conn.execute(
+        "UPDATE messages SET decision_state='done',processed_at=100 WHERE msg_id=?1",
+        params![question.msg_id],
+    )
+    .await
+    .unwrap();
+    for (person, chat, private) in [
+        ("p_c", "123", false),
+        ("p_a", "456", false),
+        ("p_a", "123", true),
+    ] {
+        let mut other = rig.message(person, chat, " ", None, None).await;
+        if private {
+            other.chat_type = "private".into();
+            conn.execute(
+                "UPDATE messages SET chat_type='private' WHERE msg_id=?1",
+                params![other.msg_id],
+            )
+            .await
+            .unwrap();
+        }
+        let snap = capture_reply_snapshot(&rig.path, &other, other.msg_id, &cfg)
+            .await
+            .unwrap();
+        assert!(
+            snap.dialogue["attention_request"].is_null(),
+            "不借用别人的、跨群或私聊的待答问题"
+        );
+        assert_eq!(snap.dialogue["pending_requests"], serde_json::json!([]));
+    }
+    let answer = rig
+        .message("self", "123", "已经回答原问题", None, None)
+        .await;
+    conn.execute(
+        "UPDATE messages SET reply_anchor_id=?1 WHERE msg_id=?2",
+        params![future.msg_id, answer.msg_id],
+    )
+    .await
+    .unwrap();
+    let again = rig.message("p_a", "123", " ", None, None).await;
+    let snap = capture_reply_snapshot(&rig.path, &again, again.msg_id, &cfg)
+        .await
+        .unwrap();
+    assert!(
+        snap.dialogue["attention_request"].is_null(),
+        "已经实际回复过的上一条不重复认领"
+    );
 }

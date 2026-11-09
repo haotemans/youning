@@ -323,24 +323,6 @@ async fn handle_inner(
     {
         Verdict::Drop(rule) => debug!(rule, chat_id = %m.chat_id, "Prefilter 丢弃"),
         Verdict::Pass => {
-            // A bare mention is a greeting, not an expensive model request. Keep
-            // self/bot filtering above and preserve image/quoted-message context.
-            if is_bare_mention(m) {
-                enqueue_direct_reply(deps, m, "在呢，想让我帮你做什么？");
-                return None;
-            }
-            let gw = match deps.llm.read().unwrap().clone() {
-                Some(g) if g.role(Role::Decision).is_some() => g,
-                _ => {
-                    debug!(chat_id = %m.chat_id, "Decision 角色不可用");
-                    return Some(decision::DecisionFailure {
-                        reason: "Decision角色未配置，请在模型服务绑定模型".into(),
-                        terminal: true,
-                    });
-                }
-            };
-            // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
-            gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
             let ctx_cfg = *deps.ctx_cfg.read().unwrap();
             let mut snapshot = match crate::context_builder::capture_reply_snapshot(
                 &deps.db_path,
@@ -356,12 +338,45 @@ async fn handle_inner(
                     return pending_failure("回复上下文或处理状态暂时不可用");
                 }
             };
+            if is_bare_mention(m) {
+                let source = snapshot.dialogue["attention_request"]["source"]["msg_id"].as_i64();
+                if source.is_none() {
+                    enqueue_direct_reply(deps, m, "在呢。");
+                    return None;
+                }
+                if snapshot.dialogue["pending_requests"]
+                    .as_array()
+                    .is_some_and(|rows| {
+                        rows.iter()
+                            .any(|r| r["message"]["msg_id"].as_i64() == source)
+                    })
+                {
+                    enqueue_direct_reply(deps, m, "上一条还在处理。");
+                    return None;
+                }
+            }
+            let gw = match deps.llm.read().unwrap().clone() {
+                Some(g) if g.role(Role::Decision).is_some() => g,
+                _ => {
+                    debug!(chat_id = %m.chat_id, "Decision 角色不可用");
+                    return Some(decision::DecisionFailure {
+                        reason: "Decision角色未配置，请在模型服务绑定模型".into(),
+                        terminal: true,
+                    });
+                }
+            };
+            // 成本闸热应用：prefilter 槽 → gateway（每条对齐一次，换槽/调参即生效）
+            gw.set_cost_per_min(pf.decision_cost_per_min.max(1) as usize);
             if decision::is_directed(m, &snapshot) {
                 match tokio::time::timeout(
                     // Up to three bounded 40s image observations, plus DB work.
                     std::time::Duration::from_secs(125),
                     crate::vision::observe_with_memes(
-                        &deps.db_path, &gw, m, &snapshot, &deps.memes_dir,
+                        &deps.db_path,
+                        &gw,
+                        m,
+                        &snapshot,
+                        &deps.memes_dir,
                     ),
                 )
                 .await
@@ -1307,7 +1322,7 @@ mod tests {
         assert_eq!(sent[5].segments[0]["data"]["qq"], "1");
         assert_eq!(
             sent[5].segments[1]["data"]["text"].as_str().unwrap().trim(),
-            "在呢，想让我帮你做什么？"
+            "在呢。"
         );
     }
     use crate::db::params;

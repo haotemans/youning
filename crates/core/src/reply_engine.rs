@@ -1540,7 +1540,10 @@ pub async fn prepare_and_enqueue(
     let mode_hint = out.reply_mode.instruction();
     let social = out.reply_mode == crate::engagement::ReplyMode::Social;
     let inventory = out.meme_requested;
-    let routing_hint = if inventory {
+    let attention_only = snapshot.dialogue["attention_request"].is_object();
+    let routing_hint = if attention_only {
+        "当前是用户补发单独@，结合dialogue.attention_request.source接上原问题，只输出文字回复，不输出execution_request、不重新执行旧工具/任务。原问题确实需要执行动作时只澄清本次要执行的具体要求。"
+    } else if inventory {
         "本轮用户索取库存表情，只用可用图包和真实::meme指令，可简短配文；不提出execution_request，不调用生图或派工，不用动作描述冒充发图。要云团自己的表情就选self图包，缺货则直说。"
     } else if social {
         "本轮只输出自然接话正文，尽量100字内、最多240字，一泡。不输出执行需求、工具JSON或内部决策；不合适开口可以留空，不输出‘忽略’等解释。"
@@ -1577,7 +1580,9 @@ pub async fn prepare_and_enqueue(
             .await
             .context("bot_chat 空正文重试失败")?;
     }
-    debug!(
+    info!(
+        chat_id = %msg.chat_id,
+        anchor_msg_id = msg.msg_id,
         k_used = ctx.k_used,
         elapsed_ms = started.elapsed().as_millis() as u64,
         "bot_chat 生成完成"
@@ -1585,7 +1590,7 @@ pub async fn prepare_and_enqueue(
     if let Ok(value) = serde_json::from_str::<Value>(raw.trim()) {
         if value["type"] == "execution_request" {
             anyhow::ensure!(
-                !social && !inventory,
+                !social && !inventory && !attention_only,
                 "自然接话或库存表情请求不产生执行需求"
             );
             let goal = value["goal"].as_str().unwrap_or("").trim();

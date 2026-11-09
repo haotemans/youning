@@ -137,3 +137,10 @@ Context为实际发送来源或精确文件命中附加registered_asset，包含
 视觉请求锚点原文限1000字并标记截断，辅助人物/关系/引文按整体6000字符预算裁剪；仍保留原消息编号和固定图片来源。输出上限4096，普通聊天与Decision原输出预算不变；原40秒/图、3张/轮及总期限保持，不用追加重试或延长总等待掩盖问题。新实现[`vision/registered.rs`](../../../crates/core/src/vision/registered.rs)，回归[`visual_registered.rs`](../../../crates/core/tests/visual_registered.rs)覆盖已知图零视觉调用、陌生图不继承名字、来源与字节校验、会话隔离、纠正、预算及失败恢复。
 
 这次生产记录核对表明引用正确且原图与图库128完全相同，但模型观察在40秒被取消；相同原图使用紧凑请求的真实接口探测6.3秒返回有效描述，未发送QQ消息。新宿主匹配与完整QQ回复仍按部署后实际行为验收，不以该探测代替发送成功。
+
+
+## 补发@的待答上下文
+
+[`crates/core/src/context_builder/conversation.rs`](../../../crates/core/src/context_builder/conversation.rs)在同一快照内补充`dialogue.attention_request.source`：仅关联当前作者在同一chat_id/chat_type、当前消息之前近5分钟的最近非空发言，且未被实际Bot发送记录回答。它与`anchor`分别保留真实消息编号、作者、时间和原文截断标记；`execution_authorization=false`，不会把旧指令拼进当前原话。明确面向其他人、过期或已有回答的发言不命中，后来的消息不能进入旧快照；参考保留在固定JSON字段，不依赖最近消息列表是否被裁剪。
+
+`dialogue.pending_requests`最多3条该作者尚处于deciding/executing的请求，正文最多160字。真实状态不等于成功凭据，不能据此编造“加载卡住”等原因。普通群聊仍每30秒判断增量，@仍走即时入口；不把30天原文全量塞进上下文。详见[会话调度](conversation.md)。新增`bot_context`与`dispatch_tests`回归覆盖归属、上界、在途请求和已答去重；真实模型选择与QQ送达需另行验收。
