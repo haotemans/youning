@@ -12,6 +12,7 @@ use sqlx::Row;
 use std::{path::Path, time::Duration};
 
 mod cache;
+mod registered;
 pub use cache::{refresh, store_corrections, ImageCorrection};
 
 const PROMPT: &str = r#"你是云团的图片观察器。结合当前消息、本人已确认资料和会话关系理解用途，观察附图，输出严格 JSON：{"summary":"可见内容，最多400字","visible_text":"与当前问题相关的图中文字，最多600字","uncertainty":"看不清、来源或关联不确定处，最多200字"}。
@@ -85,14 +86,14 @@ pub async fn context(
         cutoff.into(),
     ];
     binds.extend(ids.iter().copied().map(Into::into));
-    let mut rows = conn.prepare(&format!("SELECT i.msg_id,i.image_index,i.status,i.observation,m.sender_pid,i.content_hash
+    let mut rows = conn.prepare(&format!("SELECT i.msg_id,i.image_index,i.status,i.observation,m.sender_pid,i.content_hash,i.meme_id
         FROM message_images i JOIN messages m ON m.msg_id=i.msg_id
         WHERE m.chat_id=?1 AND m.chat_type=?2 AND m.msg_id<=?3 AND i.msg_id IN ({placeholders}) ORDER BY i.image_index LIMIT 312")).await?
-        .query_map(crate::db::params_from_iter(binds), |r| Ok((r.try_get::<i64,_>(0)?,r.try_get::<i64,_>(1)?,r.try_get::<String,_>(2)?,r.try_get::<Option<String>,_>(3)?,r.try_get::<String,_>(4)?,r.try_get::<Option<String>,_>(5)?))).await?
+        .query_map(crate::db::params_from_iter(binds), |r| Ok((r.try_get::<i64,_>(0)?,r.try_get::<i64,_>(1)?,r.try_get::<String,_>(2)?,r.try_get::<Option<String>,_>(3)?,r.try_get::<String,_>(4)?,r.try_get::<Option<String>,_>(5)?,r.try_get::<Option<i64>,_>(6)?))).await?
         .collect::<sqlx::Result<Vec<_>>>()?;
     rows.sort_by_key(|r| ids.iter().position(|id| *id == r.0));
     let mut result = Vec::new();
-    for (id, index, status, raw, sender, hash) in rows.into_iter().take(6) {
+    for (id, index, status, raw, sender, hash, meme_id) in rows.into_iter().take(6) {
         let correction =
             cache::corrected(conn, chat, kind, cutoff, id, index, hash.as_deref()).await?;
         let observation = if let Some(v) = &correction {
@@ -111,10 +112,18 @@ pub async fn context(
             o
         });
         let ready = observation.is_some();
+        let registered_asset = registered::metadata(conn, meme_id)
+            .await?
+            .map(|a| a.context(&sender));
+        let failure = if ready {
+            None
+        } else {
+            cache::failure(conn, id, index).await?
+        };
         result.push(json!({"source_msg_id":id,"image_index":index,"shared_by":sender,
             "status":if ready {"ready"} else {&status},
             "representation":if ready {"text"} else if status=="pending" {"unseen"} else {"unavailable"},
-            "observation":observation,"correction":correction,
+            "observation":observation,"correction":correction,"registered_asset":registered_asset,"failure":failure,
             "evidence_kind":"visual_observation","identity_confirmed":false}));
     }
     Ok(result)
@@ -174,38 +183,22 @@ pub async fn observe_with_memes(
         if claimed == 0 {
             continue;
         }
-        let user = json!({"message":snapshot.anchor,"source_msg_id":target,"quoted_messages":snapshot.quoted_messages,
-            "person_context":snapshot.participants.iter().filter(|p|p["person_id"]==msg.sender_pid).chain(snapshot.participants.iter().filter(|p|p["person_id"]!=msg.sender_pid)).take(8).collect::<Vec<_>>(),"relationships":snapshot.relationships}).to_string();
+        let user = observation_request(snapshot, msg, target);
         let result = tokio::time::timeout(Duration::from_secs(40), async {
-            let png = if let Some(id) = meme_id {
+            let bytes = if let Some(id) = meme_id {
                 let file: String = sqlx::query_scalar(
                     "SELECT file FROM meme_library WHERE id=?1 AND status='active'",
                 )
                 .bind(id)
                 .fetch_one(&mut *conn)
                 .await?;
-                let relative = Path::new(&file);
-                ensure!(
-                    relative
-                        .components()
-                        .all(|c| matches!(c, std::path::Component::Normal(_))),
-                    "图片路径无效"
-                );
-                let root = tokio::fs::canonicalize(memes).await?;
-                let path = tokio::fs::canonicalize(root.join(relative)).await?;
-                ensure!(path.starts_with(&root) && path.is_file(), "图片路径无效");
-                use tokio::io::AsyncReadExt;
-                let mut bytes = Vec::new();
-                tokio::fs::File::open(path)
-                    .await?
-                    .take(8 * 1024 * 1024 + 1)
-                    .read_to_end(&mut bytes)
-                    .await?;
-                tokio::task::spawn_blocking(move || LlmGateway::encode_image_pixels(bytes))
-                    .await??
+                registered::read_file(memes, &file).await?
             } else {
-                llm.image_pixels(&url).await?
+                llm.image_bytes(&url).await?
             };
+            let asset = registered::find(&mut conn, memes, &bytes).await?;
+            let png = tokio::task::spawn_blocking(move || LlmGateway::encode_image_pixels(bytes))
+                .await??;
             let hash = crate::meme::compute_md5(&png);
             conn.execute(
                 "UPDATE message_images SET content_hash=?1 WHERE msg_id=?2 AND image_index=?3",
@@ -225,6 +218,14 @@ pub async fn observe_with_memes(
             .is_some()
             {
                 return Ok::<_, anyhow::Error>(None);
+            }
+            if let Some(asset) = asset {
+                conn.execute(
+                    "UPDATE message_images SET meme_id=?1 WHERE msg_id=?2 AND image_index=?3",
+                    params![asset.id, target, index],
+                )
+                .await?;
+                return Ok::<_, anyhow::Error>(Some(asset.observation()));
             }
             if let Some(o) =
                 cache::reuse(&mut conn, msg, snapshot.cutoff, target, index, &hash).await?
@@ -258,11 +259,35 @@ pub async fn observe_with_memes(
             );
         }
         let status = if failure.is_none() { "ready" } else { "failed" };
-        conn.execute("UPDATE message_images SET status=?1,observation=?2,observed_at=unixepoch() WHERE msg_id=?3 AND image_index=?4",
+        let mut tx = conn.begin_immediate().await?;
+        tx.execute("UPDATE message_images SET status=?1,observation=?2,observed_at=unixepoch() WHERE msg_id=?3 AND image_index=?4",
             params![status,observation.map(|o| serde_json::to_string(&o)).transpose()?,target,index]).await?;
+        cache::record_failure(&mut tx, target, index, failure).await?;
+        tx.commit().await?;
         changed = true;
     }
     Ok(changed)
+}
+
+fn observation_request(
+    snapshot: &ReplySnapshot,
+    msg: &MessageReceivedPayload,
+    target: i64,
+) -> String {
+    let mut anchor = serde_json::to_value(&snapshot.anchor).expect("serialize message");
+    anchor["text"] = json!(msg.text.chars().take(1000).collect::<String>());
+    anchor["text_truncated"] =
+        json!(snapshot.anchor.text_truncated || msg.text.chars().count() > 1000);
+    let mut user = json!({"message":anchor,"source_msg_id":target,"quoted_messages":snapshot.quoted_messages,
+        "person_context":snapshot.participants.iter().filter(|p|p["person_id"]==msg.sender_pid).chain(snapshot.participants.iter().filter(|p|p["person_id"]!=msg.sender_pid)).take(8).collect::<Vec<_>>(),"relationships":snapshot.relationships});
+    for key in ["person_context", "relationships", "quoted_messages"] {
+        while user.to_string().chars().count() > 6000 {
+            if user[key].as_array_mut().is_none_or(|a| a.pop().is_none()) {
+                break;
+            }
+        }
+    }
+    user.to_string()
 }
 
 /// Candidate association is bounded, same conversation and does not assert that

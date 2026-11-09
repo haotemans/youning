@@ -91,3 +91,5 @@ V7 增加成功发送气泡的本地 `reply_anchor_id`，用来定位当时的�
 存储、增量与历史版本的详细约束见[记忆功能](../features/core/memory.md)和[ADR-0011](../adr/0011-incremental-memory-storage.md)。已知来源的话题记忆按会话类型与编号筛选；旧来源不明的记录保留不确定性，不猜测来源。
 
 图片条目与有据纠正的当前契约见[记忆功能](../features/core/memory.md)：Decision输入images，Chat输入visual_context，二者共享固定来源和上界；已观察或纠正条目以文字复用。
+
+visual_context中的registered_asset表示宿主确认的图库登记来源，而非现实人脸身份；failure区分服务未取得观察结果的类别，不能据此说图片模糊。字段与缓存规则以[记忆功能](../features/core/memory.md)为准。

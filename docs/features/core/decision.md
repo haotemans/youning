@@ -56,3 +56,5 @@ social只允许简短正文或现有表情，不授权技能、派工和任务�
 表情选择增加meme_scope（self/other/prefer_self）、meme_requested和reply附图计划；类别与指定图包均验证当前active库存。明确索取需当前请求原话、Bot对象及高把握意图，不因“你自己的呢”脱离上下文而启动NAI。库存请求与执行动作冲突时降为图库/文字处理；新画面请求保留技能授权。主动群聊表情采用social参与路径；当模型省略模式但已选择公开分享/玩梗的库存表情时，Runtime补全social，仍验证依据、热度和频率，不升级ignore，也不沿用答疑的新知识门槛；policy版本5记录meme_plan作为计划，不当作送达凭据；节奏、库存及反例见[表情功能](memes.md)与[ADR-0017](../../adr/0017-owned-meme-participation.md)。
 
 Decision输入增加`images`结构化图片资料（最多3项），已看过或已纠正的图片以文字表示，并携带原消息/图片序号及关联方式；不向文本Decision传临时URL、本地路径或重复像素。可选输出`image_corrections`由宿主逐项核对当前原话后追加保存，只有实际接受的纠正进入后续Chat语境，不新增分类器循环。边界与缓存规则集中在[记忆功能](memory.md#图片引用复用与纠正v15)。
+
+images增加registered_asset与failure：登记信息来自宿主的实际发送或完整原文件匹配，可回答已登记虚构角色名称；不绑定分享者的现实身份，也不按相似外观命中。timeout等服务失败采用state_uncertainty说明未取得结果，不把它误写为图片模糊。详细来源、缓存和纠正边界见[记忆功能](memory.md)。
