@@ -87,6 +87,9 @@ jobs:
         run: |
           cargo test --locked -p yuantuan-plugin-moderator
           cargo test --locked -p yuantuan-adapter-qq --lib moderation
+          cargo test --locked -p yuantuan-core --lib bot::dispatch_tests
+          cargo test --locked -p yuantuan-core --lib engagement::tests
+          cargo test --locked -p yuantuan-core --test bot_context
           cargo test --locked -p yuantuan-core --test membership
           cargo test --locked -p yuantuan-core --lib owned_
           cargo test --locked -p yuantuan-core --test visual_context --test visual_followup --test visual_registered

@@ -63,3 +63,12 @@ V12接入有界Chat→Decision再路由、按需历史检索、来源受限人�
 无模型插件命令回归通过BubbleSent成功事件确认所有交付完成，再独立断言队列关闭；不把Fake传输先写入请求列表当作持久化/回执已经完成，避免短关闭期限与合法SQLite收尾竞争。生产队列与超时保持原行为。
 
 定向图片入口补齐“先图后问”和对已发库存图的回看，保持单轮125秒/最多3张和原有即时、周期分工；周期判断只读取已缓存的图片文字。Decision有据纠正保存后，执行回复前按同一会话与消息上界刷新视觉语境，避免当轮Chat继续复述旧的错误观察。具体来源与缓存契约见[记忆功能](memory.md)。
+
+
+## 单独@与连续追问
+
+单独@不再无条件绕过上下文：宿主固定当前anchor，关联同一作者、同一会话近5分钟最近一条尚未实际回复的非空发言。忽略过的普通消息仍可成为参考；跨人、跨群/私聊、过期、明确@他人或已经有发送记录的问题不借用。无关联时仅回复“在呢。”；关联请求真实处于deciding/executing时仅说明上一条仍在处理，不新增模型调用或重复执行。其他有参考的@进入既有Decision→Chat，旧文字不替换当前anchor、不充当执行授权。
+
+`dialogue.pending_requests`来自固定快照内当前作者的真实判断/执行状态，最多3项，每项正文160字并标记截断。它可以说明请求尚在处理，不能证明卡死、故障原因或已完成。关联与上下文边界见[记忆功能](memory.md)，普通文字承接策略见[参与判断](decision.md)。
+
+回归：`bot::dispatch_tests::bare_mention_reads_ignored_question_and_does_not_duplicate_inflight_work`与`bot_context::bare_attention_retains_unanswered_same_author_input_without_replacing_the_anchor`复现先提问再补@，属于mock/本地数据库验证，不能作为真实QQ时延证明。

@@ -115,6 +115,8 @@ images仅是图片观察，shared_by 只是分享者；不可据此认脸、把�
 - confidence: low / medium / high（对语境判断的把握，不是概率）；benefit: low / medium / high（解答、接话或情绪回应的具体价值）
 - novelty: new / repeated / unclear；new可以是新的回应角度，不要求每次增加知识；repeated指复读别人或自己，同样内容已经有人回答时别重复抢答
 - evidence: sufficient / missing / conflicting / not_needed；一般知识不需要个人历史记录可 not_needed，过去活动/执行结果无依据只能 missing
+- 当前anchor仅是补发的@且dialogue.attention_request存在时，结合source回答该作者刚才尚未答复的原问题；这不等于重新授权旧命令，不能invoke_skill、start_task或task_control。pending_requests只说明快照时请求还在判断/执行，不证明已完成或具体故障。
+- 一般概念、用法和少量常见例子可直接回答；不要仅因提到产品或模型名称就搜索。用户要求最新、具体版本、价格、来源核实或现有资料不足时才选择信息检索；不能把通用知识冒充最新实测。
 - evidence_msg_ids: 1–6 个本次可见的消息 ID，必须包含 anchor.msg_id；承接你对同一个人的上一回复时也引用 dialogue.last_reply_to_sender.msg_id。不能引用人物记忆里的远期编号或自造 ID
 reply_mode: answer / clarify / state_uncertainty / social；social用于不执行工具的自然接话，公开分享、轻松互动与共情不必等人叫你；缺必要信息用 clarify，历史事实无法确认用 state_uncertainty，避免额外闲聊追问。
 
@@ -359,7 +361,10 @@ fn parse_model_output(
     ]
     .iter()
     .all(|key| value[*key].is_null() || value[*key].as_str().is_some_and(|v| v.trim().is_empty()))
-        && (value["image_corrections"].is_null() || value["image_corrections"].as_array().is_some_and(|a|a.is_empty()))
+        && (value["image_corrections"].is_null()
+            || value["image_corrections"]
+                .as_array()
+                .is_some_and(|a| a.is_empty()))
         && (value["profile_updates"].is_null()
             || value["profile_updates"]
                 .as_array()
@@ -739,7 +744,11 @@ async fn finish_decision(
                     information_lookup,
                     anchor_id: msg.msg_id,
                     visible_ids: &visible_ids,
-                    linked_reply_id: snapshot.dialogue["last_reply_to_sender"]["msg_id"].as_i64(),
+                    linked_reply_id: if explicitly_addressed_to_other(msg, snapshot) {
+                        None
+                    } else {
+                        snapshot.dialogue["last_reply_to_sender"]["msg_id"].as_i64()
+                    },
                     reply_age: seconds_since_last_reply(db_path, msg).await,
                     bot_bubbles_5min: snapshot.scene["my_replies_last_5min"].as_i64().unwrap_or(0),
                     activity: activity.as_ref(),
@@ -956,6 +965,22 @@ fn enforce_action_contract(
     information_lookup: bool,
 ) {
     use crate::engagement::{Audience, Continuity, Intent, Level};
+    if snapshot.dialogue["attention_request"].is_object() {
+        out.task_control = None;
+        out.task_plan = None;
+        out.task_goal = None;
+        out.skill_name = None;
+        out.skill_slots = None;
+        out.request_quote = None;
+        if matches!(
+            out.action,
+            DecisionAction::StartTask | DecisionAction::InvokeSkill
+        ) {
+            out.action = DecisionAction::Reply;
+            out.reason = "补发@只承接原问题的文字回应，不重新授权旧执行动作".into();
+        }
+        return;
+    }
     if !matches!(
         out.action,
         DecisionAction::StartTask | DecisionAction::InvokeSkill
@@ -1197,6 +1222,16 @@ fn visible_message_ids(ctx: &Value) -> std::collections::BTreeSet<i64> {
                 if let Some(id) = row["msg_id"].as_i64() {
                     ids.insert(id);
                 }
+            }
+        }
+    }
+    if let Some(id) = ctx["dialogue"]["attention_request"]["source"]["msg_id"].as_i64() {
+        ids.insert(id);
+    }
+    if let Some(rows) = ctx["dialogue"]["pending_requests"].as_array() {
+        for row in rows {
+            if let Some(id) = row["message"]["msg_id"].as_i64() {
+                ids.insert(id);
             }
         }
     }

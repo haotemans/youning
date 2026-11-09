@@ -93,3 +93,6 @@ V7 增加成功发送气泡的本地 `reply_anchor_id`，用来定位当时的�
 图片条目与有据纠正的当前契约见[记忆功能](../features/core/memory.md)：Decision输入images，Chat输入visual_context，二者共享固定来源和上界；已观察或纠正条目以文字复用。
 
 visual_context中的registered_asset表示宿主确认的图库登记来源，而非现实人脸身份；failure区分服务未取得观察结果的类别，不能据此说图片模糊。字段与缓存规则以[记忆功能](../features/core/memory.md)为准。
+
+
+补发@的JSON扩展：`dialogue.attention_request.source`保留同一作者近5分钟未答原话，`execution_authorization=false`；`dialogue.pending_requests`保留最多3条当前作者实际deciding/executing状态，正文160字。anchor、作者与快照上界不变，不能把旧话重放成工具授权。规范见[记忆功能](../features/core/memory.md)与[会话调度](../features/core/conversation.md)。

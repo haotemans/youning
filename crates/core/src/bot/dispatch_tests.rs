@@ -392,3 +392,52 @@ async fn public_social_batch_can_reply_without_at_interest_or_new_knowledge() {
     assert_eq!(event.policy.cooldown_secs, Some(90));
     assert_eq!(event.policy.activity.unwrap().active_speakers_2min, 2);
 }
+
+#[tokio::test]
+async fn bare_mention_reads_ignored_question_and_does_not_duplicate_inflight_work() {
+    let model = Model::default();
+    model.quiet.store(true, Ordering::SeqCst);
+    let deps = fixture(model.clone()).await;
+    let question = message(&deps, false, "p_1", "sd系列的大模型支持画师串吗").await;
+    let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
+    conn.execute(
+        "UPDATE messages SET decision_state='done',processed_at=?1 WHERE msg_id=?2",
+        params![question.ts, question.msg_id],
+    )
+    .await
+    .unwrap();
+    let attention = message(&deps, true, "p_1", " ").await;
+    assert!(handle_inner(&deps, &attention, attention.msg_id)
+        .await
+        .is_none());
+    {
+        let inputs = model.inputs.lock().unwrap();
+        assert_eq!(inputs.len(), 1, "有未答上下文的@不能走固定招呼语");
+        assert_eq!(inputs[0]["anchor"]["msg_id"], attention.msg_id);
+        assert_eq!(
+            inputs[0]["dialogue"]["attention_request"]["source"]["msg_id"],
+            question.msg_id
+        );
+        assert_eq!(
+            inputs[0]["dialogue"]["attention_request"]["source"]["text"],
+            question.text
+        );
+    }
+    conn.execute(
+        "UPDATE messages SET decision_state='executing',processed_at=NULL WHERE msg_id=?1",
+        params![question.msg_id],
+    )
+    .await
+    .unwrap();
+    let waiting = message(&deps, true, "p_1", " ").await;
+    assert!(handle_inner(&deps, &waiting, waiting.msg_id)
+        .await
+        .is_none());
+    let fresh = message(&deps, true, "p_2", " ").await;
+    assert!(handle_inner(&deps, &fresh, fresh.msg_id).await.is_none());
+    assert_eq!(
+        model.inputs.lock().unwrap().len(),
+        1,
+        "在途任务和无关联的招呼都不新增模型请求"
+    );
+}

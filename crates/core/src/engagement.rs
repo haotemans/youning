@@ -234,13 +234,35 @@ pub fn apply(out: &mut DecisionOutput, input: &PolicyInput<'_>, trace: &mut Poli
         }
         return;
     }
+    let text_continuation = matches!(out.action, DecisionAction::Reply | DecisionAction::SendMeme)
+        && input
+            .linked_reply_id
+            .is_some_and(|id| input.visible_ids.contains(&id))
+        && a.audience == Audience::Bot
+        && matches!(
+            a.intent,
+            Intent::Question | Intent::FollowUp | Intent::Request | Intent::Correction
+        )
+        && a.continuity == Continuity::Continuing
+        && a.confidence != Level::Low;
     let group_social = social && input.is_group && a.audience == Audience::Group;
-    if !input.direct && a.intent == Intent::FollowUp && !linked_followup && !group_social {
+    if !input.direct
+        && a.intent == Intent::FollowUp
+        && !linked_followup
+        && !text_continuation
+        && !group_social
+    {
         suppress(out, trace, "隐式承接缺少同一人的近期回复关联");
         return;
     }
     // 模型声称 audience=bot 不能单独绕过频率限制；免冷却需要真实承接或协议/明确称呼。
-    let directed = input.direct || linked_followup;
+    let directed = input.direct || linked_followup || text_continuation;
+    if text_continuation && !linked_followup {
+        trace.notes.push(
+            "同一作者的真实近期回复可承接文字对话，不要求重复引用Bot消息编号；不增加执行授权"
+                .into(),
+        );
+    }
     if linked_followup {
         trace.notes.push("依据真实回复归属承接同一人的对话".into());
     }
@@ -366,7 +388,7 @@ mod tests {
             "同一个人的无问号简短回答可承接"
         );
         out.action = DecisionAction::Reply;
-        ctx.linked_reply_id = Some(3);
+        ctx.linked_reply_id = None;
         apply(&mut out, &ctx, &mut PolicyTrace::default());
         assert_eq!(
             out.action,
@@ -381,6 +403,56 @@ mod tests {
         assert_eq!(out.action, DecisionAction::Ignore);
         assert_eq!(trace.evidence_valid, Some(false));
     }
+    #[test]
+    fn host_link_supports_text_continuation_without_weakening_skill_evidence() {
+        let ids = BTreeSet::from([1, 2]);
+        let mut ctx = input(&ids);
+        ctx.reply_age = Some(0);
+        for intent in [Intent::Question, Intent::FollowUp, Intent::Correction] {
+            let mut out = output();
+            let a = out.assessment.as_mut().unwrap();
+            a.audience = Audience::Bot;
+            a.intent = intent;
+            a.continuity = Continuity::Continuing;
+            a.benefit = Level::Medium;
+            a.confidence = Level::Medium;
+            // Only the current question was cited. The visible host link is still real.
+            a.evidence_msg_ids = vec![1];
+            apply(&mut out, &ctx, &mut PolicyTrace::default());
+            assert_eq!(out.action, DecisionAction::Reply);
+            for missing in [None, Some(999)] {
+                let mut blocked = out.clone();
+                ctx.linked_reply_id = missing;
+                apply(&mut blocked, &ctx, &mut PolicyTrace::default());
+                assert_eq!(blocked.action, DecisionAction::Ignore);
+            }
+            ctx.linked_reply_id = Some(2);
+            let mut command = out.clone();
+            command.action = DecisionAction::InvokeSkill;
+            command.assessment.as_mut().unwrap().confidence = Level::High;
+            command.assessment.as_mut().unwrap().intent = Intent::FollowUp;
+            apply(&mut command, &ctx, &mut PolicyTrace::default());
+            assert_eq!(
+                command.action,
+                DecisionAction::Ignore,
+                "旧命令仍需严格同人引用依据"
+            );
+            for (audience, continuity, confidence) in [
+                (Audience::Other, Continuity::Continuing, Level::High),
+                (Audience::Bot, Continuity::Closing, Level::High),
+                (Audience::Bot, Continuity::Continuing, Level::Low),
+            ] {
+                let mut blocked = out.clone();
+                let a = blocked.assessment.as_mut().unwrap();
+                a.audience = audience;
+                a.continuity = continuity;
+                a.confidence = confidence;
+                apply(&mut blocked, &ctx, &mut PolicyTrace::default());
+                assert_eq!(blocked.action, DecisionAction::Ignore);
+            }
+        }
+    }
+
     #[test]
     fn participation_depends_on_help_and_load_instead_of_question_punctuation() {
         let ids = BTreeSet::from([1]);
