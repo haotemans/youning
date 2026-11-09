@@ -524,6 +524,12 @@ impl LlmGateway {
 
     /// Download and normalize once, before looking up a scoped image cache.
     pub async fn image_pixels(&self, url: &str) -> Result<Vec<u8>> {
+        let bytes = self.image_bytes(url).await?;
+        tokio::task::spawn_blocking(move || Self::encode_image_pixels(bytes)).await?
+    }
+
+    /// Original bounded bytes are needed for exact registered-asset matching.
+    pub async fn image_bytes(&self, url: &str) -> Result<Vec<u8>> {
         let parsed = reqwest::Url::parse(url)?;
         anyhow::ensure!(
             matches!(parsed.scheme(), "http" | "https")
@@ -559,7 +565,7 @@ impl LlmGateway {
             anyhow::ensure!(bytes.len() + chunk.len() <= MAX_IMAGE_BYTES, "图片超过8MB");
             bytes.extend_from_slice(&chunk);
         }
-        tokio::task::spawn_blocking(move || Self::encode_image_pixels(bytes)).await?
+        Ok(bytes)
     }
 
     pub fn encode_image_pixels(bytes: Vec<u8>) -> Result<Vec<u8>> {
@@ -599,11 +605,13 @@ impl LlmGateway {
         user: &str,
         png: &[u8],
     ) -> Result<String> {
-        self.image_data_request(system, user, png, "low").await
+        self.image_data_request(system, user, png, "low", 8192)
+            .await
     }
 
     pub async fn observe_image_data(&self, system: &str, user: &str, png: &[u8]) -> Result<String> {
-        self.image_data_request(system, user, png, "auto").await
+        self.image_data_request(system, user, png, "auto", 4096)
+            .await
     }
 
     async fn image_data_request(
@@ -612,6 +620,7 @@ impl LlmGateway {
         user: &str,
         png: &[u8],
         detail: &str,
+        max_output_tokens: usize,
     ) -> Result<String> {
         use base64::Engine;
         anyhow::ensure!(
@@ -627,7 +636,8 @@ impl LlmGateway {
             {"type":"text","text":user},
             {"type":"image_url","image_url":{"url":url,"detail":detail}}
         ]);
-        self.chat_content(Role::BotChat, system, parts, true).await
+        self.chat_content_limited(Role::BotChat, system, parts, true, max_output_tokens)
+            .await
     }
 
     async fn chat_content(
@@ -636,6 +646,18 @@ impl LlmGateway {
         system: &str,
         user: Value,
         json_mode: bool,
+    ) -> Result<String> {
+        self.chat_content_limited(role, system, user, json_mode, 8192)
+            .await
+    }
+
+    async fn chat_content_limited(
+        &self,
+        role: Role,
+        system: &str,
+        user: Value,
+        json_mode: bool,
+        max_output_tokens: usize,
     ) -> Result<String> {
         if role == Role::Decision {
             if let Some(reason) = self.decision_blocked_reason() {
@@ -677,7 +699,7 @@ impl LlmGateway {
         );
         let mut body = json!({
             "model": r.model,
-            "max_tokens":8192,
+            "max_tokens":max_output_tokens,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},

@@ -92,7 +92,8 @@
         "crates/core/src/memory/processing.rs",
         "crates/core/src/memory/semantic.rs",
         "crates/core/src/memory/material_cache.rs",
-        "crates/core/src/vision/cache.rs"
+        "crates/core/src/vision/cache.rs",
+        "crates/core/src/vision/registered.rs"
       ],
       "tests": [
         "crates/core/tests/bot_context.rs",
@@ -103,7 +104,8 @@
         "crates/core/tests/profile_refresh.rs",
         "crates/core/tests/memory_storage.rs",
         "crates/core/tests/context_runtime.rs",
-        "crates/core/tests/visual_followup.rs"
+        "crates/core/tests/visual_followup.rs",
+        "crates/core/tests/visual_registered.rs"
       ],
       "module": "core"
     },

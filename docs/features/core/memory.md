@@ -125,3 +125,15 @@ Decision可输出至多3项`image_corrections:{source_msg_id,image_index,descrip
 实现新增[`vision/cache.rs`](../../../crates/core/src/vision/cache.rs)，回归新增[`visual_followup.rs`](../../../crates/core/tests/visual_followup.rs)。本轮真实接口单次探测能描述耳罩与猫耳位置，但返回纯文字；该探测未发送QQ消息，不能替代完整链路验收。
 
 Linux CI在工作区全量回归前先执行visual_context与visual_followup专项，失败时停止后续发布编译。
+
+## 已登记表情的精确来源
+
+收到图片后，在原8MiB下载和解码限制内，先以文件摘要筛选active、added_by=admin、属于云团专属标记的图库候选，再核对图库根内当前文件的完整字节。只有字节完全一致才绑定message_images.meme_id并保存“登记为云团虚构角色表情”的文字；摘要碰撞、近似外观、篡改文件、pending或群聊自动采集均不能产生登记命中。元信息与分享者身份分开，real_person_identity/identity_confirmed不变为真实身份已确认。未知图片继续使用真实像素观察，不通过白发猫耳外观猜名字。
+
+Context为实际发送来源或精确文件命中附加registered_asset，包含character_name、category、owner_person_id及来源；Decision与Chat可直接说明已登记虚构角色归属，不把“未确认现实身份”误解为不能认识自己的表情。这不是新做的画面细节分析；未描述的动作细节仍不能据登记推断。同会话纠正仍优先，公开登记可跨会话识别，私人纠正不跨会话复用。
+
+图片观察失败的安全类别以vision:failure:<msg_id>:<image_index>键保存在state_kv，与观察状态同事务写入；只保存timeout、invalid_observation、image_or_provider，不含URL、正文或模型原错，成功后清除。context.failure可区分服务超时/返回不合规/读取或服务失败；历史未保存原因时保持未知，不补造“图片模糊”。
+
+视觉请求锚点原文限1000字并标记截断，辅助人物/关系/引文按整体6000字符预算裁剪；仍保留原消息编号和固定图片来源。输出上限4096，普通聊天与Decision原输出预算不变；原40秒/图、3张/轮及总期限保持，不用追加重试或延长总等待掩盖问题。新实现[`vision/registered.rs`](../../../crates/core/src/vision/registered.rs)，回归[`visual_registered.rs`](../../../crates/core/tests/visual_registered.rs)覆盖已知图零视觉调用、陌生图不继承名字、来源与字节校验、会话隔离、纠正、预算及失败恢复。
+
+这次生产记录核对表明引用正确且原图与图库128完全相同，但模型观察在40秒被取消；相同原图使用紧凑请求的真实接口探测6.3秒返回有效描述，未发送QQ消息。新宿主匹配与完整QQ回复仍按部署后实际行为验收，不以该探测代替发送成功。

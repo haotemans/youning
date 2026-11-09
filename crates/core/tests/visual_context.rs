@@ -66,6 +66,7 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
         async move {
             seen.fetch_add(1,Ordering::Relaxed);
             assert_eq!(body["tool_choice"], "none");
+            assert_eq!(body["max_tokens"],4096);
             assert_eq!(body["response_format"]["type"],"json_object");
             let parts = body["messages"][1]["content"].as_array().unwrap();
             let ctx:Value = serde_json::from_str(parts[0]["text"].as_str().unwrap()).unwrap();
@@ -181,6 +182,7 @@ async fn images_and_person_context_share_sources_without_promoting_visual_guesse
         .await
         .unwrap();
     assert_eq!(failed[0]["status"], "failed");
+    assert_eq!(failed[0]["failure"], "invalid_observation");
     assert!(failed[0]["observation"].is_null());
     conn.execute_batch("INSERT INTO messages(msg_id,chat_id,chat_type,sender_pid,text,ts,reply_to) VALUES(7,'g','group','p_a','这张截图还记得吗',7,103);").await.unwrap();
     msg.msg_id = 7;

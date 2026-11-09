@@ -143,3 +143,40 @@ pub async fn refresh(db: &Path, snapshot: &mut ReplySnapshot) -> Result<()> {
     }
     Ok(())
 }
+
+fn failure_key(source: i64, index: i64) -> String {
+    format!("vision:failure:{source}:{index}")
+}
+
+pub(super) async fn record_failure(
+    c: &mut sqlx::SqliteConnection,
+    source: i64,
+    index: i64,
+    failure: Option<&str>,
+) -> Result<()> {
+    let key = failure_key(source, index);
+    if let Some(code) = failure {
+        c.execute("INSERT INTO state_kv(key,value,updated_at) VALUES(?1,?2,unixepoch()) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",params![key,code]).await?;
+    } else {
+        c.execute("DELETE FROM state_kv WHERE key=?1", params![key])
+            .await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn failure(
+    c: &mut sqlx::SqliteConnection,
+    source: i64,
+    index: i64,
+) -> Result<Option<String>> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM state_kv WHERE key=?1")
+        .bind(failure_key(source, index))
+        .fetch_optional(&mut *c)
+        .await?;
+    Ok(value.filter(|s| {
+        matches!(
+            s.as_str(),
+            "timeout" | "invalid_observation" | "image_or_provider"
+        )
+    }))
+}
