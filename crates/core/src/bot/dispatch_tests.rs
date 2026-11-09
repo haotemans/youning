@@ -395,8 +395,8 @@ async fn public_social_batch_can_reply_without_at_interest_or_new_knowledge() {
 
 #[tokio::test]
 async fn bare_mention_reads_ignored_question_and_does_not_duplicate_inflight_work() {
+    // Immediate decisions use the full schema, unlike periodic quiet no-ops.
     let model = Model::default();
-    model.quiet.store(true, Ordering::SeqCst);
     let deps = fixture(model.clone()).await;
     let question = message(&deps, false, "p_1", "sd系列的大模型支持画师串吗").await;
     let mut conn = crate::db::connect(&deps.db_path).await.unwrap();
