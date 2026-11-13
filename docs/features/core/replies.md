@@ -46,3 +46,8 @@ Decision的合法表情计划可与Chat正文合成一次回复，既有Chat表�
 
 
 补发@的普通回复保留`dialogue.attention_request`作为旧问题参考，当前anchor及回复归属不变。本轮只输出文字，不从旧原话重新派工或生成Chat执行请求。生成完成日志提升为INFO并附chat_id、anchor_msg_id、k_used、elapsed_ms，以便将Chat耗时与Decision、技能、发送阶段区分；不记录提示正文。承接来源和去重见[会话调度](conversation.md)。
+
+
+## 后续设计边界
+
+通用文件成果、Chat统一对接与交付回执的目标见 [ADR-0018](../../adr/0018-lightweight-agent-runtime.md)。现有媒体/outbox路径不等于所有文件格式与Docker共享目录均已验收。

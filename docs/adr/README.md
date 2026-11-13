@@ -17,21 +17,18 @@ ADR 保存重要取舍与原因。`accepted` 表示接受该决定，不表示�
 | [0009](0009-semantic-participation-policy.md) | 语义参与判断、回复承接与运行时约束 | 修订问句关键词/固定冷却策略，保留低打扰与任务边界 |
 | [0010](0010-sqlx-sqlite-access.md) | 用 SQLx 异步访问既有 SQLite 数据库 | 保留 V1–V7 数据与业务事务，迁移连接池及整条调用链 |
 | [0011](0011-incremental-memory-storage.md) | 增量记忆批次、原话事实、会话日记和画像版本 | 补充ADR-0008，修订Q9最近窗口抽样，保留旧记忆与当前档案 |
-
 | [0012](0012-context-memory-task-runtime.md) | 按需上下文、有出处语义记忆与可恢复任务 | 补充ADR-0008/0011，修订固定任务预算与静默结果策略 |
-
 | [0013](0013-periodic-decisions.md) | 普通群聊30秒增量判断与定向即时入口 | 修订ADR-0007首锚点窗口及旧逐条回放，保留来源与动作约束 |
-
 | [0014](0014-bounded-decision-failures.md) | 无动作判断不补调、有界失败与配置错误暂停 | 修订ADR-0013无限重排与强制ignore目标，原文保留 |
-
 | [0015](0015-heat-aware-social-participation.md) | 结合群聊热度自然接话，社交参与与工具执行分开 | 部分修订ADR-0009的新知识门槛，保留来源和执行约束 |
-
 | [0016](0016-protocol-target-before-quote-author.md) | 协议确认的请求对象与引用作者分开 | 窄范围纠正other误判，不扩大执行授权 |
-
 | [0017](0017-owned-meme-participation.md) | 专属图包、文字配图及已发送语境 | 补充ADR-0015/0016，不扩大生图与任务授权 |
+| [0018](0018-lightweight-agent-runtime.md) | Docker部署的轻量通用Agent、工作记忆与任务交接 | accepted；目标设计待实现，细化ADR-0012 |
 
 编号保持稳定，修订和取代关系遵循[治理协议](../governance.md)。
 
 ## 修订记录
+
+- 2026-11-13：新增ADR-0018目标设计入口，区分设计接受与实现验收。
 
 - 2026-10-09：补充索引与状态解释，保留既有编号及 ADR-0005 的预留状态。

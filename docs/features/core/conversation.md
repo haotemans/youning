@@ -72,3 +72,8 @@ V12接入有界Chat→Decision再路由、按需历史检索、来源受限人�
 `dialogue.pending_requests`来自固定快照内当前作者的真实判断/执行状态，最多3项，每项正文160字并标记截断。它可以说明请求尚在处理，不能证明卡死、故障原因或已完成。关联与上下文边界见[记忆功能](memory.md)，普通文字承接策略见[参与判断](decision.md)。
 
 回归：`bot::dispatch_tests::bare_mention_reads_ignored_question_and_does_not_duplicate_inflight_work`与`bot_context::bare_attention_retains_unanswered_same_author_input_without_replacing_the_anchor`复现先提问再补@，属于mock/本地数据库验证，不能作为真实QQ时延证明。
+
+
+## 后续设计边界
+
+后续Chat/Router/Agent的任务归属和事件交接目标见 [ADR-0018](../../adr/0018-lightweight-agent-runtime.md)。本页的当前30秒周期与即时入口并未因新增设计而改变。

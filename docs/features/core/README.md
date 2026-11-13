@@ -13,10 +13,12 @@
 | [回复分泡与媒体发送](replies.md) | 已实现（代码入口） | 1 |
 | [上下文、长期记忆与每日归纳](memory.md) | 已实现（代码入口） | 10 |
 | [人格与回复示例版本](personality.md) | 已实现（代码入口） | 3 |
-| [Agent 任务与工具执行](tasks.md) | 已实现基础闭环（自动回聊未完成） | 5 |
+| [Agent 任务与工具执行](tasks.md) | 已实现持久执行与结果回聊（需真实环境验收） | 5 |
 | [表情包采集、图库与发送](memes.md) | 已实现流程（偷图需审核） | 3 |
 | [SQLite 数据与事件追踪](storage.md) | 已实现（代码入口） | 3 |
 
 依赖关系：来自 [QQ 接入](../adapter-qq/README.md) 的事件进入对话管线；插件执行能力由 [扩展模块](../extensions/README.md) 注册，管理页面参见 [WebUI](../webui/README.md)。
 
 维护规则：本目录 `README.md` 仅导航，功能变更更新对应的主 MD 及 [映射清单](../catalog.json)，再运行文档检查。
+
+后续跨功能改造目标：[ADR-0018](../../adr/0018-lightweight-agent-runtime.md)（设计已接受，尚未实现）。

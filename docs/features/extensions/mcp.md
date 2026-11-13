@@ -27,3 +27,8 @@
 - [`crates/core/tests/plugin_host.rs`](../../../crates/core/tests/plugin_host.rs)
 
 维护规则：修改上列源码的功能行为时，同一 PR 更新本页；新增、删除或迁移模块时同步更新 `catalog.json`。测试入口只代表可追踪的验证位置，不代表本次执行通过。
+
+
+## 后续设计边界
+
+后续通用工具目录与模型适配目标见 [ADR-0018](../../adr/0018-lightweight-agent-runtime.md)；当前仍为stdio子集，不因规划浏览器服务而自动支持新的远程传输。
