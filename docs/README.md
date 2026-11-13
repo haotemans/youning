@@ -7,6 +7,7 @@
 | 需要了解什么 | 入口 | 内容边界 |
 | --- | --- | --- |
 | **当前功能对应源码与测试** | [功能索引](features/README.md)、[映射清单](features/catalog.json) | 每项功能一个主文档，标明实现状态、主要代码和验证入口；CI 校验结构覆盖 |
+| 后续轻量Agent、工作记忆、工具和Docker闭环 | [ADR-0018](adr/0018-lightweight-agent-runtime.md) | 已接受的目标设计、实现差距和分阶段验收；尚未实施 |
 | 产品目标、系统边界与总体方案 | [总体架构](design/architecture-v0.1.md) | 设计目标，包含尚未落地的能力 |
 | 启动、并发、WebUI 与 QQ 通讯设计 | [运行时设计](design/runtime-design.md) | 设计约束，不以其中的历史进度描述判断完成情况 |
 | 消息实际如何流转、实现有哪些缺口 | [信息流实现参考](reference/message-flow-rules.md) | 实现记录与已知差距，附代码来源和核对范围 |
